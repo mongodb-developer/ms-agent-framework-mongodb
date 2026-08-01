@@ -1,0 +1,75 @@
+version: 2
+updates:
+  - package-ecosystem: "nuget"
+    directory: "/dotnet"
+    schedule:
+      interval: "weekly"
+      day: "thursday"
+      time: "08:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 10
+    groups:
+      agent-framework:
+        patterns:
+          - "Microsoft.Agents.*"
+          - "Microsoft.Extensions.AI*"
+          - "Microsoft.Extensions.VectorData*"
+      mongodb:
+        patterns:
+          - "MongoDB.*"
+    ignore:
+      - dependency-name: "System.*"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "Microsoft.Extensions.*"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "Microsoft.Bcl.*"
+        update-types: ["version-update:semver-major"]
+    labels:
+      - ".NET"
+      - "dependencies"
+    commit-message:
+      prefix: "deps(.NET)"
+
+  - package-ecosystem: "pip"
+    directory: "/python"
+    schedule:
+      interval: "weekly"
+      day: "thursday"
+      time: "08:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 10
+    groups:
+      agent-framework:
+        patterns:
+          - "agent-framework-*"
+      mongodb:
+        patterns:
+          - "pymongo"
+      python-quality:
+        dependency-type: "development"
+        patterns:
+          - "*"
+    labels:
+      - "Python"
+      - "dependencies"
+    commit-message:
+      prefix: "deps(Python)"
+
+  - package-ecosystem: "github-actions"
+    directories:
+      - "/"
+      - "/.github/actions/*"
+    schedule:
+      interval: "weekly"
+      day: "sunday"
+      time: "08:00"
+      timezone: "Etc/UTC"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+    labels:
+      - "dependencies"
+      - "github-actions"
+    commit-message:
+      prefix: "deps(actions)"
