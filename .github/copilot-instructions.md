@@ -79,20 +79,39 @@ Follow [CONTRIBUTING.md](../CONTRIBUTING.md) for specification validation, branc
 - Create a commit only when the user explicitly requests it.
 - Confirm the branch still matches the feature before staging or committing. Never mix changes from another branch scope into the commit.
 - Before coding, map the change to the canonical specifications and implementation-map row, then review its linked ADRs. The specifications authorize the mapped implementation; proposed ADRs record rationale but do not authorize deviations from the specifications.
+- Plan the commit series before broad implementation work. Each commit must be a logically separate changeset that leaves the branch buildable, testable, reviewable, and safe to revert independently.
 - A commit contains one coherent feature slice, fix, refactor, or infrastructure change. If one subject cannot accurately describe the staged diff, split it.
 - Never combine separate product features, RAG modes, language implementations, mechanical refactors, dependency updates, or unrelated cleanup in one commit.
 - Keep commits independently buildable, testable, reviewable, and bisectable. Include focused tests and directly associated documentation for the same behavior.
 - Order commits by dependency: accepted specification/ADR, shared contract, one language implementation, equivalent language implementation, samples/integration coverage, then packaging and release automation.
 - Use `<type>(<scope>): <imperative summary>` with an allowed type and narrow project scope. Keep the subject at 72 characters or fewer.
+- Every non-trivial implementation, fix, refactor, performance, security, public API, schema, index, compatibility, or release commit requires a detailed body after a blank line. Explain why the change is needed, the relevant prior behavior, the chosen implementation and important trade-offs, and the validation performed. Do not merely restate the subject or list changed files.
+- Use commit footers for issue references, acknowledgments, and `BREAKING CHANGE:` migration details. Do not hide breaking behavior only in the body.
+- Do not create placeholder, checkpoint, `WIP`, `fixup!`, or vague follow-up commits in the final series. Fold corrections into the owning commit only through an explicitly approved history-cleanup operation.
 - Review the staged diff and run `git diff --cached --check`, the narrowest behavior validation, and the affected quality gate before committing.
 - Never commit secrets, local configuration, debug code, unrelated user changes, or knowingly failing tests.
 - Do not create, switch, rename, or delete branches, or amend, rebase, squash, force-push, or otherwise rewrite history without explicit user approval.
 
-## Naming And Documentation
+## Developer Documentation
+
+Developer documentation is a required part of implementation, not a release follow-up. Maintain detailed code-level documentation under `docs/development/`, organized by feature and language, and link it from a local index. Update it in the same commit as the behavior it describes.
+
+- Treat specifications as normative requirements, ADRs as decision rationale, and developer documentation as the maintained explanation of the implemented system. Developer documentation must supplement rather than copy the specifications or ADRs, link to both, and identify the implementation-map slice it realizes.
+- Document architecture and design at the level needed to safely modify the code: module responsibilities, ownership boundaries, dependencies, public framework integration points, control and data flow, and why the implementation uses its chosen abstractions.
+- Document implementation details that are not obvious from public APIs: algorithms, state transitions, invariants, concurrency and idempotency behavior, serialization and mapping rules, validation order, error translation, cancellation, retries and deadlines, and resource ownership and disposal.
+- Document public and extension surfaces with exact symbols and paths: constructors, options, defaults, return types, exceptions, configuration and environment variables, capability gates, privileges, and concise runnable examples.
+- For stored or queried data, document BSON schemas, field semantics, identifiers and scopes, versioning, indexes, filter placement, authorization boundaries, migrations, and compatibility implications. Include representative structured documents or pipelines when they clarify behavior, but never include secrets or production data.
+- Document observability and operations: emitted logs or traces, required redaction, setup and provisioning, expected failure modes, troubleshooting steps, performance-sensitive choices, known limitations, and externally validated prerequisites.
+- Document the verification strategy: focused unit and contract tests, integration fixtures, security assertions, package or sample checks, and the commands that were actually validated. Never claim a command, compatibility range, or deployment behavior that was not verified.
+- Record intentional Python/.NET differences and the equivalent observable behavior that preserves parity. Do not force identical internal structure where language conventions differ.
+- Prefer precise links to source files, symbols, tests, and existing documents over duplicated prose. Use diagrams or tables when they communicate lifecycle, state, schema, or dependency relationships more clearly than paragraphs.
+- Keep documentation current and factual. Remove or revise stale content in the owning code change; do not document speculative behavior as implemented. If code, developer documentation, a specification, and an ADR conflict, stop and resolve the authoritative specification or decision before proceeding.
+- Docstrings, XML documentation, comments, examples, and API references complement developer documentation but do not replace the feature-level design and implementation explanation.
+
+## Naming
 
 - Use `MongoDB Search` and `MongoDB Vector Search` unless a requirement is specifically Atlas-only.
 - Use the canonical public names and package identities in the requirements until an accepted ADR changes them.
-- Document public behavior, configuration defaults, capability gates, required privileges, physical schemas, migration impact, and security-sensitive behavior.
 - Never commit credentials or connection strings. Samples must use documented environment variables and provide clear setup failures.
 
 ## Architectural Decision Records (ADRs)
