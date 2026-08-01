@@ -1,5 +1,17 @@
 """MongoDB integrations for Microsoft Agent Framework."""
 
-from .errors import MongoDBConfigurationError, MongoDBIntegrationError
+from .errors import (
+    MongoDBCapabilityError,
+    MongoDBConfigurationError,
+    MongoDBEmbeddingError,
+    MongoDBIntegrationError,
+    MongoDBMappingError,
+)
 
-__all__ = ["MongoDBConfigurationError", "MongoDBIntegrationError"]
+__all__ = [
+    "MongoDBCapabilityError",
+    "MongoDBConfigurationError",
+    "MongoDBEmbeddingError",
+    "MongoDBIntegrationError",
+    "MongoDBMappingError",
+]

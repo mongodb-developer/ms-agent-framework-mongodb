@@ -7,3 +7,4 @@ This documentation explains the implemented system at the code level. The
 ## Foundation
 
 - [Python package, client ownership, and lifecycle](foundation/python-client-ownership.md)
+- [Python shared validation mechanics](foundation/python-validation.md)
