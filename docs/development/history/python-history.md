@@ -73,3 +73,16 @@ content/additional properties, framework filters and attribution, ordering,
 concurrency, retries, isolation, lifecycle, errors, versions, and explicit indexes.
 The language-neutral contract is
 `python/tests/contracts/fixtures/history_contract.json`.
+
+Credential-gated `python/tests/integration_history/test_history_integration.py`
+uses a uniquely prefixed collection and targeted `finally` cleanup. Run the sample
+with:
+
+```powershell
+python samples\history_quickstart.py
+```
+
+Set `MONGODB_URI`, `MONGODB_DATABASE`, `MONGODB_HISTORY_COLLECTION`,
+`MONGODB_HISTORY_APPLICATION_ID`, `MONGODB_HISTORY_AGENT_ID`, and
+`MONGODB_HISTORY_SESSION_ID`. Set `MONGODB_HISTORY_CLEAR=true` only to clear that
+sample's authorized session.
