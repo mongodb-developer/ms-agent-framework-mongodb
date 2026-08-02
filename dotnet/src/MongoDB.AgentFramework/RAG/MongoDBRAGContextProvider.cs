@@ -20,6 +20,21 @@ namespace MongoDB.AgentFramework;
 /// </remarks>
 public sealed class MongoDBRAGContextProvider : AIContextProvider
 {
+    /// <summary>
+    /// The <see cref="ChatMessage.AdditionalProperties"/> key used to mark a message this adapter generated, so a
+    /// later turn's query-building step can exclude it even if it gets merged back into
+    /// <c>context.AIContext.Messages</c> — otherwise a retrieved chunk could be re-embedded and re-retrieved on a
+    /// subsequent turn, a self-retrieval feedback loop.
+    /// </summary>
+    internal const string GeneratedTagKey = "_rag_generated";
+
+    /// <summary>
+    /// The <see cref="ChatMessage.AdditionalProperties"/> key carrying the complete, immutable
+    /// <see cref="MongoDBRAGResult"/> the message was generated from, so advanced callers can recover metadata and
+    /// the raw document without a narrower, lossy representation.
+    /// </summary>
+    internal const string ResultKey = "_rag_result";
+
     private readonly MongoDBRAGProvider _provider;
     private readonly MongoDBRAGContextProviderOptions _options;
     private readonly ILogger<MongoDBRAGContextProvider> _logger;
@@ -46,17 +61,23 @@ public sealed class MongoDBRAGContextProvider : AIContextProvider
         InvokingContext context,
         CancellationToken cancellationToken)
     {
-        IEnumerable<ChatMessage> messages = context.AIContext.Messages ?? [];
+        // Only non-empty User/Assistant messages become part of the search query: System/Tool messages are framing
+        // or prior retrieved context, not conversational intent, and any message this adapter generated itself
+        // (tagged with GeneratedTagKey, regardless of its role) is excluded so a retrieved chunk can never feed
+        // back into its own retrieval query on a later turn. MaxRecentMessages windows only after this filtering,
+        // so the window always reflects the most recent real conversation turns rather than raw message positions
+        // that might land on framing/generated messages.
+        IEnumerable<ChatMessage> messages = (context.AIContext.Messages ?? [])
+            .Where(static message =>
+                (message.Role == ChatRole.User || message.Role == ChatRole.Assistant) &&
+                !string.IsNullOrWhiteSpace(message.Text) &&
+                message.AdditionalProperties?.ContainsKey(GeneratedTagKey) != true);
         if (_options.MaxRecentMessages is { } window)
         {
             messages = messages.TakeLast(window);
         }
 
-        string query = string.Join(
-            " ",
-            messages
-                .Select(static message => message.Text)
-                .Where(static text => !string.IsNullOrWhiteSpace(text)));
+        string query = string.Join(" ", messages.Select(static message => message.Text));
         if (string.IsNullOrWhiteSpace(query))
         {
             return new AIContext();
@@ -108,6 +129,8 @@ public sealed class MongoDBRAGContextProvider : AIContextProvider
                 ["_rag_score"] = result.Score,
                 ["_rag_source_name"] = result.SourceName,
                 ["_rag_source_url"] = result.SourceUrl,
+                [ResultKey] = result,
+                [GeneratedTagKey] = true,
             },
         };
 }

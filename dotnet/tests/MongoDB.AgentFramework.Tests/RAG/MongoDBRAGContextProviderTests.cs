@@ -223,6 +223,157 @@ public sealed class MongoDBRAGContextProviderTests
         Assert.Equal(["second"], Assert.Single(embeddings.Calls));
     }
 
+    [Fact]
+    public async Task QuerySelectionOnlyIncludesNonEmptyUserAndAssistantMessages()
+    {
+        var state = new RAGCollectionState();
+        var embeddings = new RecordingEmbeddingGenerator();
+        MongoDBRAGProvider provider = CreateProvider(state, embeddings);
+        var contextProvider = new MongoDBRAGContextProvider(provider);
+
+        await contextProvider.InvokingAsync(
+            new AIContextProvider.InvokingContext(
+                new StubAgent(),
+                null,
+                new AIContext
+                {
+                    Messages =
+                    [
+                        new ChatMessage(ChatRole.System, "system prompt"),
+                        new ChatMessage(ChatRole.User, "  "),
+                        new ChatMessage(ChatRole.User, "what color are widgets"),
+                        new ChatMessage(ChatRole.Tool, "unrelated tool output"),
+                        new ChatMessage(ChatRole.Assistant, "widgets ship in blue"),
+                    ],
+                }),
+            default);
+
+        string query = Assert.Single(embeddings.Calls)[0];
+        Assert.Contains("what color are widgets", query);
+        Assert.Contains("widgets ship in blue", query);
+        Assert.DoesNotContain("system prompt", query);
+        Assert.DoesNotContain("unrelated tool output", query);
+    }
+
+    [Fact]
+    public async Task QuerySelectionExcludesProviderGeneratedRagContextPreventingSelfRetrieval()
+    {
+        var state = new RAGCollectionState();
+        var embeddings = new RecordingEmbeddingGenerator();
+        MongoDBRAGProvider provider = CreateProvider(state, embeddings);
+        var contextProvider = new MongoDBRAGContextProvider(provider);
+        var generatedMessage = new ChatMessage(ChatRole.Assistant, "Widgets ship in blue by default.")
+        {
+            AdditionalProperties = new AdditionalPropertiesDictionary
+            {
+                [MongoDBRAGContextProvider.GeneratedTagKey] = true,
+            },
+        };
+
+        await contextProvider.InvokingAsync(
+            new AIContextProvider.InvokingContext(
+                new StubAgent(),
+                null,
+                new AIContext
+                {
+                    Messages =
+                    [
+                        new ChatMessage(ChatRole.User, "what color are widgets"),
+                        generatedMessage,
+                    ],
+                }),
+            default);
+
+        // The generated message carries the deterministic tag even though its role is Assistant, so role
+        // filtering alone would not have excluded it; only tag-based exclusion prevents this self-retrieval
+        // feedback loop.
+        string query = Assert.Single(embeddings.Calls)[0];
+        Assert.Contains("what color are widgets", query);
+        Assert.DoesNotContain("Widgets ship in blue by default.", query);
+    }
+
+    [Fact]
+    public async Task MaxRecentMessagesWindowAppliesAfterFilteringNotBeforeIt()
+    {
+        var state = new RAGCollectionState();
+        var embeddings = new RecordingEmbeddingGenerator();
+        MongoDBRAGProvider provider = CreateProvider(state, embeddings);
+        var contextProvider = new MongoDBRAGContextProvider(
+            provider,
+            new MongoDBRAGContextProviderOptions { MaxRecentMessages = 1 });
+        var generatedMessage = new ChatMessage(ChatRole.Tool, "stale generated context")
+        {
+            AdditionalProperties = new AdditionalPropertiesDictionary
+            {
+                [MongoDBRAGContextProvider.GeneratedTagKey] = true,
+            },
+        };
+
+        await contextProvider.InvokingAsync(
+            new AIContextProvider.InvokingContext(
+                new StubAgent(),
+                null,
+                new AIContext
+                {
+                    Messages =
+                    [
+                        new ChatMessage(ChatRole.User, "first"),
+                        new ChatMessage(ChatRole.Assistant, "second"),
+                        generatedMessage,
+                    ],
+                }),
+            default);
+
+        // If MaxRecentMessages windowed the raw messages before role/tag filtering, the trailing generated Tool
+        // message would be the only one kept by the window and then filtered away entirely, producing an empty
+        // query and no embedding call at all. Filtering first proves "second" -- the most recent real
+        // conversation message -- is what gets embedded.
+        Assert.Equal(["second"], Assert.Single(embeddings.Calls));
+    }
+
+    [Fact]
+    public async Task ContextMessagesCarryCompleteResultInformationInAdditionalProperties()
+    {
+        var state = new RAGCollectionState
+        {
+            Results =
+            [
+                new BsonDocument
+                {
+                    { "_id", "chunk-1" },
+                    { "text", "Widgets ship in blue." },
+                    { "_ragScore", 0.9 },
+                    { "source", new BsonDocument { { "name", "Catalog" }, { "url", "https://example.test/c" } } },
+                    { "category", "docs" },
+                },
+            ],
+        };
+        var options = new MongoDBRAGProviderOptions
+        {
+            SearchMode = MongoDBSearchMode.VectorAnn,
+            MetadataFieldNames = ["category"],
+        };
+        MongoDBRAGProvider provider = CreateProvider(state, options: options);
+        var contextProvider = new MongoDBRAGContextProvider(provider);
+
+        AIContext context = await contextProvider.InvokingAsync(
+            new AIContextProvider.InvokingContext(
+                new StubAgent(),
+                null,
+                new AIContext { Messages = [new ChatMessage(ChatRole.User, "what color are widgets")] }),
+            default);
+
+        ChatMessage message = Assert.Single(
+            context.Messages!,
+            candidate => candidate.AdditionalProperties?.ContainsKey("_rag_id") is true);
+        var result = Assert.IsType<MongoDBRAGResult>(message.AdditionalProperties![MongoDBRAGContextProvider.ResultKey]);
+        Assert.Equal("chunk-1", result.Id);
+        Assert.Equal(0.9, result.Score);
+        Assert.Equal("docs", result.Metadata["category"].AsString);
+        Assert.Equal("docs", result.RawDocument["category"].AsString);
+        Assert.True((bool)message.AdditionalProperties![MongoDBRAGContextProvider.GeneratedTagKey]!);
+    }
+
     private static MongoDBRAGProvider CreateProvider(
         RAGCollectionState state,
         RecordingEmbeddingGenerator? embeddings = null,

@@ -116,13 +116,24 @@ When `NumCandidates` is not explicitly configured for `VectorAnn`, `MongoDBRAGPr
 
 ## `MongoDBRAGContextProvider` before-invoke adapter
 
-`ProvideAIContextAsync` builds the search query by joining the non-empty `Text` of `context.AIContext.Messages`
-(optionally limited to the most recent `MaxRecentMessages` via `.TakeLast`), calls `SearchAsync`, and maps each
-`MongoDBRAGResult` into a `ChatRole.Tool`-tagged `ChatMessage` (**not** `ChatRole.System`/`ChatRole.User` — retrieved
-chunks are data, never instructions) carrying `_rag_id`, `_rag_score`, `_rag_source_name`, and `_rag_source_url` in
-`AdditionalProperties`. `Instructions` is a fixed, provider-configured framing sentence that never contains chunk
-content, so a prompt-injection attempt embedded in a chunk cannot alter the framing instructions themselves — only
-the base `AIContextProvider` class decides how the returned `AIContext` is merged with the agent's other context.
+`ProvideAIContextAsync` builds the search query from `context.AIContext.Messages`, filtered to only non-empty
+`ChatRole.User`/`ChatRole.Assistant` messages that do **not** carry the `MongoDBRAGContextProvider.GeneratedTagKey`
+(`_rag_generated`) marker, then optionally windowed to the most recent `MaxRecentMessages` via `.TakeLast` — in that
+order. Filtering before windowing matters: `System`/`Tool` framing messages and this adapter's own previously
+generated messages must never seed a later turn's query (a self-retrieval feedback loop, where a retrieved chunk
+gets re-embedded and re-retrieved), and windowing the *unfiltered* message list first could otherwise leave the
+window landing entirely on such messages, producing an empty query even when real conversation turns exist just
+before them.
+
+Each `MongoDBRAGResult` maps to a `ChatRole.Tool`-tagged `ChatMessage` (**not** `ChatRole.System`/`ChatRole.User` —
+retrieved chunks are data, never instructions) carrying `_rag_id`, `_rag_score`, `_rag_source_name`, and
+`_rag_source_url` in `AdditionalProperties`, plus two adapter-internal keys: `GeneratedTagKey` (`_rag_generated`,
+`true`) so a later turn's query-building step can recognize and exclude it, and `ResultKey` (`_rag_result`) carrying
+the complete, immutable `MongoDBRAGResult` itself — preserving `Metadata` and `RawDocument` for advanced callers
+without inventing a narrower, lossy representation, since the result type is already fully immutable end to end.
+`Instructions` is a fixed, provider-configured framing sentence that never contains chunk content, so a
+prompt-injection attempt embedded in a chunk cannot alter the framing instructions themselves — only the base
+`AIContextProvider` class decides how the returned `AIContext` is merged with the agent's other context.
 
 Fail-open behavior mirrors ADR 0010/Memory exactly: only `MongoDBRetrievalException`, `MongoDBEmbeddingException`,
 and `MongoDBTimeoutException` are caught (logged as a warning, then an empty `AIContext` is returned).
@@ -153,8 +164,10 @@ Tests live under `dotnet/tests/MongoDB.AgentFramework.Tests/RAG/` and were writt
   alias stripped, `MongoException` translation, cancellation propagation, timeout translation, and a no-write-
   operations guarantee.
 - `MongoDBRAGContextProviderTests` — attributed message shape, empty-query short-circuit, empty-results handling,
-  fail-open behavior for retrieval/embedding/timeout failures, capability-error and cancellation propagation, and
-  recent-message window limiting.
+  fail-open behavior for retrieval/embedding/timeout failures, capability-error and cancellation propagation,
+  recent-message window limiting, query selection restricted to non-empty User/Assistant messages, exclusion of
+  provider-generated (tagged) messages proving no self-retrieval, `MaxRecentMessages` windowing applied after
+  filtering rather than before, and complete result/metadata/raw-document preservation via `AdditionalProperties`.
 - `MongoDBRAGContractTests` — a language-neutral-style contract test (there is no Python RAG implementation yet to
   share a JSON fixture with) asserting that a multi-branch AND/OR `MandatoryFilter` is completely translated inside
   the `$vectorSearch` stage for both ANN and ENN.
