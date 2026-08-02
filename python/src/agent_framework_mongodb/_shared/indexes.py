@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Mapping
+from collections.abc import Awaitable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass
-from typing import Any, Protocol, cast
+from typing import Any, Protocol, TypeVar, cast
 
 from pymongo.errors import ConnectionFailure, OperationFailure, PyMongoError
 from pymongo.operations import SearchIndexModel
@@ -20,6 +21,7 @@ from ..errors import (
     MongoDBIndexMissingError,
     MongoDBIndexNotReadyError,
     MongoDBRetrievalError,
+    MongoDBTimeoutError,
     MongoDBTransientRetrievalError,
 )
 from ..indexing import (
@@ -51,6 +53,49 @@ class _RegularIndexCollection(Protocol):
     async def create_index(self, keys: list[tuple[str, int]], **kwargs: Any) -> str: ...
 
     async def drop_index(self, name: str) -> None: ...
+
+
+_T = TypeVar("_T")
+
+
+class _IndexPollingTimeout(Exception):
+    pass
+
+
+async def _await_before_deadline(awaitable: Awaitable[_T], deadline: float) -> _T:
+    """Await one polling request without asyncio.wait_for cancellation races."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise _IndexPollingTimeout
+    task = asyncio.ensure_future(awaitable)
+    try:
+        done, _ = await asyncio.wait({task}, timeout=remaining)
+    except asyncio.CancelledError:
+        task.cancel()
+        with suppress(asyncio.CancelledError, asyncio.TimeoutError):
+            await task
+        raise
+    if task not in done:
+        task.cancel()
+        with suppress(asyncio.CancelledError, asyncio.TimeoutError):
+            await task
+        raise _IndexPollingTimeout
+    try:
+        return task.result()
+    except asyncio.TimeoutError as exc:
+        raise _IndexPollingTimeout from exc
+    except TimeoutError as exc:
+        raise _IndexPollingTimeout from exc
+
+
+def _polling_timeout(
+    *, label: str, name: str, previous_state: MongoDBIndexState
+) -> MongoDBIndexNotReadyError:
+    return MongoDBIndexNotReadyError(
+        f"{label} index '{name}' was not queryable before timeout; last state: TIMEOUT "
+        f"(previous: {previous_state.name}); remediation: inspect the definition and "
+        "explicitly update or recreate it."
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,12 +183,7 @@ class VectorIndexManager:
             raise
         except PyMongoError as exc:
             raise _translate_index_error(exc) from exc
-        result = await self.inspect_result()
-        if result.state is MongoDBIndexState.MISSING:
-            return MongoDBIndexResult(
-                self.definition, MongoDBIndexState.BUILDING, "ACCEPTED", False
-            )
-        return result
+        return MongoDBIndexResult(self.definition, MongoDBIndexState.BUILDING, "ACCEPTED", False)
 
     async def update(self) -> MongoDBIndexResult:
         """Explicitly submit an update to the expected definition."""
@@ -153,7 +193,7 @@ class VectorIndexManager:
             raise
         except PyMongoError as exc:
             raise _translate_index_error(exc) from exc
-        return await self.inspect_result()
+        return MongoDBIndexResult(self.definition, MongoDBIndexState.BUILDING, "ACCEPTED", False)
 
     async def drop(self) -> None:
         """Explicitly drop the configured index."""
@@ -170,6 +210,10 @@ class VectorIndexManager:
             documents = await cursor.to_list(length=1)
         except asyncio.CancelledError:
             raise
+        except asyncio.TimeoutError as exc:
+            raise MongoDBTimeoutError(
+                f"Vector Search index '{self.expected.name}' inspection timed out."
+            ) from exc
         except PyMongoError as exc:
             raise _translate_index_error(exc) from exc
         return documents[0] if documents else None
@@ -216,6 +260,7 @@ class VectorIndexManager:
     ) -> Mapping[str, Any] | None:
         inspected = await self.inspect()
         definition = self.expected.document()
+        mutated = False
         try:
             if inspected is None:
                 await self._collection.create_search_index(
@@ -225,25 +270,28 @@ class VectorIndexManager:
                         type="vectorSearch",
                     )
                 )
+                mutated = True
             else:
                 self._raise_if_failed(inspected)
                 try:
                     self._validate_definition(inspected)
                 except MongoDBIndexMismatchError:
                     await self._collection.update_search_index(self.expected.name, definition)
+                    mutated = True
         except asyncio.CancelledError:
             raise
         except PyMongoError as exc:
             raise _translate_index_error(exc) from exc
+        if mutated and not wait_until_ready:
+            return _accepted_document(
+                name=self.expected.name,
+                index_type="vectorSearch",
+                definition=definition,
+            )
         if not wait_until_ready:
-            final = await self.inspect()
-            if final is None:
-                raise MongoDBIndexMissingError(
-                    f"Vector Search index '{self.expected.name}' was not inspectable after "
-                    "the ensure command was accepted; inspect it again before use."
-                )
-            self._validate_inspected(final, require_ready=False)
-            return final
+            assert inspected is not None
+            self._validate_inspected(inspected, require_ready=False)
+            return inspected
         return await self.wait_until_ready(timeout=timeout, poll_interval=poll_interval)
 
     async def ensure_result(
@@ -273,18 +321,18 @@ class VectorIndexManager:
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise MongoDBIndexNotReadyError(
-                    f"Vector Search index '{self.expected.name}' was not queryable before "
-                    f"timeout; last state: {last_state.name}; remediation: inspect the "
-                    "definition and explicitly update or recreate it."
+                raise _polling_timeout(
+                    label="Vector Search",
+                    name=self.expected.name,
+                    previous_state=last_state,
                 )
             try:
-                inspected = await asyncio.wait_for(self.inspect(), timeout=remaining)
-            except TimeoutError as exc:
-                raise MongoDBIndexNotReadyError(
-                    f"Vector Search index '{self.expected.name}' was not queryable before "
-                    f"timeout; last state: {last_state.name}; remediation: inspect the "
-                    "definition and explicitly update or recreate it."
+                inspected = await _await_before_deadline(self.inspect(), deadline)
+            except (_IndexPollingTimeout, MongoDBTimeoutError) as exc:
+                raise _polling_timeout(
+                    label="Vector Search",
+                    name=self.expected.name,
+                    previous_state=last_state,
                 ) from exc
             if inspected is None:
                 last_state = MongoDBIndexState.MISSING
@@ -293,19 +341,16 @@ class VectorIndexManager:
                 try:
                     self._validate_inspected(inspected, require_ready=True)
                     return inspected
-                except MongoDBIndexNotReadyError:
+                except (MongoDBIndexMismatchError, MongoDBIndexNotReadyError):
                     pass
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise MongoDBIndexNotReadyError(
-                    f"Vector Search index '{self.expected.name}' was not queryable before "
-                    f"timeout; last state: {last_state.name}; remediation: inspect the "
-                    "definition and explicitly update or recreate it."
+                raise _polling_timeout(
+                    label="Vector Search",
+                    name=self.expected.name,
+                    previous_state=last_state,
                 )
-            try:
-                await asyncio.sleep(min(poll_interval, remaining))
-            except asyncio.CancelledError:
-                raise
+            await asyncio.sleep(min(poll_interval, remaining))
 
     async def wait_result(self, *, timeout: float, poll_interval: float) -> MongoDBIndexResult:
         inspected = await self.wait_until_ready(timeout=timeout, poll_interval=poll_interval)
@@ -458,12 +503,7 @@ class SearchIndexManager:
             raise
         except PyMongoError as exc:
             raise _translate_search_index_error(exc) from exc
-        result = await self.inspect_result()
-        if result.state is MongoDBIndexState.MISSING:
-            return MongoDBIndexResult(
-                self.definition, MongoDBIndexState.BUILDING, "ACCEPTED", False
-            )
-        return result
+        return MongoDBIndexResult(self.definition, MongoDBIndexState.BUILDING, "ACCEPTED", False)
 
     async def update(self) -> MongoDBIndexResult:
         try:
@@ -472,7 +512,7 @@ class SearchIndexManager:
             raise
         except PyMongoError as exc:
             raise _translate_search_index_error(exc) from exc
-        return await self.inspect_result()
+        return MongoDBIndexResult(self.definition, MongoDBIndexState.BUILDING, "ACCEPTED", False)
 
     async def drop(self) -> None:
         try:
@@ -488,6 +528,10 @@ class SearchIndexManager:
             documents = await cursor.to_list(length=1)
         except asyncio.CancelledError:
             raise
+        except asyncio.TimeoutError as exc:
+            raise MongoDBTimeoutError(
+                f"MongoDB Search index '{self.expected.name}' inspection timed out."
+            ) from exc
         except PyMongoError as exc:
             raise _translate_search_index_error(exc) from exc
         return documents[0] if documents else None
@@ -534,30 +578,34 @@ class SearchIndexManager:
     ) -> Mapping[str, Any] | None:
         inspected = await self.inspect()
         definition = self.expected.document()
+        mutated = False
         try:
             if inspected is None:
                 await self._collection.create_search_index(
                     SearchIndexModel(definition=definition, name=self.expected.name)
                 )
+                mutated = True
             else:
                 self._raise_if_failed(inspected)
                 try:
                     self._validate_definition(inspected)
                 except MongoDBIndexMismatchError:
                     await self._collection.update_search_index(self.expected.name, definition)
+                    mutated = True
         except asyncio.CancelledError:
             raise
         except PyMongoError as exc:
             raise _translate_search_index_error(exc) from exc
+        if mutated and not wait_until_ready:
+            return _accepted_document(
+                name=self.expected.name,
+                index_type="search",
+                definition=definition,
+            )
         if not wait_until_ready:
-            final = await self.inspect()
-            if final is None:
-                raise MongoDBIndexMissingError(
-                    f"MongoDB Search index '{self.expected.name}' was not inspectable after "
-                    "the ensure command was accepted; inspect it again before use."
-                )
-            self._validate_inspected(final, require_ready=False)
-            return final
+            assert inspected is not None
+            self._validate_inspected(inspected, require_ready=False)
+            return inspected
         return await self.wait_until_ready(timeout=timeout, poll_interval=poll_interval)
 
     async def ensure_result(
@@ -587,18 +635,18 @@ class SearchIndexManager:
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise MongoDBIndexNotReadyError(
-                    f"MongoDB Search index '{self.expected.name}' was not queryable before "
-                    f"timeout; last state: {last_state.name}; remediation: inspect the "
-                    "definition and explicitly update or recreate it."
+                raise _polling_timeout(
+                    label="MongoDB Search",
+                    name=self.expected.name,
+                    previous_state=last_state,
                 )
             try:
-                inspected = await asyncio.wait_for(self.inspect(), timeout=remaining)
-            except TimeoutError as exc:
-                raise MongoDBIndexNotReadyError(
-                    f"MongoDB Search index '{self.expected.name}' was not queryable before "
-                    f"timeout; last state: {last_state.name}; remediation: inspect the "
-                    "definition and explicitly update or recreate it."
+                inspected = await _await_before_deadline(self.inspect(), deadline)
+            except (_IndexPollingTimeout, MongoDBTimeoutError) as exc:
+                raise _polling_timeout(
+                    label="MongoDB Search",
+                    name=self.expected.name,
+                    previous_state=last_state,
                 ) from exc
             if inspected is None:
                 last_state = MongoDBIndexState.MISSING
@@ -607,14 +655,14 @@ class SearchIndexManager:
                 try:
                     self._validate_inspected(inspected, require_ready=True)
                     return inspected
-                except MongoDBIndexNotReadyError:
+                except (MongoDBIndexMismatchError, MongoDBIndexNotReadyError):
                     pass
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise MongoDBIndexNotReadyError(
-                    f"MongoDB Search index '{self.expected.name}' was not queryable before "
-                    f"timeout; last state: {last_state.name}; remediation: inspect the "
-                    "definition and explicitly update or recreate it."
+                raise _polling_timeout(
+                    label="MongoDB Search",
+                    name=self.expected.name,
+                    previous_state=last_state,
                 )
             await asyncio.sleep(min(poll_interval, remaining))
 
@@ -812,6 +860,18 @@ def _state(document: Mapping[str, Any] | None) -> tuple[MongoDBIndexState, str |
     else:
         state = MongoDBIndexState.BUILDING
     return state, status, queryable
+
+
+def _accepted_document(
+    *, name: str, index_type: str, definition: Mapping[str, Any]
+) -> Mapping[str, Any]:
+    return {
+        "name": name,
+        "type": index_type,
+        "status": "ACCEPTED",
+        "queryable": False,
+        "latestDefinition": definition,
+    }
 
 
 def _vector_result(

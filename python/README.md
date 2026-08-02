@@ -7,8 +7,9 @@ MongoDB integrations for Microsoft Agent Framework.
 Run `samples\index_provisioning.py` under a dedicated provisioner identity to
 explicitly create/update and wait for RAG Vector Search and Search indexes. Set
 `MONGODB_URI`, `MONGODB_DATABASE`, `MONGODB_RAG_COLLECTION`,
-`MONGODB_RAG_VECTOR_INDEX`, and `MONGODB_RAG_SEARCH_INDEX`. Runtime providers
-never call these mutating operations implicitly.
+`MONGODB_RAG_VECTOR_INDEX`, `MONGODB_RAG_SEARCH_INDEX`, and the positive
+`MONGODB_RAG_VECTOR_DIMENSIONS`, then pass `--apply` to acknowledge the explicit
+index mutation. Runtime providers never call these mutating operations implicitly.
 
 ## Memory quickstart
 

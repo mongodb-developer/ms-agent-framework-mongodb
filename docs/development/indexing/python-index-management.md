@@ -31,9 +31,13 @@ The immutable result contracts are exported from `agent_framework_mongodb`:
 - `MongoDBRegularIndexDefinition`
 
 `MongoDBIndexState` distinguishes `MISSING`, `BUILDING`, `READY`,
-`READY_NOT_QUERYABLE`, `FAILED`, and `TIMEOUT`. A successful create/update command is
-reported as building (or its inspected non-ready state), never as ready. A ready result
-requires both server status `READY` and `queryable == true`.
+`READY_NOT_QUERYABLE`, `FAILED`, and `TIMEOUT`. Because a timeout has no final
+inspected definition to return, polling reports `TIMEOUT` through the stable
+`MongoDBIndexNotReadyError` category rather than fabricating a successful result. A
+successful create/update command is returned immediately as `BUILDING` with status
+`ACCEPTED`, never inferred from a potentially stale inspection. When waiting is
+requested, polling continues through stale definitions until the expected definition
+reports both server status `READY` and `queryable == true`.
 
 ## Definitions and equivalence
 
@@ -53,12 +57,15 @@ validated; an unconfigured server default is tolerated.
 ## Polling, errors, and cancellation
 
 Readiness polling computes one `time.monotonic()` deadline, fetches only the configured
-name, and sleeps for at most the lesser of the interval and remaining time. Python task
-cancellation propagates through every list/create/update/drop request and every delay.
-Timeout and non-queryable errors name the index, last state, and remediation. Driver
-exceptions remain causes of stable authorization, capability, transient, missing, or
-retrieval error categories. Diagnostics do not include command documents, connection
-strings, definitions returned by the server, embeddings, or filters.
+name, and sleeps for at most the lesser of the interval and remaining time. On Python
+3.10, requests are bounded with an explicit child task and `asyncio.wait`, not
+`asyncio.wait_for`; external cancellation cancels and observes the child before
+immediately propagating. Poll-request `asyncio.TimeoutError` and deadline exhaustion
+become `MongoDBIndexNotReadyError` with last state `TIMEOUT`, the preceding observed
+state, index name, and remediation. No raw asyncio timeout escapes. Driver exceptions
+remain causes of stable authorization, capability, transient, missing, or retrieval
+error categories. Diagnostics do not include command documents, connection strings,
+definitions returned by the server, embeddings, or filters.
 
 ## Privileges
 
@@ -78,9 +85,11 @@ current documentation before release.
 ## Provisioning example
 
 `python/samples/index_provisioning.py` is an explicit deployment sample. It reads
-`MONGODB_URI` and `MONGODB_DATABASE`, uses application-owned collection/index names,
-waits with a bounded deadline, and prints only names and states. It does not ingest
-documents and is not called by runtime code.
+`MONGODB_URI` and `MONGODB_DATABASE`, requires positive vector dimensions through
+`--vector-dimensions` or `MONGODB_RAG_VECTOR_DIMENSIONS`, and requires `--apply` to
+acknowledge mutation. It uses application-owned collection/index names, emits an
+explicit mutation warning, waits with a bounded deadline, and prints only names and
+states. It does not ingest documents and is not called by runtime code.
 
 ## Verification
 
