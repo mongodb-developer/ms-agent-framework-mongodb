@@ -1,7 +1,7 @@
 namespace MongoDB.AgentFramework;
 
 /// <summary>Raised when a required MongoDB Search index is absent, mismatched, or not ready.</summary>
-public sealed class MongoDBIndexException : MongoDBIntegrationException
+public class MongoDBIndexException : MongoDBIntegrationException
 {
     /// <summary>Initializes an exception with an actionable message.</summary>
     /// <param name="message">The error message.</param>
