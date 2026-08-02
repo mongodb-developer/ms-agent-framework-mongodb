@@ -33,6 +33,9 @@ packages = ["src/agent_framework_mongodb"]
 addopts = "--strict-config --strict-markers"
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "integration_memory: requires a credentialed MongoDB deployment with Vector Search",
+]
 
 [tool.ruff]
 line-length = 100

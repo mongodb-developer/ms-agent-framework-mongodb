@@ -9,9 +9,9 @@ from numbers import Real
 from ..errors import MongoDBConfigurationError, MongoDBEmbeddingError
 
 
-def validate_dimensions(dimensions: int) -> int:
-    if isinstance(dimensions, bool) or dimensions <= 0:
-        raise MongoDBConfigurationError("Embedding dimensions must be a positive integer.")
+def validate_dimensions(dimensions: object) -> int:
+    if not isinstance(dimensions, int) or isinstance(dimensions, bool) or dimensions <= 0:
+        raise MongoDBConfigurationError("vector_dimensions must be a positive integer.")
     return dimensions
 
 
