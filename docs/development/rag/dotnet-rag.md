@@ -96,10 +96,12 @@ dotnet test dotnet\MongoDB.AgentFramework.slnx
 
 ## Deferred to later slices
 
-- `MongoDBRAGProvider` / `MongoDBRAGContextProvider` direct search and before-invoke/on-demand-tool integration
-  (slices 8, 10, 12).
-- Live `$vectorSearch`, `$search`, and `$rankFusion` pipeline execution, capability detection, and index
-  provisioning.
-- The `TextSearchProvider` composition/citation adapter and `MetadataQueryPlan` structured-metadata sample.
+- `MongoDBRAGProvider` / `MongoDBRAGContextProvider` live `VectorAnn`/`VectorEnn` direct search and before-invoke
+  integration is now implemented — see [.NET Vector RAG](dotnet-rag-vector-search.md) (slice 8).
+- Live `$search` and `$rankFusion` pipeline execution, capability detection, and index provisioning remain deferred
+  (slices 10, 12, 13).
+- The `TextSearchProvider` composition/citation adapter (blocked on package availability, see
+  [.NET Vector RAG](dotnet-rag-vector-search.md#textsearchprovider-compatibility-blocker)) and `MetadataQueryPlan`
+  structured-metadata sample.
 - Cross-language contract fixtures — no Python RAG implementation exists yet, so there is nothing to compare
   against; `python/tests/contracts/` currently only covers Memory scope and Chat History.

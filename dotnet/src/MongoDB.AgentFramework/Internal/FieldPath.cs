@@ -4,7 +4,13 @@ namespace MongoDB.AgentFramework.Internal;
 
 internal static class FieldPath
 {
-    private const string ReservedScoreAlias = "_ragScore";
+    /// <summary>
+    /// The reserved alias the vector/search pipelines use to carry MongoDB's native score under, shared by
+    /// <see cref="Validate"/> (which rejects any configured field path that collides with it) and by
+    /// <c>RAGPipelineBuilder</c>/<c>MongoDBRAGProvider</c> (which write and read it, respectively), so the literal
+    /// is defined exactly once.
+    /// </summary>
+    internal const string ReservedScoreAlias = "_ragScore";
 
     public static string Validate(string path, string optionName = "field path")
     {
@@ -51,6 +57,22 @@ internal static class FieldPath
 
     public static BsonValue Resolve(BsonDocument document, string path)
     {
+        if (!TryResolve(document, path, out BsonValue? value))
+        {
+            throw new MongoDBMappingException(
+                $"Required field '{path}' is missing from the result.");
+        }
+
+        return value!;
+    }
+
+    /// <summary>
+    /// Resolves a validated field path without throwing when a segment is missing or an intermediate value is not
+    /// a document, so optional fields (source name/URL, metadata) can resolve to <see langword="null"/>/empty
+    /// values instead of failing the whole mapping.
+    /// </summary>
+    public static bool TryResolve(BsonDocument document, string path, out BsonValue? value)
+    {
         ArgumentNullException.ThrowIfNull(document);
         Validate(path);
 
@@ -60,13 +82,14 @@ internal static class FieldPath
             if (!current.IsBsonDocument ||
                 !current.AsBsonDocument.TryGetValue(segment, out BsonValue? next))
             {
-                throw new MongoDBMappingException(
-                    $"Required field '{path}' is missing from the result.");
+                value = null;
+                return false;
             }
 
             current = next;
         }
 
-        return current;
+        value = current;
+        return true;
     }
 }

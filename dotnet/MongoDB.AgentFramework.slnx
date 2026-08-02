@@ -5,6 +5,7 @@
   <Folder Name="/samples/">
     <Project Path="samples/HistoryQuickstart/HistoryQuickstart.csproj" />
     <Project Path="samples/MemoryQuickstart/MemoryQuickstart.csproj" />
+    <Project Path="samples/RAGQuickstart/RAGQuickstart.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/MongoDB.AgentFramework.Tests/MongoDB.AgentFramework.Tests.csproj" />
