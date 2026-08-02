@@ -145,6 +145,7 @@ class MongoDBHistoryProvider(HistoryProvider):
     FRAMEWORK_SERIALIZATION_VERSION: ClassVar[int] = 1
     DEFAULT_DATABASE_NAME: ClassVar[str] = "agent_framework"
     DEFAULT_COLLECTION_NAME: ClassVar[str] = "chat_history"
+    RESERVATION_RETENTION: ClassVar[timedelta] = timedelta(days=7)
 
     def __init__(
         self,
@@ -272,6 +273,7 @@ class MongoDBHistoryProvider(HistoryProvider):
         return messages
 
     async def _get_messages(self, scope: MongoDocument) -> list[Message]:
+        await self._reject_legacy_scope(scope)
         query: MongoDocument = {"_kind": "message", **scope}
         if self.options.max_age is not None:
             query["created_at"] = {
@@ -285,6 +287,35 @@ class MongoDBHistoryProvider(HistoryProvider):
         documents = await cursor.to_list(length=self.options.max_messages)
         documents.reverse()
         return [_message_from_document(document) for document in documents]
+
+    async def _reject_legacy_scope(self, scope: MongoDocument) -> None:
+        absent_dimension_clauses: list[MongoDocument] = []
+        query: MongoDocument = {
+            "_kind": "message",
+            "schema_version": 1,
+            "scope_discriminator": {"$exists": False},
+            "session_id": scope["session_id"],
+        }
+        for name in ("tenant_id", "application_id", "agent_id", "user_id"):
+            value = scope[name]
+            if value is None:
+                absent_dimension_clauses.append(
+                    {
+                        "$or": [
+                            {name: {"$type": 10}},
+                            {name: {"$exists": False}},
+                        ]
+                    }
+                )
+            else:
+                query[name] = value
+        if absent_dimension_clauses:
+            query["$and"] = absent_dimension_clauses
+        if await self.collection.find_one(query) is not None:
+            raise MongoDBMappingError(
+                "Authorized History schema version 1 documents require migration to "
+                "schema version 2 with a canonical scope discriminator before replay."
+            )
 
     async def save_messages(
         self,
@@ -367,9 +398,7 @@ class MongoDBHistoryProvider(HistoryProvider):
                     existing_by_id[document_id] = existing
 
             token = cast(str, attempt["token"])
-            if len(existing_by_id) == len(candidates):
-                await self._delete_reservation(scope, token)
-            else:
+            if len(existing_by_id) != len(candidates):
                 first_sequence = await self._reserve_sequence(
                     scope,
                     token=token,
@@ -398,7 +427,6 @@ class MongoDBHistoryProvider(HistoryProvider):
                         if existing is None:
                             raise
                         _validate_duplicate(existing, candidate, include_sequence=True)
-                await self._delete_reservation(scope, token)
         except (asyncio.CancelledError, Exception):
             _finish_history_retry_attempt(
                 retry_state,
@@ -440,6 +468,8 @@ class MongoDBHistoryProvider(HistoryProvider):
             "token": token,
             "count": count,
             "first_sequence": first_sequence,
+            "created_at": datetime.now(timezone.utc),
+            "expires_at": datetime.now(timezone.utc) + self.RESERVATION_RETENTION,
         }
         try:
             await self.collection.insert_one(reservation)
@@ -449,15 +479,6 @@ class MongoDBHistoryProvider(HistoryProvider):
                 raise
             return _validate_reservation(existing, count)
         return first_sequence
-
-    async def _delete_reservation(self, scope: MongoDocument, token: str) -> None:
-        await self.collection.delete_one(
-            {
-                "_id": _reservation_id(scope, token),
-                "_kind": "reservation",
-                **scope,
-            }
-        )
 
     async def _allocate_sequence(self, scope: MongoDocument, count: int) -> int:
         counter_id = _counter_id(scope)
@@ -534,6 +555,7 @@ class MongoDBHistoryProvider(HistoryProvider):
                     "name": "history_scoped_message_unique",
                     "unique": True,
                     "partialFilterExpression": partial,
+                    "collation": {"locale": "simple"},
                 },
             ),
             (
@@ -542,6 +564,7 @@ class MongoDBHistoryProvider(HistoryProvider):
                     "name": "history_scoped_sequence",
                     "unique": True,
                     "partialFilterExpression": partial,
+                    "collation": {"locale": "simple"},
                 },
             ),
         ]
@@ -556,6 +579,19 @@ class MongoDBHistoryProvider(HistoryProvider):
                     },
                 )
             )
+        definitions.append(
+            (
+                [("expires_at", ASCENDING)],
+                {
+                    "name": "history_reservation_ttl",
+                    "expireAfterSeconds": 0,
+                    "partialFilterExpression": {
+                        "_kind": "reservation",
+                        "scope_discriminator": {"$type": "string"},
+                    },
+                },
+            )
+        )
         try:
             return tuple(
                 [await self.collection.create_index(keys, **kwargs) for keys, kwargs in definitions]
@@ -620,6 +656,11 @@ class MongoDBHistoryProvider(HistoryProvider):
                     f"Regular index '{name}' has an incompatible "
                     "partialFilterExpression; recreate it with ensure_indexes()."
                 )
+            if not _has_simple_collation(index):
+                raise MongoDBIndexMismatchError(
+                    f"Regular index '{name}' must use simple binary collation; "
+                    "recreate it with ensure_indexes()."
+                )
         if self.options.retention is not None:
             ttl = by_name.get("history_expiration_ttl")
             if ttl is None:
@@ -646,6 +687,26 @@ class MongoDBHistoryProvider(HistoryProvider):
                     "Regular index 'history_expiration_ttl' has an incompatible "
                     "expireAfterSeconds value; recreate it with ensure_indexes()."
                 )
+        reservation_ttl = by_name.get("history_reservation_ttl")
+        if reservation_ttl is None:
+            raise MongoDBIndexMissingError(
+                "Regular index 'history_reservation_ttl' does not exist; create it explicitly."
+            )
+        reservation_partial = {
+            "_kind": "reservation",
+            "scope_discriminator": {"$type": "string"},
+        }
+        if (
+            _index_keys(reservation_ttl) != (("expires_at", 1),)
+            or reservation_ttl.get("unique", False) is not False
+            or reservation_ttl.get("partialFilterExpression") != reservation_partial
+            or reservation_ttl.get("expireAfterSeconds") != 0
+        ):
+            raise MongoDBIndexMismatchError(
+                "Regular index 'history_reservation_ttl' has incompatible keys, uniqueness, "
+                "partialFilterExpression, or expireAfterSeconds; recreate it with "
+                "ensure_indexes()."
+            )
 
     async def close(self) -> None:
         """Close only a MongoDB client created by this provider."""
@@ -955,6 +1016,16 @@ def _index_keys(index: Mapping[str, Any]) -> tuple[tuple[str, int], ...]:
     typed_key = cast(Mapping[str, object], key)
     return tuple(
         (name, direction) for name, direction in typed_key.items() if isinstance(direction, int)
+    )
+
+
+def _has_simple_collation(index: Mapping[str, Any]) -> bool:
+    collation = index.get("collation")
+    if collation is None or collation == "simple":
+        return True
+    return (
+        isinstance(collation, Mapping)
+        and cast(Mapping[str, object], collation).get("locale") == "simple"
     )
 
 

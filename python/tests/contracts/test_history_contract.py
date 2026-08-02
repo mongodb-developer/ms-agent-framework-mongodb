@@ -98,7 +98,10 @@ async def test_language_neutral_history_order_and_retry_contract() -> None:
     await provider.save_messages(scope["session_id"], messages)
     restored = await provider.get_messages(scope["session_id"])
 
-    assert len(collection.documents) == fixture["retry_expected_document_count"]
+    assert (
+        len([document for document in collection.documents if document.get("_kind") == "message"])
+        == fixture["retry_expected_document_count"]
+    )
     assert [message.message_id for message in restored] == fixture[
         "expected_latest_chronological_ids"
     ]

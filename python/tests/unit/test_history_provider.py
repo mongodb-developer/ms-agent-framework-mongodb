@@ -114,7 +114,7 @@ class FakeCollection:
 
     async def find_one(self, query: dict[str, Any]) -> dict[str, Any] | None:
         for document in self.documents:
-            if all(document.get(key) == value for key, value in query.items()):
+            if matches_query(document, query):
                 return document
         return None
 
@@ -174,6 +174,54 @@ class ConcurrentAttemptCollection(FakeCollection):
                 self.both_attempts_started.set()
             await self.both_attempts_started.wait()
         return await super().find_one(query)
+
+
+class ExplicitOverlapCollection(FakeCollection):
+    def __init__(self) -> None:
+        super().__init__()
+        self.message_find_count = 0
+        self.both_message_reads = asyncio.Event()
+        self.winner_completed = asyncio.Event()
+
+    async def find_one(self, query: dict[str, Any]) -> dict[str, Any] | None:
+        task = asyncio.current_task()
+        task_name = task.get_name() if task is not None else ""
+        if query.get("_kind") == "message" and self.message_find_count < 2:
+            self.message_find_count += 1
+            if self.message_find_count == 2:
+                self.both_message_reads.set()
+            await self.both_message_reads.wait()
+            return None
+        if query.get("_kind") == "reservation" and task_name == "loser":
+            await self.winner_completed.wait()
+        return await super().find_one(query)
+
+
+def matches_query(document: dict[str, Any], query: dict[str, Any]) -> bool:
+    for key, value in query.items():
+        if key == "$and":
+            if not all(matches_query(document, clause) for clause in value):
+                return False
+            continue
+        if key == "$or":
+            if not any(matches_query(document, clause) for clause in value):
+                return False
+            continue
+        if isinstance(value, dict):
+            if "$exists" in value and (key in document) is not value["$exists"]:
+                return False
+            if "$type" in value:
+                expected_type = cast(dict[str, object], value)["$type"]
+                if expected_type in (10, "null") and document.get(key, object()) is not None:
+                    return False
+            continue
+        if document.get(key) != value:
+            return False
+    return True
+
+
+def message_documents(collection: FakeCollection) -> list[dict[str, Any]]:
+    return [document for document in collection.documents if document.get("_kind") == "message"]
 
 
 class FakeDatabase:
@@ -320,17 +368,18 @@ async def test_messages_round_trip_losslessly_in_deterministic_order() -> None:
     ]
 
     await provider.save_messages("session-1", messages)
-    tied_timestamp = collection.documents[0]["created_at"]
-    for document in collection.documents:
+    stored_messages = message_documents(collection)
+    tied_timestamp = stored_messages[0]["created_at"]
+    for document in stored_messages:
         document["created_at"] = tied_timestamp
     restored = await provider.get_messages("session-1")
 
     assert [message.to_dict() for message in restored] == [
         message.to_dict() for message in messages
     ]
-    assert [document["sequence"] for document in collection.documents] == [1, 2, 3, 4, 5]
-    assert all(document["schema_version"] == 2 for document in collection.documents)
-    assert all(document["framework_version"] == 1 for document in collection.documents)
+    assert [document["sequence"] for document in stored_messages] == [1, 2, 3, 4, 5]
+    assert all(document["schema_version"] == 2 for document in stored_messages)
+    assert all(document["framework_version"] == 1 for document in stored_messages)
 
 
 async def test_latest_n_is_queried_descending_then_returned_chronologically() -> None:
@@ -375,7 +424,7 @@ async def test_batch_retry_and_duplicate_message_are_idempotent() -> None:
     await provider.save_messages("session-1", messages)
     await provider.save_messages("session-1", messages)
 
-    assert len(collection.documents) == 2
+    assert len(message_documents(collection)) == 2
     assert [message.text for message in await provider.get_messages("session-1")] == [
         "same",
         "response",
@@ -391,7 +440,7 @@ async def test_later_direct_anonymous_turn_preserves_payload_with_new_identity()
     await provider.save_messages("session-1", [message])
 
     assert message.message_id is None
-    assert len(collection.documents) == 2
+    assert len(message_documents(collection)) == 2
     restored = await provider.get_messages("session-1")
     assert all(item.message_id is None for item in restored)
     assert all(item.to_dict() == message.to_dict() for item in restored)
@@ -405,7 +454,7 @@ async def test_completed_framework_state_allows_later_identical_anonymous_turn()
     await provider.save_messages("session-1", [Message("user", ["hello"])], state=state)
     await provider.save_messages("session-1", [Message("user", ["hello"])], state=state)
 
-    assert len(collection.documents) == 2
+    assert len(message_documents(collection)) == 2
     assert all(message.message_id is None for message in await provider.get_messages("session-1"))
 
 
@@ -429,7 +478,7 @@ async def test_clear_messages_is_scoped_and_returns_acknowledged_count() -> None
         "session-1",
         [Message("user", ["delete"], message_id="delete-me")],
     )
-    discriminator = collection.documents[0]["scope_discriminator"]
+    discriminator = message_documents(collection)[0]["scope_discriminator"]
 
     count = await provider.clear_messages("session-1")
 
@@ -452,15 +501,66 @@ async def test_unknown_versions_fail_with_migration_guidance() -> None:
         "session-1",
         [Message("user", ["hello"], message_id="message-1")],
     )
-    collection.documents[0]["schema_version"] = 99
+    message_documents(collection)[0]["schema_version"] = 99
 
     with pytest.raises(MongoDBMappingError, match="migration"):
         await provider.get_messages("session-1")
 
-    collection.documents[0]["schema_version"] = 2
-    collection.documents[0]["framework_version"] = 99
+    message_documents(collection)[0]["schema_version"] = 2
+    message_documents(collection)[0]["framework_version"] = 99
     with pytest.raises(MongoDBMappingError, match="framework serialization"):
         await provider.get_messages("session-1")
+
+
+async def test_schema_v1_exact_raw_scope_is_detected_before_empty_history() -> None:
+    collection = FakeCollection()
+    provider = MongoDBHistoryProvider(
+        cast(Any, collection),
+        options=options(application_id=None),
+    )
+    collection.documents.extend(
+        [
+            {
+                "_id": "other-partition-v1",
+                "_kind": "message",
+                "schema_version": 1,
+                "tenant_id": None,
+                "application_id": "other-app",
+                "agent_id": "agent-1",
+                "session_id": "session-1",
+            },
+            {
+                "_id": "authorized-v1",
+                "_kind": "message",
+                "schema_version": 1,
+                "agent_id": "agent-1",
+                "session_id": "session-1",
+            },
+        ]
+    )
+
+    with pytest.raises(MongoDBMappingError, match="schema version 1.*migration"):
+        await provider.get_messages("session-1")
+
+
+async def test_schema_v1_detection_does_not_wildcard_absent_dimensions() -> None:
+    collection = FakeCollection()
+    provider = MongoDBHistoryProvider(
+        cast(Any, collection),
+        options=options(application_id=None),
+    )
+    collection.documents.append(
+        {
+            "_id": "other-partition-v1",
+            "_kind": "message",
+            "schema_version": 1,
+            "application_id": "other-app",
+            "agent_id": "agent-1",
+            "session_id": "session-1",
+        }
+    )
+
+    assert await provider.get_messages("session-1") == []
 
 
 async def test_regular_indexes_are_created_only_by_explicit_operation() -> None:
@@ -477,6 +577,7 @@ async def test_regular_indexes_are_created_only_by_explicit_operation() -> None:
         "history_scoped_message_unique",
         "history_scoped_sequence",
         "history_expiration_ttl",
+        "history_reservation_ttl",
     )
     assert collection.created_indexes[0][1]["unique"] is True
     assert collection.created_indexes[2][1]["expireAfterSeconds"] == 0
@@ -569,7 +670,7 @@ async def test_concurrent_batches_receive_unique_monotonic_sequences() -> None:
         ),
     )
 
-    sequences = [document["sequence"] for document in collection.documents]
+    sequences = [document["sequence"] for document in message_documents(collection)]
     assert sorted(sequences) == [1, 2, 3, 4]
     assert len(set(sequences)) == 4
 
@@ -647,7 +748,7 @@ async def test_scope_discriminator_is_required_at_every_mongodb_boundary() -> No
         "session-1",
         [Message("user", ["scoped"], message_id="scope-message")],
     )
-    stored = dict(collection.documents[0])
+    stored = dict(message_documents(collection)[0])
     await provider.get_messages("session-1")
     await provider.clear_messages("session-1")
     await provider.ensure_indexes()
@@ -682,10 +783,9 @@ async def test_later_identical_anonymous_turn_gets_new_identity_after_success() 
     await provider.save_messages("session-1", [Message("user", ["same"])], state=state)
     await provider.save_messages("session-1", [Message("user", ["same"])], state=state)
 
-    assert len(collection.documents) == 2
-    assert (
-        collection.documents[0]["stable_message_id"] != collection.documents[1]["stable_message_id"]
-    )
+    stored_messages = message_documents(collection)
+    assert len(stored_messages) == 2
+    assert stored_messages[0]["stable_message_id"] != stored_messages[1]["stable_message_id"]
 
 
 async def test_concurrent_identical_anonymous_attempts_do_not_share_identity() -> None:
@@ -698,8 +798,41 @@ async def test_concurrent_identical_anonymous_attempts_do_not_share_identity() -
         provider.save_messages("session-1", [Message("user", ["same"])], state=state),
     )
 
-    assert len(collection.documents) == 2
-    assert len({document["stable_message_id"] for document in collection.documents}) == 2
+    stored_messages = message_documents(collection)
+    assert len(stored_messages) == 2
+    assert len({document["stable_message_id"] for document in stored_messages}) == 2
+
+
+async def test_concurrent_explicit_id_loser_reuses_completed_reservation() -> None:
+    collection = ExplicitOverlapCollection()
+    provider = MongoDBHistoryProvider(cast(Any, collection), options=options())
+    messages = [Message("user", ["same"], message_id="explicit-message")]
+
+    winner = asyncio.create_task(
+        provider.save_messages("session-1", messages),
+        name="winner",
+    )
+    loser = asyncio.create_task(
+        provider.save_messages(
+            "session-1",
+            [Message("user", ["same"], message_id="explicit-message")],
+        ),
+        name="loser",
+    )
+    await winner
+    collection.winner_completed.set()
+    await loser
+
+    stored_messages = [
+        document for document in collection.documents if document.get("_kind") == "message"
+    ]
+    reservations = [
+        document for document in collection.documents if document.get("_kind") == "reservation"
+    ]
+    assert [document["sequence"] for document in stored_messages] == [1]
+    assert len(reservations) == 1
+    assert reservations[0]["first_sequence"] == 1
+    assert reservations[0]["expires_at"] > reservations[0]["created_at"]
 
 
 async def test_restored_failed_state_reuses_ids_and_original_sequence_slots() -> None:
@@ -718,7 +851,7 @@ async def test_restored_failed_state_reuses_ids_and_original_sequence_slots() ->
         state=restored_state,
     )
 
-    assert [document["sequence"] for document in collection.documents] == [1, 2]
+    assert [document["sequence"] for document in message_documents(collection)] == [1, 2]
     assert collection.sequence == 2
     assert "mongodb_history_pending_batches" not in restored_state
 
@@ -806,3 +939,33 @@ async def test_validate_indexes_rejects_ttl_partial_filter_mismatch() -> None:
             collection.regular_indexes[2].pop(field)
         else:
             collection.regular_indexes[2][field] = original
+
+
+async def test_validate_indexes_requires_binary_identity_collation() -> None:
+    collection = FakeCollection()
+    provider = MongoDBHistoryProvider(cast(Any, collection), options=options())
+    await provider.ensure_indexes()
+    collection.regular_indexes = [
+        {"key": dict(keys), **definition} for keys, definition in collection.created_indexes
+    ]
+
+    collection.regular_indexes[0]["collation"] = {"locale": "en", "strength": 2}
+    with pytest.raises(MongoDBIndexMismatchError, match="simple.*collation"):
+        await provider.validate_indexes()
+
+    collection.regular_indexes[0].pop("collation")
+    collection.regular_indexes[1]["collation"] = "simple"
+    await provider.validate_indexes()
+
+
+async def test_validate_indexes_rejects_reservation_ttl_mismatch() -> None:
+    collection = FakeCollection()
+    provider = MongoDBHistoryProvider(cast(Any, collection), options=options())
+    await provider.ensure_indexes()
+    collection.regular_indexes = [
+        {"key": dict(keys), **definition} for keys, definition in collection.created_indexes
+    ]
+    collection.regular_indexes[-1]["expireAfterSeconds"] = 60
+
+    with pytest.raises(MongoDBIndexMismatchError, match="history_reservation_ttl"):
+        await provider.validate_indexes()
