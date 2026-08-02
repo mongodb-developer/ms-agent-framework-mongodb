@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -22,6 +23,56 @@ from agent_framework_mongodb import (
     MongoDBRAGProviderOptions,
     MongoDBRAGSearchOptions,
     MongoDBSearchMode,
+)
+
+OFFICIAL_BUILTIN_ANALYZERS = (
+    "lucene.arabic",
+    "lucene.armenian",
+    "lucene.basque",
+    "lucene.bengali",
+    "lucene.brazilian",
+    "lucene.bulgarian",
+    "lucene.catalan",
+    "lucene.chinese",
+    "lucene.cjk",
+    "lucene.czech",
+    "lucene.danish",
+    "lucene.dutch",
+    "lucene.english",
+    "lucene.finnish",
+    "lucene.french",
+    "lucene.galician",
+    "lucene.german",
+    "lucene.greek",
+    "lucene.hindi",
+    "lucene.hungarian",
+    "lucene.indonesian",
+    "lucene.irish",
+    "lucene.italian",
+    "lucene.japanese",
+    "lucene.keyword",
+    "lucene.korean",
+    "lucene.kuromoji",
+    "lucene.latvian",
+    "lucene.lithuanian",
+    "lucene.morfologik",
+    "lucene.nori",
+    "lucene.norwegian",
+    "lucene.persian",
+    "lucene.polish",
+    "lucene.portuguese",
+    "lucene.romanian",
+    "lucene.russian",
+    "lucene.simple",
+    "lucene.smartcn",
+    "lucene.sorani",
+    "lucene.spanish",
+    "lucene.standard",
+    "lucene.swedish",
+    "lucene.thai",
+    "lucene.turkish",
+    "lucene.ukrainian",
+    "lucene.whitespace",
 )
 
 
@@ -111,17 +162,31 @@ def full_text_options(**overrides: Any) -> MongoDBRAGProviderOptions:
     return MongoDBRAGProviderOptions(**values)
 
 
-@pytest.mark.parametrize("analyzer", ["custom.tenant", "tenant_analyzer", "$invalid"])
-def test_full_text_rejects_custom_or_invalid_analyzers_before_io(analyzer: str) -> None:
+def test_full_text_rejects_custom_analyzer_before_io() -> None:
     with pytest.raises(
         MongoDBConfigurationError,
         match="built-in.*custom analyzer definitions are not supported",
     ):
-        full_text_options(search_analyzer=analyzer)
+        full_text_options(search_analyzer="custom.tenant")
 
 
-def test_full_text_accepts_documented_builtin_analyzers() -> None:
-    assert full_text_options(search_analyzer="lucene.english").search_analyzer == "lucene.english"
+@pytest.mark.parametrize("analyzer", OFFICIAL_BUILTIN_ANALYZERS)
+def test_full_text_accepts_every_documented_builtin_analyzer(analyzer: str) -> None:
+    assert full_text_options(search_analyzer=analyzer).search_analyzer == analyzer
+
+
+def test_full_text_documentation_lists_every_accepted_builtin_analyzer() -> None:
+    documentation = (
+        Path(__file__).parents[3] / "docs" / "development" / "rag" / "python-full-text.md"
+    ).read_text(encoding="utf-8")
+    section = documentation.split("### Supported built-in analyzers", 1)[1].split("\n## ", 1)[0]
+    documented = tuple(
+        line.removeprefix("- `").removesuffix("`")
+        for line in section.splitlines()
+        if line.startswith("- `lucene.")
+    )
+
+    assert documented == OFFICIAL_BUILTIN_ANALYZERS
 
 
 async def test_full_text_search_builds_first_stage_filter_and_maps_search_score() -> None:

@@ -23,6 +23,56 @@ because this narrow facade does not accept or provision the complete top-level
 custom analyzer definition. Full-text mode forbids vector dimensions, vector
 index options, candidates, and query embeddings.
 
+### Supported built-in analyzers
+
+- `lucene.arabic`
+- `lucene.armenian`
+- `lucene.basque`
+- `lucene.bengali`
+- `lucene.brazilian`
+- `lucene.bulgarian`
+- `lucene.catalan`
+- `lucene.chinese`
+- `lucene.cjk`
+- `lucene.czech`
+- `lucene.danish`
+- `lucene.dutch`
+- `lucene.english`
+- `lucene.finnish`
+- `lucene.french`
+- `lucene.galician`
+- `lucene.german`
+- `lucene.greek`
+- `lucene.hindi`
+- `lucene.hungarian`
+- `lucene.indonesian`
+- `lucene.irish`
+- `lucene.italian`
+- `lucene.japanese`
+- `lucene.keyword`
+- `lucene.korean`
+- `lucene.kuromoji`
+- `lucene.latvian`
+- `lucene.lithuanian`
+- `lucene.morfologik`
+- `lucene.nori`
+- `lucene.norwegian`
+- `lucene.persian`
+- `lucene.polish`
+- `lucene.portuguese`
+- `lucene.romanian`
+- `lucene.russian`
+- `lucene.simple`
+- `lucene.smartcn`
+- `lucene.sorani`
+- `lucene.spanish`
+- `lucene.standard`
+- `lucene.swedish`
+- `lucene.thai`
+- `lucene.turkish`
+- `lucene.ukrainian`
+- `lucene.whitespace`
+
 The provider validates the effective Search index, then emits structured
 PyMongo aggregation documents in this order:
 

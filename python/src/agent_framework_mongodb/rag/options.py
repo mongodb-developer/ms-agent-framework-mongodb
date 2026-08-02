@@ -48,6 +48,7 @@ _BUILTIN_SEARCH_ANALYZERS = frozenset(
         "lucene.nori",
         "lucene.norwegian",
         "lucene.persian",
+        "lucene.polish",
         "lucene.portuguese",
         "lucene.romanian",
         "lucene.russian",
