@@ -113,7 +113,11 @@ sealed class SampleEmbeddingGenerator : IEmbeddingGenerator<string, Embedding<fl
         cancellationToken.ThrowIfCancellationRequested();
         return Task.FromResult(new GeneratedEmbeddings<Embedding<float>>(
             values.Select(static value => new Embedding<float>(
-                value.Contains("blue", StringComparison.OrdinalIgnoreCase)
+                // Correlate on the subject the query and the seeded documents actually share ("widget" vs.
+                // "gadget"), not an incidental detail like a color mentioned in the answer but not the question --
+                // otherwise a query like "What color do widgets ship in?" would embed to the same vector as the
+                // unrelated gadget document and retrieve the wrong chunk.
+                value.Contains("widget", StringComparison.OrdinalIgnoreCase)
                     ? new float[] { 1, 0, 0 }
                     : new float[] { 0, 1, 0 }))));
     }
