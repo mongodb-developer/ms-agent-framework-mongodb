@@ -116,3 +116,31 @@ Optional variables are `MONGODB_HISTORY_COLLECTION`,
 `MONGODB_HISTORY_SESSION_ID`. Set `MONGODB_HISTORY_CLEAR=true` only when the
 sample's authorized session should be removed. See the
 [.NET Chat History developer guide](../docs/development/history/dotnet-history.md).
+
+## RAG contracts and typed filters
+
+`MongoDBSearchMode` (`VectorAnn`, `VectorEnn`, `FullText`, `HybridRrf`), the bounded typed `MongoDBRAGFilter` AST,
+the immutable `MongoDBRAGResult`, and `MongoDBRAGProviderOptions` are available under
+`dotnet/src/MongoDB.AgentFramework/RAG/`. `MongoDBRAGFilter` is created only through static factories
+(`Equal`, `NotEqual`, `In`, `NotIn`, `Range`, `And`, `Or`) with bounded nesting depth and value counts, and is
+completely translatable into a `$vectorSearch` match filter or a `$search` compound filter through the internal
+`RAGFilterTranslator`.
+
+```csharp
+MongoDBRAGFilter filter = MongoDBRAGFilter.And(
+    MongoDBRAGFilter.Equal("tenant_id", "tenant-a"),
+    MongoDBRAGFilter.In("category", ["news", "docs"]));
+
+var options = new MongoDBRAGProviderOptions
+{
+    SearchMode = MongoDBSearchMode.VectorAnn,
+    VectorIndexName = "knowledge_vector_index",
+    VectorFieldName = "embedding",
+    TopK = 5,
+    MandatoryFilter = filter,
+};
+```
+
+This slice is contracts and filters only; it does not perform live retrieval. See the
+[.NET RAG contracts developer guide](../docs/development/rag/dotnet-rag.md) for the full public surface,
+translation behavior, and deferred work.
