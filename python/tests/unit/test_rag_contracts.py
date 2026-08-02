@@ -154,9 +154,13 @@ def test_parent_options_validate_same_database_lookup_and_bounds() -> None:
         max_parent_text_length=20_000,
         max_lookup_fan_out=16,
         max_context_tokens=4_000,
+        child_record_field="kind.record_type",
+        child_record_value="chunk",
     )
 
     assert parent.collection_name == "knowledge_parents"
+    assert parent.child_record_field == "kind.record_type"
+    assert parent.child_record_value == "chunk"
 
     with pytest.raises(MongoDBConfigurationError, match="same-database"):
         MongoDBRAGParentOptions(collection_name="other_db.parents")
@@ -164,16 +168,26 @@ def test_parent_options_validate_same_database_lookup_and_bounds() -> None:
     with pytest.raises(MongoDBConfigurationError, match="max_lookup_fan_out"):
         MongoDBRAGParentOptions(max_lookup_fan_out=0)
 
+    with pytest.raises(MongoDBConfigurationError, match="child_record_field"):
+        MongoDBRAGParentOptions(child_record_field="$where")
 
-def test_parent_retrieval_is_rejected_for_unimplemented_hybrid_mode() -> None:
-    with pytest.raises(MongoDBConfigurationError, match="parent retrieval"):
-        MongoDBRAGProviderOptions(
-            mode=MongoDBSearchMode.HYBRID_RRF,
-            vector_dimensions=3,
-            vector_index_name="knowledge_vector",
-            search_index_name="knowledge_text",
-            parent=MongoDBRAGParentOptions(),
-        )
+    with pytest.raises(MongoDBConfigurationError, match="BSON scalar"):
+        MongoDBRAGParentOptions(child_record_value={"$ne": "parent"})  # type: ignore[arg-type]
+
+    with pytest.raises(MongoDBConfigurationError, match="non-null BSON scalar"):
+        MongoDBRAGParentOptions(child_record_value=None)
+
+
+def test_parent_retrieval_is_supported_for_hybrid_mode() -> None:
+    options = MongoDBRAGProviderOptions(
+        mode=MongoDBSearchMode.HYBRID_RRF,
+        vector_dimensions=3,
+        vector_index_name="knowledge_vector",
+        search_index_name="knowledge_text",
+        parent=MongoDBRAGParentOptions(),
+    )
+
+    assert options.parent == MongoDBRAGParentOptions()
 
 
 def test_result_preserves_raw_document_and_normalized_semantics() -> None:

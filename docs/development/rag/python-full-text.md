@@ -145,6 +145,14 @@ complete classic-MongoDB translation of the provider authorization filter.
 Per-call relevance filters remain child constraints. Parent ordering, fan-out,
 text size, and context size retain the Vector RAG bounds.
 
+The provider-controlled child discriminator defaults to
+`record_type == "child"` and is combined with authorization and relevance
+filters inside `$search.compound.filter` before `$limit`. Its validated
+`child_record_field` must have the corresponding Search filter mapping; the
+non-null scalar `child_record_value` is translated through the same bounded
+equality operator. Parent hydration deliberately omits this child-only
+predicate.
+
 Direct search, capability/index validation, mapping, and ensure failures
 propagate with stable integration errors and the PyMongo failure as cause.
 Only transient retrieval/deadline errors fail open in

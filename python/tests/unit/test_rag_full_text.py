@@ -116,6 +116,7 @@ class FakeCollection:
                             },
                             "tenant_id": {"type": "token"},
                             "published_year": {"type": "number"},
+                            "record_type": {"type": "token"},
                         },
                     }
                 },
@@ -300,6 +301,10 @@ async def test_full_text_parent_hydration_reapplies_provider_authorization() -> 
     results = await provider.search("parent query")
 
     assert [result.text for result in results] == ["Authorized parent text"]
+    assert children.pipelines[0][0]["$search"]["compound"]["filter"] == [
+        {"equals": {"path": "tenant_id", "value": "tenant-a"}},
+        {"equals": {"path": "record_type", "value": "child"}},
+    ]
     assert parents.pipelines == [
         [
             {

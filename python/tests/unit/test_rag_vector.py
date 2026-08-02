@@ -79,6 +79,7 @@ class FakeCollection:
                         },
                         {"type": "filter", "path": "tenant_id"},
                         {"type": "filter", "path": "metadata.kind"},
+                        {"type": "filter", "path": "record_type"},
                     ]
                 },
             }
@@ -880,6 +881,12 @@ async def test_parent_hydration_reapplies_authorization_and_keeps_best_child_sco
     assert results[0].id == "parent-1"
     assert results[0].text == "Authorized parent"
     assert results[0].score == 0.9
+    assert collection.pipelines[0][0]["$vectorSearch"]["filter"] == {
+        "$and": [
+            {"tenant_id": {"$eq": "tenant-a"}},
+            {"record_type": {"$eq": "child"}},
+        ]
+    }
     assert collection.pipelines[1] == [
         {
             "$match": {
@@ -992,8 +999,13 @@ async def test_parent_hydration_uses_authorization_not_child_relevance_filter() 
     assert results[0].text == "authorized parent"
     assert collection.pipelines[0][0]["$vectorSearch"]["filter"] == {
         "$and": [
-            {"tenant_id": {"$eq": "tenant-a"}},
-            {"metadata.kind": {"$eq": "child-only"}},
+            {
+                "$and": [
+                    {"tenant_id": {"$eq": "tenant-a"}},
+                    {"metadata.kind": {"$eq": "child-only"}},
+                ]
+            },
+            {"record_type": {"$eq": "child"}},
         ]
     }
     assert collection.pipelines[1] == [

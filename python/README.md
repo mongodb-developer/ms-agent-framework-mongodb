@@ -92,9 +92,7 @@ Public filters are typed and bounded; raw dictionaries, BSON, field names,
 operators, and pipelines are not accepted as filter input. The package exports
 `MongoDBRAGProvider`, `MongoDBRAGContextProvider`, `MongoDBRAGProviderOptions`,
 `MongoDBRAGSearchOptions`, `MongoDBRAGParentOptions`, `MongoDBRAGResult`, and
-`MongoDBSearchMode`. Vector ANN/ENN and full-text Search are implemented.
-Hybrid RRF remains a separate feature slice and fails clearly rather than
-downgrading.
+`MongoDBSearchMode`. Vector ANN/ENN, full-text Search, and native hybrid RRF are implemented.
 ENN verifies exact-search planning through public MongoDB commands before
 embedding and caches the observed capability for a bounded interval; it does
 not infer support from an unverified server-version threshold. Only recognized
@@ -106,6 +104,14 @@ scalar strings and bytes are rejected rather than split into characters.
 Integer filter values must fit BSON int64, and range filters do not treat
 booleans as numbers. Repeated configured field paths are normalized once in
 first-seen order.
+
+Parent-document mode defaults to a provider-controlled
+`record_type == "child"` retrieval predicate. Configure
+`MongoDBRAGParentOptions.child_record_field` and `child_record_value` only for a
+different safe schema. The field path and non-null scalar value are validated,
+the discriminator is required in each active search index, and it is applied
+before child candidates are limited. Parent hydration reapplies authorization
+but not this child-only predicate.
 
 Run `samples\rag_vector_quickstart.py` after setting `MONGODB_URI`,
 `MONGODB_DATABASE`, `MONGODB_RAG_COLLECTION`, `MONGODB_RAG_VECTOR_INDEX`, and
@@ -147,3 +153,43 @@ and authorization fields. Explicit Search index ensure requires a provisioner
 identity; runtime search is read-only and needs only index inspection,
 read/aggregate, and Search query permissions. The sample performs no ingestion
 or cleanup.
+
+## Hybrid RAG quickstart
+
+Hybrid RAG combines ANN and full-text input rankings with MongoDB's native
+`$rankFusion` reciprocal-rank fusion. Both branches independently apply the
+complete typed authorization filter before their candidate limits.
+
+```python
+direct = MongoDBRAGProvider(
+    MongoDBRAGProviderOptions(
+        mode=MongoDBSearchMode.HYBRID_RRF,
+        vector_dimensions=1536,
+        vector_index_name="knowledge_vector",
+        search_index_name="knowledge_search",
+        num_candidates=50,
+        top_k=5,
+        vector_weight=1.0,
+        text_weight=1.0,
+        filter=EqualFilter("tenant_id", "tenant-123"),
+    ),
+    embedding_generator=embedding_generator,
+    connection_string=os.environ["MONGODB_URI"],
+    database_name=os.environ["MONGODB_DATABASE"],
+    collection_name=os.environ["MONGODB_RAG_COLLECTION"],
+)
+await direct.validate_vector_search_index()
+await direct.validate_search_index()
+await direct.validate_capabilities()
+results = await direct.search("tenant isolation")
+```
+
+Run `samples\rag_hybrid_quickstart.py` after setting `MONGODB_URI`,
+`MONGODB_DATABASE`, `MONGODB_RAG_COLLECTION`, `MONGODB_RAG_VECTOR_INDEX`,
+`MONGODB_RAG_SEARCH_INDEX`, and `MONGODB_RAG_TENANT`. Its deterministic
+three-dimensional generator is runnable only with pre-ingested matching vectors;
+replace it with the generator used to embed production content. The target must
+be MongoDB 8.0 or later with Search, Vector Search, and native `$rankFusion`
+enabled. Explicit index ensure needs provisioner privileges. Normal retrieval
+needs index inspection, read/aggregate, and Search query privileges and performs
+no writes.
