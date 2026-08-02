@@ -165,15 +165,16 @@ def test_parent_options_validate_same_database_lookup_and_bounds() -> None:
         MongoDBRAGParentOptions(max_lookup_fan_out=0)
 
 
-def test_parent_retrieval_is_rejected_for_unimplemented_hybrid_mode() -> None:
-    with pytest.raises(MongoDBConfigurationError, match="parent retrieval"):
-        MongoDBRAGProviderOptions(
-            mode=MongoDBSearchMode.HYBRID_RRF,
-            vector_dimensions=3,
-            vector_index_name="knowledge_vector",
-            search_index_name="knowledge_text",
-            parent=MongoDBRAGParentOptions(),
-        )
+def test_parent_retrieval_is_supported_for_hybrid_mode() -> None:
+    options = MongoDBRAGProviderOptions(
+        mode=MongoDBSearchMode.HYBRID_RRF,
+        vector_dimensions=3,
+        vector_index_name="knowledge_vector",
+        search_index_name="knowledge_text",
+        parent=MongoDBRAGParentOptions(),
+    )
+
+    assert options.parent == MongoDBRAGParentOptions()
 
 
 def test_result_preserves_raw_document_and_normalized_semantics() -> None:

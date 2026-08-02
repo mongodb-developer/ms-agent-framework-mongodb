@@ -341,10 +341,6 @@ class MongoDBRAGProviderOptions:
         object.__setattr__(self, "text_weight", text_weight)
         if mode is MongoDBSearchMode.HYBRID_RRF and vector_weight == text_weight == 0:
             raise MongoDBConfigurationError("at least one hybrid fusion weight must be positive.")
-        if self.parent is not None and mode is MongoDBSearchMode.HYBRID_RRF:
-            raise MongoDBConfigurationError(
-                "parent retrieval is not implemented for hybrid_rrf mode."
-            )
 
     def normalize_search_options(
         self,

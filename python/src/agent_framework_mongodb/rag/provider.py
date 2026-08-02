@@ -1,4 +1,4 @@
-"""Read-only MongoDB Vector Search and Agent Framework context integration."""
+"""Read-only MongoDB RAG search and Agent Framework context integration."""
 
 from __future__ import annotations
 
@@ -67,7 +67,7 @@ _LOGGER = logging.getLogger(__name__)
 
 
 class MongoDBRAGProvider:
-    """Execute direct, read-only MongoDB vector retrieval."""
+    """Execute direct, read-only MongoDB RAG retrieval."""
 
     DEFAULT_DATABASE_NAME: ClassVar[str] = "agent_framework"
     DEFAULT_COLLECTION_NAME: ClassVar[str] = "knowledge"
@@ -177,6 +177,7 @@ class MongoDBRAGProvider:
             MongoDBSearchMode.VECTOR_ANN,
             MongoDBSearchMode.VECTOR_ENN,
             MongoDBSearchMode.FULL_TEXT,
+            MongoDBSearchMode.HYBRID_RRF,
         ):
             raise MongoDBCapabilityError(
                 f"{self.options.mode.value} search execution is not installed; "
@@ -193,6 +194,90 @@ class MongoDBRAGProvider:
             if effective.filter is not None
             else None
         )
+        if self.options.mode is MongoDBSearchMode.HYBRID_RRF:
+            vector_filter: MongoDocument | None = None
+            search_filter: list[MongoDocument] | None = None
+            if compiled_filter is not None:
+                hybrid_filter = cast(MongoDocument, compiled_filter)
+                vector_filter = cast(MongoDocument, hybrid_filter["vector"])
+                search_filter = cast(list[MongoDocument], hybrid_filter["search"])
+            await self._validate_effective_vector_search_index(effective.filter)
+            await self._validate_effective_search_index(effective.filter)
+            await self.validate_capabilities()
+            vector = await self._embed(query)
+            hybrid_vector_stage: MongoDocument = {
+                "index": self.options.vector_index_name,
+                "path": self.options.vector_field,
+                "queryVector": list(vector),
+                "numCandidates": effective.num_candidates,
+                "limit": effective.num_candidates,
+            }
+            if vector_filter is not None:
+                hybrid_vector_stage["filter"] = vector_filter
+            hybrid_compound: MongoDocument = {
+                "must": [
+                    {
+                        "text": {
+                            "query": query,
+                            "path": list(self.options.text_fields),
+                        }
+                    }
+                ]
+            }
+            if search_filter is not None:
+                hybrid_compound["filter"] = search_filter
+            score_fields: MongoDocument = {"_ragScore": {"$meta": "score"}}
+            if effective.include_score_details:
+                score_fields["_ragScoreDetails"] = {"$meta": "scoreDetails"}
+            hybrid_pipeline: list[MongoDocument] = [
+                {
+                    "$rankFusion": {
+                        "input": {
+                            "pipelines": {
+                                "vector": [{"$vectorSearch": hybrid_vector_stage}],
+                                "text": [
+                                    {
+                                        "$search": {
+                                            "index": self.options.search_index_name,
+                                            "compound": hybrid_compound,
+                                        }
+                                    },
+                                    {"$limit": effective.num_candidates},
+                                ],
+                            }
+                        },
+                        "combination": {
+                            "weights": {
+                                "vector": self.options.vector_weight,
+                                "text": self.options.text_weight,
+                            }
+                        },
+                        "scoreDetails": effective.include_score_details,
+                    }
+                },
+                {"$set": score_fields},
+                {"$sort": {"_ragScore": -1, self.options.id_field: 1}},
+                {
+                    "$group": {
+                        "_id": f"${self.options.id_field}",
+                        "_ragDocument": {"$first": "$$ROOT"},
+                        "_ragScore": {"$first": "$_ragScore"},
+                    }
+                },
+                {"$replaceWith": {"$mergeObjects": ["$_ragDocument", {"_ragScore": "$_ragScore"}]}},
+                {"$sort": {"_ragScore": -1, self.options.id_field: 1}},
+                {"$limit": effective.top_k},
+            ]
+            try:
+                cursor = await self.collection.aggregate(hybrid_pipeline)
+                documents = await cursor.to_list(length=effective.top_k)
+            except asyncio.CancelledError:
+                raise
+            except PyMongoError as exc:
+                raise _translate_mongo_error(exc) from exc
+            if self.options.parent is not None:
+                return await self._hydrate_parents(documents)
+            return [self._map_result(document) for document in documents]
         if self.options.mode is MongoDBSearchMode.FULL_TEXT:
             await self._validate_effective_search_index(effective.filter)
             compound: MongoDocument = {
@@ -259,11 +344,13 @@ class MongoDBRAGProvider:
         return [self._map_result(document) for document in documents]
 
     async def validate_capabilities(self, *, refresh: bool = False) -> CapabilityResult:
-        """Validate exact Vector Search with public deployment commands and cache the result."""
+        """Validate mode capabilities with public deployment commands."""
         if self.options.mode is MongoDBSearchMode.FULL_TEXT:
             del refresh
             await self.validate_search_index()
             return CapabilityResult(name="full_text", supported=True)
+        if self.options.mode is MongoDBSearchMode.HYBRID_RRF:
+            return await self._validate_hybrid_capability(refresh=refresh)
         if self.options.mode is not MongoDBSearchMode.VECTOR_ENN:
             return CapabilityResult(name=self.options.mode.value, supported=True)
         if self.collection is None:
@@ -357,6 +444,123 @@ class MongoDBRAGProvider:
         )
         self._capability_cache = (now + self.capability_cache_ttl, result, None)
         return result
+
+    async def _validate_hybrid_capability(self, *, refresh: bool) -> CapabilityResult:
+        if self.collection is None:
+            raise MongoDBCapabilityError("MongoDB collection is not configured.")
+        now = time.monotonic()
+        cached = self._capability_cache
+        if not refresh and cached is not None and cached[0] > now:
+            return _require_hybrid_capability(cached[1], cached[2])
+
+        database = cast(Any, self.collection).database
+        detected: dict[str, str] = {"driver": pymongo_version}
+        probe_vector = [1.0, *([0.0] * (cast(int, self.options.vector_dimensions) - 1))]
+        probe_pipeline: list[MongoDocument] = [
+            {
+                "$rankFusion": {
+                    "input": {
+                        "pipelines": {
+                            "vector": [
+                                {
+                                    "$vectorSearch": {
+                                        "index": self.options.vector_index_name,
+                                        "path": self.options.vector_field,
+                                        "queryVector": probe_vector,
+                                        "numCandidates": 1,
+                                        "limit": 1,
+                                    }
+                                }
+                            ],
+                            "text": [
+                                {
+                                    "$search": {
+                                        "index": self.options.search_index_name,
+                                        "text": {
+                                            "query": "__mongodb_rag_capability_probe__",
+                                            "path": list(self.options.text_fields),
+                                        },
+                                    }
+                                },
+                                {"$limit": 1},
+                            ],
+                        }
+                    }
+                }
+            }
+        ]
+        try:
+            build_info = await database.command("buildInfo")
+            hello = await database.command("hello")
+            if isinstance(build_info, Mapping):
+                version = cast(Mapping[str, object], build_info).get("version")
+                if isinstance(version, str):
+                    detected["server"] = version
+            if isinstance(hello, Mapping):
+                message = cast(Mapping[str, object], hello).get("msg")
+                detected["deployment"] = (
+                    f"hello.msg={message}"
+                    if isinstance(message, str)
+                    else "hello.response-received"
+                )
+            server_version = detected.get("server")
+            if server_version is not None and _server_major_version(server_version) < 8:
+                result = CapabilityResult(
+                    name="hybrid_rrf",
+                    supported=False,
+                    remediation=(
+                        "Upgrade to MongoDB 8.0 or later with Search and Vector Search "
+                        "enabled before using native $rankFusion."
+                    ),
+                    detected_values=detected,
+                )
+                self._capability_cache = (now + self.capability_cache_ttl, result, None)
+                return _require_hybrid_capability(result, None)
+            await database.command(
+                {
+                    "explain": {
+                        "aggregate": self.collection_name,
+                        "pipeline": probe_pipeline,
+                        "cursor": {},
+                    },
+                    "verbosity": "queryPlanner",
+                }
+            )
+        except asyncio.CancelledError:
+            raise
+        except OperationFailure as exc:
+            translated = _translate_mongo_error(exc)
+            if isinstance(
+                translated,
+                (
+                    MongoDBAuthorizationError,
+                    MongoDBIndexMismatchError,
+                    MongoDBIndexMissingError,
+                    MongoDBIndexNotReadyError,
+                    MongoDBTransientRetrievalError,
+                ),
+            ):
+                raise translated from exc
+            if not _is_recognized_unsupported_rank_fusion(exc):
+                raise translated from exc
+            result = CapabilityResult(
+                name="hybrid_rrf",
+                supported=False,
+                remediation=(
+                    "Use MongoDB 8.0 or later with Search and Vector Search enabled, "
+                    "and request native $rankFusion enablement where required."
+                ),
+                detected_values=detected,
+            )
+            self._capability_cache = (now + self.capability_cache_ttl, result, exc)
+            return _require_hybrid_capability(result, exc)
+        except PyMongoError as exc:
+            raise _translate_mongo_error(exc) from exc
+        return CapabilityResult(
+            name="hybrid_rrf",
+            supported=True,
+            detected_values=detected,
+        )
 
     async def _hydrate_parents(
         self,
@@ -875,6 +1079,38 @@ def _is_recognized_unsupported_exact(error: OperationFailure) -> bool:
     )
 
 
+def _is_recognized_unsupported_rank_fusion(error: OperationFailure) -> bool:
+    details: Mapping[str, object]
+    if isinstance(error.details, Mapping):
+        details = cast(Mapping[str, object], error.details)
+    else:
+        details = cast(Mapping[str, object], {})
+    raw_code_name = details.get("codeName")
+    code_name = raw_code_name if isinstance(raw_code_name, str) else None
+    if error.code in {59, 303, 40324} or code_name in {
+        "CommandNotFound",
+        "Location303",
+        "Location40324",
+    }:
+        return True
+    message = str(details.get("errmsg", error)).lower()
+    return (
+        "$rankfusion" in message
+        and any(
+            marker in message
+            for marker in ("not allowed", "not supported", "unknown", "unrecognized", "unsupported")
+        )
+        and (
+            error.code in {2, 9, 72} or code_name in {"BadValue", "FailedToParse", "InvalidOptions"}
+        )
+    )
+
+
+def _server_major_version(version: str) -> int:
+    first = version.split(".", 1)[0]
+    return int(first) if first.isdigit() else 8
+
+
 def _bounded_recent_count(value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 100:
         raise MongoDBConfigurationError("recent_message_count must be from 1 through 100.")
@@ -889,6 +1125,20 @@ def _require_capability(
         return result
     error = MongoDBCapabilityError(
         f"MongoDB exact vector mode is unavailable; remediation: {result.remediation}"
+    )
+    if cause is not None:
+        raise error from cause
+    raise error
+
+
+def _require_hybrid_capability(
+    result: CapabilityResult,
+    cause: BaseException | None,
+) -> CapabilityResult:
+    if result.supported:
+        return result
+    error = MongoDBCapabilityError(
+        f"MongoDB native $rankFusion hybrid mode is unavailable; remediation: {result.remediation}"
     )
     if cause is not None:
         raise error from cause
