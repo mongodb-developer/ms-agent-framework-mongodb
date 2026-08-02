@@ -127,6 +127,8 @@ direct = MongoDBRAGProvider(
         mode=MongoDBSearchMode.FULL_TEXT,
         search_index_name="knowledge_search",
         text_fields=("content",),
+        # Only documented built-in analyzers are accepted; custom definitions
+        # are intentionally outside this narrow provider option.
         search_analyzer="lucene.standard",
         filter=EqualFilter("tenant_id", "tenant-123"),
     ),

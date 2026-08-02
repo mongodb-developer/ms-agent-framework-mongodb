@@ -27,6 +27,7 @@ async def main() -> None:
             mode=MongoDBSearchMode.FULL_TEXT,
             search_index_name=required_environment("MONGODB_RAG_SEARCH_INDEX"),
             text_fields=("content",),
+            # Custom analyzer definitions are intentionally outside this sample facade.
             search_analyzer="lucene.standard",
             filter=EqualFilter(
                 "tenant_id",

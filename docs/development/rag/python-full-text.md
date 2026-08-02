@@ -16,8 +16,12 @@ record the rationale.
 `MongoDBRAGProvider.search()` and `MongoDBRAGContextProvider.search()` are the
 direct-search seams. Select `MongoDBSearchMode.FULL_TEXT`, configure
 `search_index_name`, one or more `text_fields`, and the index
-`search_analyzer`. Full-text mode forbids vector dimensions, vector index
-options, candidates, and query embeddings.
+`search_analyzer`. That option accepts only MongoDB's documented built-in
+`lucene.*` analyzers, such as `lucene.standard`, `lucene.english`,
+`lucene.keyword`, and `lucene.whitespace`. Custom analyzer names are rejected
+because this narrow facade does not accept or provision the complete top-level
+custom analyzer definition. Full-text mode forbids vector dimensions, vector
+index options, candidates, and query embeddings.
 
 The provider validates the effective Search index, then emits structured
 PyMongo aggregation documents in this order:
@@ -68,7 +72,11 @@ Search equality values fail before I/O.
 
 `ensure_search_index()` is the only full-text create/update facade. It creates
 a Search index with dynamic mappings plus explicit text/analyzer and filter
-mappings. Dotted paths become nested `document` mappings. Ensure is never
+mappings. When one path is both searched and filtered, its MongoDB index field
+is an array containing both the `string` analyzer mapping and the typed filter
+mapping. Validation examines every mapping regardless of array order and
+ignores server-added properties while still requiring every expected
+type/analyzer. Dotted paths become nested `document` mappings. Ensure is never
 called by construction, direct search, or Agent Framework hooks. Use a
 provisioner identity for ensure; runtime identities need only index inspection,
 read/aggregate, and Search query privileges.

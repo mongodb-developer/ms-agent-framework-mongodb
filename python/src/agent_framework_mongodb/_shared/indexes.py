@@ -389,19 +389,24 @@ class SearchIndexManager:
             )
         typed_fields = cast(Mapping[str, object], fields)
         for path in self.expected.text_paths:
-            mapping = _search_mapping_for_path(typed_fields, path)
-            if mapping is None or mapping.get("type") != "string":
+            mappings_for_path = _search_mappings_for_path(typed_fields, path)
+            string_mappings = tuple(
+                mapping for mapping in mappings_for_path if mapping.get("type") == "string"
+            )
+            if not string_mappings:
                 raise MongoDBIndexMismatchError(
                     f"MongoDB Search index '{self.expected.name}' is missing text path '{path}'."
                 )
-            if mapping.get("analyzer") != self.expected.analyzer:
+            if not any(
+                mapping.get("analyzer") == self.expected.analyzer for mapping in string_mappings
+            ):
                 raise MongoDBIndexMismatchError(
                     f"MongoDB Search index '{self.expected.name}' has the wrong analyzer "
                     f"for text path '{path}'."
                 )
         for path, expected_type in self.expected.filter_fields:
-            mapping = _search_mapping_for_path(typed_fields, path)
-            if mapping is None or mapping.get("type") != expected_type:
+            mappings_for_path = _search_mappings_for_path(typed_fields, path)
+            if not any(mapping.get("type") == expected_type for mapping in mappings_for_path):
                 raise MongoDBIndexMismatchError(
                     f"MongoDB Search index '{self.expected.name}' is missing required "
                     f"filter path '{path}' with type '{expected_type}'."
@@ -425,35 +430,54 @@ def _set_search_mapping(
             raise ValueError(f"Search index path '{path}' conflicts with another configured path.")
         current = cast(dict[str, object], nested)
     existing_leaf = current.get(segments[-1])
-    if existing_leaf is not None and existing_leaf != mapping:
-        raise ValueError(f"Search index path '{path}' has conflicting configured mappings.")
-    current[segments[-1]] = mapping
+    if existing_leaf is None:
+        current[segments[-1]] = mapping
+    elif isinstance(existing_leaf, list):
+        mappings = cast(list[object], existing_leaf)
+        if mapping not in mappings:
+            mappings.append(mapping)
+    elif isinstance(existing_leaf, Mapping):
+        existing_mapping = cast(Mapping[str, object], existing_leaf)
+        if existing_mapping != mapping:
+            current[segments[-1]] = [existing_leaf, mapping]
+    else:
+        raise ValueError(f"Search index path '{path}' has an invalid configured mapping.")
 
 
-def _search_mapping_for_path(
+def _search_mappings_for_path(
     fields: Mapping[str, object],
     path: str,
-) -> Mapping[str, object] | None:
+) -> tuple[Mapping[str, object], ...]:
     current = fields
-    for index, segment in enumerate(path.split(".")):
+    segments = path.split(".")
+    for index, segment in enumerate(segments):
         value = current.get(segment)
-        if isinstance(value, list):
-            mapped_value: Mapping[str, object] | None = None
-            for item in cast(list[object], value):
-                if isinstance(item, Mapping):
-                    mapped_value = cast(Mapping[str, object], item)
-                    break
-            value = mapped_value
-        if not isinstance(value, Mapping):
-            return None
-        mapping = cast(Mapping[str, object], value)
-        if index == len(path.split(".")) - 1:
-            return mapping
-        nested = mapping.get("fields")
+        mappings = _search_mapping_sequence(value)
+        if index == len(segments) - 1:
+            return mappings
+        parent_mapping = next(
+            (mapping for mapping in mappings if isinstance(mapping.get("fields"), Mapping)),
+            None,
+        )
+        if parent_mapping is None:
+            return ()
+        nested = parent_mapping.get("fields")
         if not isinstance(nested, Mapping):
-            return None
+            return ()
         current = cast(Mapping[str, object], nested)
-    return None
+    return ()
+
+
+def _search_mapping_sequence(value: object) -> tuple[Mapping[str, object], ...]:
+    if isinstance(value, Mapping):
+        return (cast(Mapping[str, object], value),)
+    if isinstance(value, list):
+        return tuple(
+            cast(Mapping[str, object], item)
+            for item in cast(list[object], value)
+            if isinstance(item, Mapping)
+        )
+    return ()
 
 
 def _translate_search_index_error(error: PyMongoError) -> Exception:

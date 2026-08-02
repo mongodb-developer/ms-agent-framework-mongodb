@@ -13,6 +13,57 @@ from .._shared.field_paths import validate_field_path
 from ..errors import MongoDBConfigurationError
 from .filters import AndFilter, MongoDBFilter
 
+_BUILTIN_SEARCH_ANALYZERS = frozenset(
+    {
+        "lucene.arabic",
+        "lucene.armenian",
+        "lucene.basque",
+        "lucene.bengali",
+        "lucene.brazilian",
+        "lucene.bulgarian",
+        "lucene.catalan",
+        "lucene.chinese",
+        "lucene.cjk",
+        "lucene.czech",
+        "lucene.danish",
+        "lucene.dutch",
+        "lucene.english",
+        "lucene.finnish",
+        "lucene.french",
+        "lucene.galician",
+        "lucene.german",
+        "lucene.greek",
+        "lucene.hindi",
+        "lucene.hungarian",
+        "lucene.indonesian",
+        "lucene.irish",
+        "lucene.italian",
+        "lucene.japanese",
+        "lucene.keyword",
+        "lucene.korean",
+        "lucene.kuromoji",
+        "lucene.latvian",
+        "lucene.lithuanian",
+        "lucene.morfologik",
+        "lucene.nori",
+        "lucene.norwegian",
+        "lucene.persian",
+        "lucene.portuguese",
+        "lucene.romanian",
+        "lucene.russian",
+        "lucene.simple",
+        "lucene.smartcn",
+        "lucene.sorani",
+        "lucene.spanish",
+        "lucene.standard",
+        "lucene.swedish",
+        "lucene.thai",
+        "lucene.turkish",
+        "lucene.ukrainian",
+        "lucene.whitespace",
+    }
+)
+
 
 class MongoDBSearchMode(str, Enum):
     """Supported MongoDB retrieval modes."""
@@ -51,9 +102,11 @@ def _name(value: object, name: str, *, required: bool) -> str | None:
 
 
 def _analyzer(value: object) -> str:
-    if not isinstance(value, str) or not fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", value):
+    if not isinstance(value, str) or value not in _BUILTIN_SEARCH_ANALYZERS:
         raise MongoDBConfigurationError(
-            "search_analyzer must be 1-128 letters, digits, dots, underscores, or hyphens."
+            "search_analyzer must be a documented MongoDB built-in analyzer such as "
+            "'lucene.standard' or 'lucene.english'; custom analyzer definitions are not "
+            "supported by this option."
         )
     return value
 

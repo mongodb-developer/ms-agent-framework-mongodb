@@ -111,9 +111,17 @@ def full_text_options(**overrides: Any) -> MongoDBRAGProviderOptions:
     return MongoDBRAGProviderOptions(**values)
 
 
-def test_full_text_validates_analyzer_configuration() -> None:
-    with pytest.raises(MongoDBConfigurationError, match="search_analyzer"):
-        full_text_options(search_analyzer="$invalid")
+@pytest.mark.parametrize("analyzer", ["custom.tenant", "tenant_analyzer", "$invalid"])
+def test_full_text_rejects_custom_or_invalid_analyzers_before_io(analyzer: str) -> None:
+    with pytest.raises(
+        MongoDBConfigurationError,
+        match="built-in.*custom analyzer definitions are not supported",
+    ):
+        full_text_options(search_analyzer=analyzer)
+
+
+def test_full_text_accepts_documented_builtin_analyzers() -> None:
+    assert full_text_options(search_analyzer="lucene.english").search_analyzer == "lucene.english"
 
 
 async def test_full_text_search_builds_first_stage_filter_and_maps_search_score() -> None:
@@ -270,6 +278,66 @@ async def test_search_index_facade_is_read_only_until_explicit_ensure() -> None:
             }
         },
     }
+
+
+async def test_search_index_ensure_emits_multiple_mappings_for_shared_text_filter_path() -> None:
+    collection = FakeCollection()
+    collection.search_indexes = []
+    provider = MongoDBRAGProvider(
+        full_text_options(filter=EqualFilter("content", "authorized")),
+        collection=collection,  # type: ignore[arg-type]
+    )
+
+    await provider.ensure_search_index()
+
+    assert collection.created_search_model is not None
+    fields = collection.created_search_model.document["definition"]["mappings"]["fields"]
+    assert fields["content"] == [
+        {"type": "string", "analyzer": "lucene.standard"},
+        {"type": "token"},
+    ]
+
+
+async def test_search_index_validation_accepts_shared_mappings_in_any_order_with_defaults() -> None:
+    collection = FakeCollection()
+    collection.search_indexes[0]["latestDefinition"]["mappings"]["fields"]["content"] = [
+        {"type": "token", "normalizer": "lowercase"},
+        {
+            "type": "string",
+            "analyzer": "lucene.standard",
+            "searchAnalyzer": "lucene.standard",
+            "indexOptions": "offsets",
+        },
+    ]
+    provider = MongoDBRAGProvider(
+        full_text_options(filter=EqualFilter("content", "authorized")),
+        collection=collection,  # type: ignore[arg-type]
+    )
+
+    await provider.validate_search_index()
+
+
+@pytest.mark.parametrize(
+    ("mappings", "error"),
+    [
+        ([{"type": "token"}], "text path"),
+        ([{"type": "string", "analyzer": "lucene.english"}, {"type": "token"}], "analyzer"),
+        ([{"type": "string", "analyzer": "lucene.standard"}], "filter path"),
+    ],
+)
+async def test_search_index_validation_rejects_missing_or_mismatched_shared_mapping(
+    mappings: list[dict[str, str]],
+    error: str,
+) -> None:
+    collection = FakeCollection()
+    collection.search_indexes[0]["latestDefinition"]["mappings"]["fields"]["content"] = mappings
+    provider = MongoDBRAGProvider(
+        full_text_options(filter=EqualFilter("content", "authorized")),
+        collection=collection,  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(MongoDBIndexMismatchError, match=error):
+        await provider.validate_search_index()
 
 
 async def test_search_index_validation_rejects_analyzer_mismatch() -> None:
