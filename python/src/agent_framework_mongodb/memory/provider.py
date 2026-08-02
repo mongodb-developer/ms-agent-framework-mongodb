@@ -6,7 +6,6 @@ import asyncio
 import hashlib
 import json
 import logging
-import time
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -18,11 +17,11 @@ from agent_framework import ContextProvider, Message, SupportsGetEmbeddings
 from pymongo import ASCENDING, AsyncMongoClient
 from pymongo.asynchronous.collection import AsyncCollection
 from pymongo.errors import BulkWriteError, ConnectionFailure, OperationFailure, PyMongoError
-from pymongo.operations import SearchIndexModel
 
 from .._shared.client import MongoClientHandle
 from .._shared.embeddings import normalize_embeddings, validate_dimensions
 from .._shared.field_paths import validate_field_path
+from .._shared.indexes import RegularIndexManager, VectorIndexDefinition, VectorIndexManager
 from ..errors import (
     MongoDBAuthorizationError,
     MongoDBCapabilityError,
@@ -39,6 +38,10 @@ from ..errors import (
     MongoDBTimeoutError,
     MongoDBTransientPersistenceError,
     MongoDBTransientRetrievalError,
+)
+from ..indexing import (
+    MongoDBIndexResult,
+    MongoDBRegularIndexDefinition,
 )
 
 MongoDocument = dict[str, Any]
@@ -579,32 +582,44 @@ class MongoDBMemoryContextProvider(ContextProvider):
         next_cursor = str(selected[-1]["_id"]) if has_more and selected else None
         return MemoryMetadataPage(items, next_cursor)
 
-    async def create_vector_search_index(self) -> str:
-        """Create the configured Vector Search index without waiting for readiness."""
-        model = SearchIndexModel(
-            definition={
-                "fields": [
-                    {
-                        "type": "vector",
-                        "path": self.vector_field,
-                        "numDimensions": self.vector_dimensions,
-                        "similarity": self.similarity,
-                    },
-                    *[
-                        {"type": "filter", "path": path}
-                        for path in ("application_id", "agent_id", "user_id", "session_id")
-                    ],
-                ]
-            },
-            name=self.index_name,
-            type="vectorSearch",
+    def _vector_index_manager(self) -> VectorIndexManager:
+        return VectorIndexManager(
+            cast(Any, self.collection),
+            VectorIndexDefinition(
+                name=self.index_name,
+                path=self.vector_field,
+                dimensions=self.vector_dimensions,
+                similarity=self.similarity,
+                filter_paths=("application_id", "agent_id", "user_id", "session_id"),
+            ),
         )
-        try:
-            return await self.collection.create_search_index(model)
-        except asyncio.CancelledError:
-            raise
-        except PyMongoError as exc:
-            raise _translate_mongo_error(exc, operation="persistence") from exc
+
+    def _regular_index_manager(self) -> RegularIndexManager:
+        definitions = [
+            MongoDBRegularIndexDefinition(
+                "memory_scope_admin",
+                (
+                    ("application_id", ASCENDING),
+                    ("agent_id", ASCENDING),
+                    ("user_id", ASCENDING),
+                    ("session_id", ASCENDING),
+                    ("_id", ASCENDING),
+                ),
+            )
+        ]
+        if self.retention is not None:
+            definitions.append(
+                MongoDBRegularIndexDefinition(
+                    "memory_expiration_ttl",
+                    (("expires_at", ASCENDING),),
+                    expire_after_seconds=0,
+                )
+            )
+        return RegularIndexManager(cast(Any, self.collection), tuple(definitions))
+
+    async def create_vector_search_index(self) -> MongoDBIndexResult:
+        """Explicitly submit Vector Search index creation."""
+        return await self._vector_index_manager().create()
 
     async def ensure_vector_search_index(
         self,
@@ -612,142 +627,74 @@ class MongoDBMemoryContextProvider(ContextProvider):
         wait_until_ready: bool = False,
         timeout: float = 60.0,
         poll_interval: float = 1.0,
-    ) -> str:
+    ) -> MongoDBIndexResult:
         """Create a missing index explicitly, validate it, and optionally await readiness."""
-        indexes = await self._list_vector_indexes()
-        matching = next((item for item in indexes if item.get("name") == self.index_name), None)
-        if matching is None:
-            await self.create_vector_search_index()
-        if wait_until_ready:
-            await self.wait_until_vector_search_index_ready(
-                timeout=timeout, poll_interval=poll_interval
-            )
-        else:
-            indexes = await self._list_vector_indexes()
-            matching = next((item for item in indexes if item.get("name") == self.index_name), None)
-            if matching is not None:
-                _validate_index_definition(self, matching, require_ready=False)
-        return self.index_name
+        return await self._vector_index_manager().ensure_result(
+            wait_until_ready=wait_until_ready,
+            timeout=timeout,
+            poll_interval=poll_interval,
+        )
 
-    async def validate_vector_search_index(self, *, require_ready: bool = True) -> None:
+    async def validate_vector_search_index(
+        self, *, require_ready: bool = True
+    ) -> MongoDBIndexResult:
         """Validate the configured index definition without mutating MongoDB."""
-        indexes = await self._list_vector_indexes()
-        matching = next((item for item in indexes if item.get("name") == self.index_name), None)
-        if matching is None:
-            raise MongoDBIndexMissingError(
-                f"Vector Search index '{self.index_name}' does not exist; create it explicitly."
-            )
-        _validate_index_definition(self, matching, require_ready=require_ready)
+        return await self._vector_index_manager().validate_result(require_ready=require_ready)
+
+    async def inspect_vector_search_index(self) -> MongoDBIndexResult:
+        """Inspect the configured Vector Search index without mutation."""
+        return await self._vector_index_manager().inspect_result()
+
+    async def update_vector_search_index(self) -> MongoDBIndexResult:
+        """Explicitly submit an update to the Vector Search index."""
+        return await self._vector_index_manager().update()
+
+    async def drop_vector_search_index(self) -> None:
+        """Explicitly drop the Vector Search index."""
+        await self._vector_index_manager().drop()
 
     async def wait_until_vector_search_index_ready(
         self,
         *,
         timeout: float = 60.0,
         poll_interval: float = 1.0,
-    ) -> None:
+    ) -> MongoDBIndexResult:
         """Poll index state until queryable or a monotonic timeout expires."""
-        if timeout <= 0 or poll_interval <= 0:
-            raise MongoDBConfigurationError("timeout and poll_interval must be positive.")
-        deadline = time.monotonic() + timeout
-        while True:
-            try:
-                await self.validate_vector_search_index(require_ready=True)
-                return
-            except MongoDBIndexNotReadyError:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise MongoDBIndexNotReadyError(
-                        f"Vector Search index '{self.index_name}' was not ready before timeout."
-                    ) from None
-                await asyncio.sleep(min(poll_interval, remaining))
-
-    async def _list_vector_indexes(self) -> list[Mapping[str, Any]]:
-        try:
-            cursor = await self.collection.list_search_indexes(name=self.index_name)
-            return await cursor.to_list(length=None)
-        except asyncio.CancelledError:
-            raise
-        except PyMongoError as exc:
-            raise _translate_mongo_error(exc, operation="retrieval") from exc
-
-    async def list_vector_search_indexes(self) -> tuple[Mapping[str, Any], ...]:
-        """Read the configured Vector Search index state without mutation."""
-        return tuple(await self._list_vector_indexes())
-
-    async def ensure_regular_indexes(self) -> tuple[str, ...]:
-        """Explicitly create scope and optional TTL indexes, separately from Search indexes."""
-        try:
-            names = [
-                await self.collection.create_index(
-                    [
-                        ("application_id", ASCENDING),
-                        ("agent_id", ASCENDING),
-                        ("user_id", ASCENDING),
-                        ("session_id", ASCENDING),
-                        ("_id", ASCENDING),
-                    ],
-                    name="memory_scope_admin",
-                )
-            ]
-            if self.retention is not None:
-                names.append(
-                    await self.collection.create_index(
-                        [("expires_at", ASCENDING)],
-                        name="memory_expiration_ttl",
-                        expireAfterSeconds=0,
-                    )
-                )
-            return tuple(names)
-        except asyncio.CancelledError:
-            raise
-        except PyMongoError as exc:
-            raise _translate_mongo_error(exc, operation="persistence") from exc
-
-    async def list_regular_indexes(self) -> tuple[Mapping[str, Any], ...]:
-        """Read regular index definitions without mutation."""
-        try:
-            cursor = await self.collection.list_indexes()
-            return tuple(await cursor.to_list(length=None))
-        except asyncio.CancelledError:
-            raise
-        except PyMongoError as exc:
-            raise _translate_mongo_error(exc, operation="retrieval") from exc
-
-    async def validate_regular_indexes(self) -> None:
-        """Validate required administrative and configured TTL indexes."""
-        indexes = await self.list_regular_indexes()
-        by_name = {str(index.get("name")): index for index in indexes}
-        scope_index = by_name.get("memory_scope_admin")
-        if scope_index is None:
-            raise MongoDBIndexMissingError(
-                "Regular index 'memory_scope_admin' does not exist; create it explicitly."
-            )
-        expected_scope_keys = (
-            ("application_id", 1),
-            ("agent_id", 1),
-            ("user_id", 1),
-            ("session_id", 1),
-            ("_id", 1),
+        return await self._vector_index_manager().wait_result(
+            timeout=timeout, poll_interval=poll_interval
         )
-        if _index_keys(scope_index) != expected_scope_keys:
-            raise MongoDBIndexMismatchError(
-                "Regular index 'memory_scope_admin' does not match the required definition."
-            )
-        if self.retention is not None:
-            ttl_index = by_name.get("memory_expiration_ttl")
-            if ttl_index is None:
-                raise MongoDBIndexMissingError(
-                    "Regular TTL index 'memory_expiration_ttl' does not exist; "
-                    "create it explicitly."
-                )
-            if (
-                _index_keys(ttl_index) != (("expires_at", 1),)
-                or ttl_index.get("expireAfterSeconds") != 0
-            ):
-                raise MongoDBIndexMismatchError(
-                    "Regular TTL index 'memory_expiration_ttl' does not match "
-                    "the required definition."
-                )
+
+    async def list_vector_search_indexes(self) -> tuple[MongoDBIndexResult, ...]:
+        """Read the configured Vector Search index state without mutation."""
+        return await self._vector_index_manager().list()
+
+    async def create_regular_indexes(self) -> tuple[MongoDBIndexResult, ...]:
+        """Explicitly create scope and optional TTL indexes, separately from Search indexes."""
+        return await self._regular_index_manager().create()
+
+    async def ensure_regular_indexes(self) -> tuple[MongoDBIndexResult, ...]:
+        """Explicitly create or replace mismatched regular indexes."""
+        return await self._regular_index_manager().ensure()
+
+    async def list_regular_indexes(self) -> tuple[MongoDBIndexResult, ...]:
+        """Read regular index definitions without mutation."""
+        return await self._regular_index_manager().list()
+
+    async def inspect_regular_index(self, name: str) -> MongoDBIndexResult:
+        """Inspect one provider-owned regular index."""
+        return await self._regular_index_manager().inspect(name)
+
+    async def update_regular_index(self, name: str) -> MongoDBIndexResult:
+        """Explicitly replace one provider-owned regular index."""
+        return await self._regular_index_manager().update(name)
+
+    async def drop_regular_index(self, name: str) -> None:
+        """Explicitly drop one provider-owned regular index."""
+        await self._regular_index_manager().drop(name)
+
+    async def validate_regular_indexes(self) -> tuple[MongoDBIndexResult, ...]:
+        """Validate required administrative and configured TTL indexes."""
+        return await self._regular_index_manager().validate()
 
     async def close(self) -> None:
         """Close only a MongoDB client created by this provider."""
@@ -764,52 +711,6 @@ class MongoDBMemoryContextProvider(ContextProvider):
         traceback: TracebackType | None,
     ) -> None:
         await self.close()
-
-
-def _validate_index_definition(
-    provider: MongoDBMemoryContextProvider,
-    index: Mapping[str, Any],
-    *,
-    require_ready: bool,
-) -> None:
-    latest_value: object = index.get("latestDefinition") or index.get("definition") or {}
-    latest: Mapping[str, object] = (
-        cast(Mapping[str, object], latest_value) if isinstance(latest_value, Mapping) else {}
-    )
-    fields_value: object = latest.get("fields", [])
-    fields = (
-        [
-            cast(Mapping[str, object], field)
-            for field in cast(list[object], fields_value)
-            if isinstance(field, Mapping)
-        ]
-        if isinstance(fields_value, list)
-        else []
-    )
-    vector = next(
-        (field for field in fields if field.get("type") == "vector"),
-        None,
-    )
-    expected_filters = {"application_id", "agent_id", "user_id", "session_id"}
-    actual_filters = {str(field.get("path")) for field in fields if field.get("type") == "filter"}
-    if (
-        vector is None
-        or vector.get("path") != provider.vector_field
-        or vector.get("numDimensions") != provider.vector_dimensions
-        or vector.get("similarity") != provider.similarity
-        or not expected_filters.issubset(actual_filters)
-    ):
-        raise MongoDBIndexMismatchError(
-            f"Vector Search index '{provider.index_name}' does not match "
-            "the required Memory definition."
-        )
-    if require_ready:
-        status = str(index.get("status", "")).upper()
-        queryable = index.get("queryable")
-        if status != "READY" or queryable is not True:
-            raise MongoDBIndexNotReadyError(
-                f"Vector Search index '{provider.index_name}' is not queryable."
-            )
 
 
 def _memory_id(
@@ -1116,18 +1017,6 @@ def _finish_retry_attempt(
         retry_batches.pop(batch_fingerprint, None)
     if not retry_batches:
         state.pop("memory_pending_batches", None)
-
-
-def _index_keys(index: Mapping[str, Any]) -> tuple[tuple[str, int], ...]:
-    key_value = index.get("key")
-    if not isinstance(key_value, Mapping):
-        return ()
-    typed_keys = cast(Mapping[str, object], key_value)
-    return tuple(
-        (name, int(direction))
-        for name, direction in typed_keys.items()
-        if isinstance(direction, (int, float))
-    )
 
 
 def _is_provider_attributed(message: Message) -> bool:

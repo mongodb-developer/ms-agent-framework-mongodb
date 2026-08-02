@@ -21,6 +21,14 @@ from .errors import (
     MongoDBTransientRetrievalError,
 )
 from .history import MongoDBHistoryProvider, MongoDBHistoryProviderOptions
+from .indexing import (
+    MongoDBIndexDefinition,
+    MongoDBIndexResult,
+    MongoDBIndexState,
+    MongoDBRegularIndexDefinition,
+    MongoDBSearchIndexDefinition,
+    MongoDBVectorIndexDefinition,
+)
 from .memory import MemoryMetadata, MemoryMetadataPage, MongoDBMemoryContextProvider
 from .rag import (
     AndFilter,
@@ -59,10 +67,13 @@ __all__ = [
     "MongoDBFilter",
     "MongoDBFilterTranslationError",
     "MongoDBIndexError",
+    "MongoDBIndexDefinition",
     "MongoDBIndexFailedError",
     "MongoDBIndexMismatchError",
     "MongoDBIndexMissingError",
     "MongoDBIndexNotReadyError",
+    "MongoDBIndexResult",
+    "MongoDBIndexState",
     "MongoDBIntegrationError",
     "MongoDBMappingError",
     "MongoDBHistoryProvider",
@@ -75,11 +86,14 @@ __all__ = [
     "MongoDBRAGProviderOptions",
     "MongoDBRAGResult",
     "MongoDBRAGSearchOptions",
+    "MongoDBRegularIndexDefinition",
     "MongoDBRetrievalError",
+    "MongoDBSearchIndexDefinition",
     "MongoDBSearchMode",
     "MongoDBTimeoutError",
     "MongoDBTransientPersistenceError",
     "MongoDBTransientRetrievalError",
+    "MongoDBVectorIndexDefinition",
     "MemoryMetadata",
     "MemoryMetadataPage",
     "NotEqualFilter",

@@ -40,6 +40,7 @@ from ..errors import (
     MongoDBTimeoutError,
     MongoDBTransientRetrievalError,
 )
+from ..indexing import MongoDBIndexResult
 from ._filters import compile_filter, compile_match_filter
 from .filters import (
     AndFilter,
@@ -696,9 +697,37 @@ class MongoDBRAGProvider:
             source_url=source_url,
         )
 
-    async def validate_vector_search_index(self, *, require_ready: bool = True) -> None:
+    async def list_vector_search_indexes(self) -> tuple[MongoDBIndexResult, ...]:
+        """List Vector Search indexes without mutation."""
+        return await self._index_manager().list()
+
+    async def inspect_vector_search_index(self) -> MongoDBIndexResult:
+        """Inspect the configured Vector Search index."""
+        return await self._index_manager().inspect_result()
+
+    async def validate_vector_search_index(
+        self, *, require_ready: bool = True
+    ) -> MongoDBIndexResult:
         """Validate the named vector index without mutating it."""
-        await self._index_manager().validate(require_ready=require_ready)
+        return await self._index_manager().validate_result(require_ready=require_ready)
+
+    async def create_vector_search_index(self) -> MongoDBIndexResult:
+        """Explicitly submit Vector Search index creation."""
+        return await self._index_manager().create()
+
+    async def update_vector_search_index(self) -> MongoDBIndexResult:
+        """Explicitly submit a Vector Search index update."""
+        return await self._index_manager().update()
+
+    async def drop_vector_search_index(self) -> None:
+        """Explicitly drop the configured Vector Search index."""
+        await self._index_manager().drop()
+
+    async def wait_until_vector_search_index_ready(
+        self, *, timeout: float = 600.0, poll_interval: float = 1.0
+    ) -> MongoDBIndexResult:
+        """Wait with a monotonic deadline for Vector Search queryability."""
+        return await self._index_manager().wait_result(timeout=timeout, poll_interval=poll_interval)
 
     async def _validate_effective_vector_search_index(
         self,
@@ -712,17 +741,45 @@ class MongoDBRAGProvider:
         wait_until_ready: bool = False,
         timeout: float = 600.0,
         poll_interval: float = 1.0,
-    ) -> None:
+    ) -> MongoDBIndexResult:
         """Explicitly create/update the index and optionally await queryability."""
-        await self._index_manager().ensure(
+        return await self._index_manager().ensure_result(
             wait_until_ready=wait_until_ready,
             timeout=timeout,
             poll_interval=poll_interval,
         )
 
-    async def validate_search_index(self, *, require_ready: bool = True) -> None:
+    async def list_search_indexes(self) -> tuple[MongoDBIndexResult, ...]:
+        """List MongoDB Search indexes without mutation."""
+        return await self._search_index_manager().list()
+
+    async def inspect_search_index(self) -> MongoDBIndexResult:
+        """Inspect the configured MongoDB Search index."""
+        return await self._search_index_manager().inspect_result()
+
+    async def validate_search_index(self, *, require_ready: bool = True) -> MongoDBIndexResult:
         """Validate the named MongoDB Search index without mutating it."""
-        await self._search_index_manager().validate(require_ready=require_ready)
+        return await self._search_index_manager().validate_result(require_ready=require_ready)
+
+    async def create_search_index(self) -> MongoDBIndexResult:
+        """Explicitly submit MongoDB Search index creation."""
+        return await self._search_index_manager().create()
+
+    async def update_search_index(self) -> MongoDBIndexResult:
+        """Explicitly submit a MongoDB Search index update."""
+        return await self._search_index_manager().update()
+
+    async def drop_search_index(self) -> None:
+        """Explicitly drop the configured MongoDB Search index."""
+        await self._search_index_manager().drop()
+
+    async def wait_until_search_index_ready(
+        self, *, timeout: float = 600.0, poll_interval: float = 1.0
+    ) -> MongoDBIndexResult:
+        """Wait with a monotonic deadline for Search queryability."""
+        return await self._search_index_manager().wait_result(
+            timeout=timeout, poll_interval=poll_interval
+        )
 
     async def _validate_effective_search_index(
         self,
@@ -736,9 +793,9 @@ class MongoDBRAGProvider:
         wait_until_ready: bool = False,
         timeout: float = 600.0,
         poll_interval: float = 1.0,
-    ) -> None:
+    ) -> MongoDBIndexResult:
         """Explicitly create/update the Search index and optionally await queryability."""
-        await self._search_index_manager().ensure(
+        return await self._search_index_manager().ensure_result(
             wait_until_ready=wait_until_ready,
             timeout=timeout,
             poll_interval=poll_interval,
@@ -755,8 +812,12 @@ class MongoDBRAGProvider:
     ) -> SearchIndexManager:
         if self.collection is None:
             raise MongoDBCapabilityError("MongoDB collection is not configured.")
+        if self.options.search_index_name is None:
+            raise MongoDBCapabilityError(
+                "MongoDB Search index management is unavailable in this RAG mode."
+            )
         expected = SearchIndexDefinition(
-            name=cast(str, self.options.search_index_name),
+            name=self.options.search_index_name,
             text_paths=tuple(self.options.text_fields),
             analyzer=self.options.search_analyzer,
             filter_fields=tuple(sorted(_search_filter_fields(expression).items())),
@@ -774,10 +835,14 @@ class MongoDBRAGProvider:
     ) -> VectorIndexManager:
         if self.collection is None:
             raise MongoDBCapabilityError("MongoDB collection is not configured.")
+        if self.options.vector_index_name is None or self.options.vector_dimensions is None:
+            raise MongoDBCapabilityError(
+                "MongoDB Vector Search index management is unavailable in this RAG mode."
+            )
         expected = VectorIndexDefinition(
-            name=cast(str, self.options.vector_index_name),
+            name=self.options.vector_index_name,
             path=self.options.vector_field,
-            dimensions=cast(int, self.options.vector_dimensions),
+            dimensions=self.options.vector_dimensions,
             similarity=self.options.similarity,
             filter_paths=tuple(sorted(_filter_paths(expression))),
         )
@@ -829,6 +894,87 @@ class MongoDBRAGContextProvider(ContextProvider):
     ) -> list[MongoDBRAGResult]:
         """Delegate deterministic direct search to the underlying provider."""
         return await self.provider.search(query, options=options)
+
+    async def list_indexes(self) -> tuple[MongoDBIndexResult, ...]:
+        """List configured RAG Search and Vector Search indexes."""
+        results: list[MongoDBIndexResult] = []
+        if self.provider.options.vector_index_name is not None:
+            results.extend(await self.provider.list_vector_search_indexes())
+        if self.provider.options.search_index_name is not None:
+            results.extend(await self.provider.list_search_indexes())
+        return tuple(results)
+
+    async def inspect_vector_search_index(self) -> MongoDBIndexResult:
+        return await self.provider.inspect_vector_search_index()
+
+    async def validate_vector_search_index(
+        self, *, require_ready: bool = True
+    ) -> MongoDBIndexResult:
+        return await self.provider.validate_vector_search_index(require_ready=require_ready)
+
+    async def create_vector_search_index(self) -> MongoDBIndexResult:
+        return await self.provider.create_vector_search_index()
+
+    async def update_vector_search_index(self) -> MongoDBIndexResult:
+        return await self.provider.update_vector_search_index()
+
+    async def ensure_vector_search_index(
+        self,
+        *,
+        wait_until_ready: bool = False,
+        timeout: float = 600.0,
+        poll_interval: float = 1.0,
+    ) -> MongoDBIndexResult:
+        return await self.provider.ensure_vector_search_index(
+            wait_until_ready=wait_until_ready,
+            timeout=timeout,
+            poll_interval=poll_interval,
+        )
+
+    async def wait_until_vector_search_index_ready(
+        self, *, timeout: float = 600.0, poll_interval: float = 1.0
+    ) -> MongoDBIndexResult:
+        return await self.provider.wait_until_vector_search_index_ready(
+            timeout=timeout, poll_interval=poll_interval
+        )
+
+    async def drop_vector_search_index(self) -> None:
+        await self.provider.drop_vector_search_index()
+
+    async def inspect_search_index(self) -> MongoDBIndexResult:
+        return await self.provider.inspect_search_index()
+
+    async def validate_search_index(self, *, require_ready: bool = True) -> MongoDBIndexResult:
+        return await self.provider.validate_search_index(require_ready=require_ready)
+
+    async def create_search_index(self) -> MongoDBIndexResult:
+        return await self.provider.create_search_index()
+
+    async def update_search_index(self) -> MongoDBIndexResult:
+        return await self.provider.update_search_index()
+
+    async def ensure_search_index(
+        self,
+        *,
+        wait_until_ready: bool = False,
+        timeout: float = 600.0,
+        poll_interval: float = 1.0,
+    ) -> MongoDBIndexResult:
+        return await self.provider.ensure_search_index(
+            wait_until_ready=wait_until_ready,
+            timeout=timeout,
+            poll_interval=poll_interval,
+        )
+
+    async def wait_until_search_index_ready(
+        self, *, timeout: float = 600.0, poll_interval: float = 1.0
+    ) -> MongoDBIndexResult:
+        return await self.provider.wait_until_search_index_ready(
+            timeout=timeout, poll_interval=poll_interval
+        )
+
+    async def drop_search_index(self) -> None:
+        await self.provider.drop_search_index()
 
     async def before_run(
         self,

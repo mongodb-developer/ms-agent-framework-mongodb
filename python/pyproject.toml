@@ -39,6 +39,7 @@ markers = [
     "integration_rag_vector: requires a credentialed MongoDB deployment with Vector Search",
     "integration_rag_search: requires a credentialed MongoDB deployment with Search",
     "integration_rag_hybrid: requires a credentialed MongoDB 8.0+ deployment with Search and Vector Search",
+    "integration_indexing: requires a credentialed MongoDB deployment with Search index management",
 ]
 
 [tool.ruff]
