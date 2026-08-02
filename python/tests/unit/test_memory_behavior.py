@@ -90,6 +90,7 @@ class FakeCollection:
         self.aggregate_documents: list[dict[str, Any]] = []
         self.aggregate_pipeline: list[dict[str, Any]] | None = None
         self.inserted: list[dict[str, Any]] = []
+        self.insert_attempts: list[list[dict[str, Any]]] = []
         self.deleted_filter: dict[str, Any] | None = None
         self.metadata_documents: list[dict[str, Any]] = []
         self.find_filter: dict[str, Any] | None = None
@@ -109,6 +110,7 @@ class FakeCollection:
 
     async def insert_many(self, documents: list[dict[str, Any]], *, ordered: bool) -> Result:
         assert ordered is False
+        self.insert_attempts.append(documents)
         if self.fail_writes:
             raise ConnectionFailure("sensitive-host.invalid")
         self.inserted = documents
@@ -148,13 +150,16 @@ def provider(
     embeddings: FakeEmbeddingGenerator | None = None,
     **kwargs: Any,
 ) -> MongoDBMemoryContextProvider:
+    options: dict[str, Any] = {
+        "vector_dimensions": 3,
+        "application_id": "app-1",
+        "user_id": "user-1",
+        "collection": cast(Any, collection),
+    }
+    options.update(kwargs)
     return MongoDBMemoryContextProvider(
         embeddings or FakeEmbeddingGenerator(),
-        vector_dimensions=3,
-        application_id="app-1",
-        user_id="user-1",
-        collection=cast(Any, collection),
-        **kwargs,
+        **options,
     )
 
 
@@ -187,7 +192,7 @@ async def test_search_builds_scoped_ann_and_optional_session_exact_pipelines() -
     assert "numCandidates" not in stage
 
 
-async def test_store_batches_embeddings_and_insert_with_retry_stable_ids() -> None:
+async def test_store_batches_embeddings_and_uses_stable_message_ids() -> None:
     collection = FakeCollection()
     embeddings = FakeEmbeddingGenerator()
     memory = provider(collection, embeddings, retention=timedelta(days=7))
@@ -209,7 +214,30 @@ async def test_store_batches_embeddings_and_insert_with_retry_stable_ids() -> No
     assert all("expires_at" in document for document in collection.inserted)
 
     await memory.store(messages, session_id="session-1")
-    assert [document["_id"] for document in collection.inserted] == first_ids
+    later_ids = [document["_id"] for document in collection.inserted]
+    assert later_ids[0] == first_ids[0]
+    assert later_ids[1] != first_ids[1]
+
+
+async def test_no_message_id_reuses_pending_retry_id_then_advances_after_success() -> None:
+    collection = FakeCollection()
+    memory = provider(collection)
+    state: dict[str, Any] = {}
+    messages = [Message("user", ["identical content"])]
+    collection.fail_writes = True
+
+    with pytest.raises(MongoDBPersistenceError):
+        await memory.store(messages, session_id="session-1", state=state)
+    failed_id = collection.insert_attempts[0][0]["_id"]
+
+    collection.fail_writes = False
+    await memory.store(messages, session_id="session-1", state=state)
+    retry_id = collection.insert_attempts[1][0]["_id"]
+    await memory.store(messages, session_id="session-1", state=state)
+    later_run_id = collection.insert_attempts[2][0]["_id"]
+
+    assert retry_id == failed_id
+    assert later_run_id != retry_id
 
 
 async def test_direct_failures_surface_stable_errors_with_driver_causes() -> None:
@@ -450,6 +478,40 @@ def test_options_are_bounded_and_no_operation_provisions_indexes() -> None:
     with pytest.raises(MongoDBConfigurationError, match="retrieval_timeout"):
         provider(collection, retrieval_timeout=0)
     assert collection.created_search_model is None
+
+
+@pytest.mark.parametrize(
+    ("option_name", "value"),
+    [
+        ("vector_dimensions", 3.0),
+        ("vector_dimensions", True),
+        ("max_results", 3.0),
+        ("max_results", True),
+        ("num_candidates", 30.0),
+        ("num_candidates", True),
+    ],
+)
+def test_constructor_integer_limits_reject_non_integers(
+    option_name: str,
+    value: object,
+) -> None:
+    with pytest.raises(MongoDBConfigurationError, match=option_name):
+        if option_name == "vector_dimensions":
+            provider(FakeCollection(), vector_dimensions=cast(Any, value))
+        elif option_name == "max_results":
+            provider(FakeCollection(), max_results=cast(Any, value))
+        else:
+            provider(FakeCollection(), num_candidates=cast(Any, value))
+
+
+@pytest.mark.parametrize("value", [1.5, True])
+async def test_operation_integer_limits_reject_non_integers(value: object) -> None:
+    memory = provider(FakeCollection())
+
+    with pytest.raises(MongoDBConfigurationError, match="max_results"):
+        await memory.search("query", max_results=cast(Any, value))
+    with pytest.raises(MongoDBConfigurationError, match="page_size"):
+        await memory.list_metadata(page_size=cast(Any, value))
 
 
 async def test_clear_user_requires_application_or_agent_authorization_scope() -> None:

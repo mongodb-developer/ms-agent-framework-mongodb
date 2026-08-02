@@ -58,17 +58,39 @@ async def test_memory_storage_retrieval_and_targeted_cleanup(
         user_id="user-a",
         num_candidates=10,
     )
+    other_tenant_provider = MongoDBMemoryContextProvider(
+        IntegrationEmbeddingGenerator(),
+        mongo_client=client,
+        database_name=database_name,
+        collection_name=collection_name,
+        vector_dimensions=3,
+        application_id="integration-memory",
+        user_id="user-b",
+        num_candidates=10,
+    )
     try:
         await provider.store(
             [Message("user", ["Remember that blue is preferred."], message_id="fixture-1")],
             session_id="session-a",
         )
+        await other_tenant_provider.store(
+            [
+                Message(
+                    "user",
+                    ["Cross-tenant blue must never be returned."],
+                    message_id="fixture-cross-tenant",
+                )
+            ],
+            session_id="session-b",
+        )
         await provider.ensure_vector_search_index(wait_until_ready=True, timeout=120)
-        results = await provider.search("blue", exact=True)
+        results = await provider.search("blue", exact=True, max_results=10)
         assert [message.text for message in results] == ["Remember that blue is preferred."]
         assert await provider.clear_session("session-a") == 1
+        assert await other_tenant_provider.clear_session("session-b") == 1
     finally:
         assert collection_name.startswith("af_memory_test_")
         await client[database_name].drop_collection(collection_name)
         await provider.close()
+        await other_tenant_provider.close()
         await client.close()

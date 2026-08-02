@@ -37,9 +37,10 @@ permanent records omit it.
 
 Document IDs are SHA-256 hashes of immutable scope plus framework message ID.
 When no message ID exists, one UUID is generated and retained in the
-provider-scoped Agent Framework state under `memory_retry_ids`, so an
-`after_run` retry reuses the same ID. Duplicate-only bulk-write failures are
-treated as an idempotent replay.
+provider-scoped Agent Framework pending-batch state, so a failed `after_run`
+retry reuses the same ID. Pending state is removed only after confirmed
+insertion or a duplicate-only idempotent replay; a later successful run with
+identical content therefore receives a new ID.
 
 `search()` embeds one non-empty query and builds structured BSON for either ANN
 (`numCandidates`) or ENN (`exact: true`). The scope filter is inside
@@ -99,8 +100,9 @@ Python contract test.
 
 Credentialed `python/tests/integration_memory/test_memory_integration.py`
 creates a uniquely prefixed collection, explicitly provisions and waits for
-the index, exercises ENN storage/retrieval/deletion, and targets only that
-collection in `finally`. It skips unless `MONGODB_URI` and
+the index, exercises ENN storage/retrieval/deletion, proves an equally relevant
+cross-tenant memory is excluded, and targets only that collection in `finally`.
+It skips unless `MONGODB_URI` and
 `MONGODB_DATABASE` are set.
 
 The Python gate is pytest, Ruff lint and format checks, mypy, Pyright, wheel and

@@ -305,13 +305,16 @@ class MongoDBMemoryContextProvider(ContextProvider):
         scope = self._scope_filter(session_id=session_id)
         vectors = await self._embed([message.text for message in eligible])
         now = datetime.now(timezone.utc)
+        retry_state = state if state is not None else self._direct_retry_state
+        batch_fingerprint = _batch_fingerprint(eligible, scope=scope)
         documents: list[MongoDocument] = []
         for ordinal, (message, vector) in enumerate(zip(eligible, vectors, strict=True)):
             memory_id = _memory_id(
                 message,
                 scope=scope,
                 ordinal=ordinal,
-                state=state if state is not None else self._direct_retry_state,
+                state=retry_state,
+                batch_fingerprint=batch_fingerprint,
             )
             document: MongoDocument = {
                 "_id": memory_id,
@@ -330,13 +333,20 @@ class MongoDBMemoryContextProvider(ContextProvider):
             documents.append(document)
         try:
             result = await self.collection.insert_many(documents, ordered=False)
+            _complete_retry_batch(retry_state, batch_fingerprint)
             return len(result.inserted_ids)
         except asyncio.CancelledError:
             raise
         except BulkWriteError as exc:
             details = exc.details or {}
             write_errors = details.get("writeErrors", [])
-            if write_errors and all(error.get("code") == 11000 for error in write_errors):
+            write_concern_errors = details.get("writeConcernErrors", [])
+            if (
+                write_errors
+                and not write_concern_errors
+                and all(error.get("code") == 11000 for error in write_errors)
+            ):
+                _complete_retry_batch(retry_state, batch_fingerprint)
                 return int(details.get("nInserted", 0))
             raise MongoDBPersistenceError("MongoDB Memory persistence failed.") from exc
         except PyMongoError as exc:
@@ -713,7 +723,8 @@ def _memory_id(
     *,
     scope: Mapping[str, Any],
     ordinal: int,
-    state: dict[str, Any] | None,
+    state: dict[str, Any],
+    batch_fingerprint: str,
 ) -> str:
     stable_scope = "|".join(f"{key}={scope[key]}" for key in sorted(scope))
     if message.message_id:
@@ -722,11 +733,13 @@ def _memory_id(
     fingerprint = hashlib.sha256(
         f"{stable_scope}|{message.role}|{message.text}|{ordinal}".encode()
     ).hexdigest()
-    if state is None:
-        return str(uuid.uuid4())
-    retry_ids_value = state.setdefault("memory_retry_ids", {})
-    if not isinstance(retry_ids_value, dict):
+    retry_batches_value = state.setdefault("memory_pending_batches", {})
+    if not isinstance(retry_batches_value, dict):
         raise MongoDBConfigurationError("Memory provider retry state is invalid.")
+    retry_batches = cast(dict[str, Any], retry_batches_value)
+    retry_ids_value = retry_batches.setdefault(batch_fingerprint, {})
+    if not isinstance(retry_ids_value, dict):
+        raise MongoDBConfigurationError("Memory provider pending batch state is invalid.")
     retry_ids = cast(dict[str, Any], retry_ids_value)
     existing = retry_ids.get(fingerprint)
     if isinstance(existing, str):
@@ -734,6 +747,29 @@ def _memory_id(
     generated = str(uuid.uuid4())
     retry_ids[fingerprint] = generated
     return generated
+
+
+def _batch_fingerprint(
+    messages: Sequence[Message],
+    *,
+    scope: Mapping[str, Any],
+) -> str:
+    parts = [f"{key}={scope[key]}" for key in sorted(scope)]
+    parts.extend(
+        f"{ordinal}|{message.role}|{message.message_id or ''}|{message.text}"
+        for ordinal, message in enumerate(messages)
+    )
+    return hashlib.sha256("\n".join(parts).encode()).hexdigest()
+
+
+def _complete_retry_batch(state: dict[str, Any], batch_fingerprint: str) -> None:
+    retry_batches_value = state.get("memory_pending_batches")
+    if not isinstance(retry_batches_value, dict):
+        return
+    retry_batches = cast(dict[str, Any], retry_batches_value)
+    retry_batches.pop(batch_fingerprint, None)
+    if not retry_batches:
+        state.pop("memory_pending_batches", None)
 
 
 def _index_keys(index: Mapping[str, Any]) -> tuple[tuple[str, int], ...]:
@@ -807,8 +843,8 @@ def _require_non_empty(value: str, *, option_name: str) -> str:
     return value
 
 
-def _bounded_int(value: int, option_name: str, *, maximum: int) -> int:
-    if isinstance(value, bool) or not 1 <= value <= maximum:
+def _bounded_int(value: object, option_name: str, *, maximum: int) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or not 1 <= value <= maximum:
         raise MongoDBConfigurationError(
             f"{option_name} must be an integer between 1 and {maximum}."
         )
