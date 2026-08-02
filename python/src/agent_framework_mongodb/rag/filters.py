@@ -5,13 +5,16 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from math import isfinite
-from typing import ClassVar
+from typing import ClassVar, cast
 
 from .._shared.field_paths import validate_field_path
 from ..errors import MongoDBConfigurationError
 
 FilterScalar = str | int | float | bool | datetime | None
 RangeScalar = int | float | datetime
+FilterSequence = tuple[FilterScalar, ...] | list[FilterScalar]
+_BSON_INT64_MIN = -(2**63)
+_BSON_INT64_MAX = 2**63 - 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +44,12 @@ def _field(value: object) -> str:
 def _scalar(value: object) -> FilterScalar:
     if not isinstance(value, (str, int, float, bool, datetime)) and value is not None:
         raise MongoDBConfigurationError("filter value must be a BSON scalar, not raw BSON.")
+    if (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and not _BSON_INT64_MIN <= value <= _BSON_INT64_MAX
+    ):
+        raise MongoDBConfigurationError("integer filter value must be within the BSON int64 range.")
     if isinstance(value, float) and not isfinite(value):
         raise MongoDBConfigurationError("numeric filter value must be finite.")
     if isinstance(value, datetime) and value.tzinfo is None:
@@ -55,6 +64,21 @@ def _range_scalar(value: object) -> RangeScalar:
     if result is None or isinstance(result, (str, bool)):
         raise MongoDBConfigurationError("range filter value must be numeric or datetime.")
     return result
+
+
+def _membership_values(value: object) -> tuple[FilterScalar, ...]:
+    if not isinstance(value, (list, tuple)):
+        raise MongoDBConfigurationError(
+            "membership filter values must be an explicit list or tuple."
+        )
+    values = tuple(_scalar(item) for item in cast(list[object] | tuple[object, ...], value))
+    if not values:
+        raise MongoDBConfigurationError("membership filter requires at least one value.")
+    if len(values) > MongoDBFilter.MAX_VALUES:
+        raise MongoDBConfigurationError(
+            f"membership filter accepts at most {MongoDBFilter.MAX_VALUES} values."
+        )
+    return values
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,18 +110,11 @@ class InFilter(MongoDBFilter):
     """Match a field contained in a bounded scalar set."""
 
     field: str
-    values: tuple[FilterScalar, ...]
+    values: FilterSequence
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "field", _field(self.field))
-        values = tuple(_scalar(value) for value in self.values)
-        if not values:
-            raise MongoDBConfigurationError("membership filter requires at least one value.")
-        if len(values) > self.MAX_VALUES:
-            raise MongoDBConfigurationError(
-                f"membership filter accepts at most {self.MAX_VALUES} values."
-            )
-        object.__setattr__(self, "values", values)
+        object.__setattr__(self, "values", _membership_values(self.values))
 
 
 @dataclass(frozen=True, slots=True)

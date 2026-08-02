@@ -42,8 +42,9 @@ All public symbols below are re-exported by `agent_framework_mongodb`:
 - `MongoDBRAGResult`, `MongoDBRAGProvider`, and
   `MongoDBRAGContextProvider`.
 
-Constructors normalize sequence inputs to tuples and mode strings to
-`MongoDBSearchMode`. Configuration errors are raised before any future database
+Constructors normalize explicit list/tuple inputs to tuples and mode strings to
+`MongoDBSearchMode`. Scalar strings/bytes and arbitrary iterables are never
+treated as sequences. Configuration errors are raised before any future database
 access. Raw mappings/BSON are rejected for filter inputs with a `TypeError`;
 unsafe paths, values, limits, and incompatible mode options raise
 `MongoDBConfigurationError`. Complete-translation failures use
@@ -56,9 +57,11 @@ Filter field paths use the shared
 non-empty dot-delimited segments, no null bytes, `$` segments, positional
 segments, empty segments, or `_ragScore` collisions. Equality and membership
 accept BSON scalar values only: strings, finite numbers, booleans, timezone-aware
-datetimes, and null. Ranges accept finite non-boolean numbers and timezone-aware
-datetimes. Membership contains 1-100 values, boolean nodes contain 2-20 children,
-and expression depth is at most eight.
+datetimes, and null. Every Python integer must fit BSON int64
+(`-2**63` through `2**63 - 1`). Ranges accept finite non-boolean numbers and
+timezone-aware datetimes. Membership requires an explicit list or tuple
+containing 1-100 values; it rejects scalar strings/bytes rather than splitting
+them. Boolean nodes contain 2-20 children, and expression depth is at most eight.
 
 Internal translators in `rag/_filters.py` produce structured values only:
 
@@ -83,6 +86,12 @@ forbids candidates. Full text requires a Search index and forbids vector-only
 options. Hybrid requires both indexes, uses ANN candidates, requires finite
 non-negative weights, and requires at least one positive weight. Names and all
 configured result paths are validated at construction.
+
+`text_fields` and `metadata_fields` accept explicit lists or tuples only.
+`text_fields` must be non-empty; `metadata_fields` may be empty. Both validate
+each complete field path and remove duplicates while preserving first-seen
+order. A string, bytes value, generator, or other iterable is rejected so it
+cannot be normalized character by character.
 
 `normalize_search_options()` applies per-call bounds and combines an optional
 typed relevance filter with the immutable mandatory filter by conjunction; it

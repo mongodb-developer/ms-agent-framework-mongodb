@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from enum import Enum
 from math import isfinite
 from re import fullmatch
+from typing import cast
 
 from .._shared.embeddings import validate_dimensions
 from .._shared.field_paths import validate_field_path
@@ -49,11 +50,26 @@ def _name(value: object, name: str, *, required: bool) -> str | None:
     return value
 
 
-def _paths(values: tuple[str, ...] | list[str], name: str) -> tuple[str, ...]:
-    result = tuple(values)
-    if not result:
+def _paths(
+    values: object,
+    name: str,
+    *,
+    allow_empty: bool,
+) -> tuple[str, ...]:
+    if not isinstance(values, (list, tuple)):
+        raise MongoDBConfigurationError(f"{name} must be an explicit list or tuple.")
+    if not values and not allow_empty:
         raise MongoDBConfigurationError(f"{name} must contain at least one field path.")
-    return tuple(validate_field_path(value, option_name=name) for value in result)
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in cast(list[object] | tuple[object, ...], values):
+        if not isinstance(value, str):
+            raise MongoDBConfigurationError(f"{name} values must be field path strings.")
+        path = validate_field_path(value, option_name=name)
+        if path not in seen:
+            seen.add(path)
+            result.append(path)
+    return tuple(result)
 
 
 def _weight(value: object, name: str) -> float:
@@ -180,14 +196,15 @@ class MongoDBRAGProviderOptions:
         mode = _mode(self.mode)
         object.__setattr__(self, "mode", mode)
         object.__setattr__(self, "top_k", _bounded_int(self.top_k, "top_k", maximum=100))
-        object.__setattr__(self, "text_fields", _paths(self.text_fields, "text_fields"))
+        object.__setattr__(
+            self,
+            "text_fields",
+            _paths(self.text_fields, "text_fields", allow_empty=False),
+        )
         object.__setattr__(
             self,
             "metadata_fields",
-            tuple(
-                validate_field_path(value, option_name="metadata_fields")
-                for value in self.metadata_fields
-            ),
+            _paths(self.metadata_fields, "metadata_fields", allow_empty=True),
         )
         object.__setattr__(
             self, "id_field", validate_field_path(self.id_field, option_name="id_field")

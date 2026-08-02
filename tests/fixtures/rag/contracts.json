@@ -85,6 +85,43 @@
       },
       "valid": false,
       "error_contains": "at least top_k"
+    },
+    {
+      "name": "field path sequences deduplicate in order",
+      "input": {
+        "mode": "full_text",
+        "search_index_name": "knowledge_text",
+        "text_fields": ["content", "summary", "content"],
+        "metadata_fields": ["metadata.kind", "metadata.kind"]
+      },
+      "valid": true,
+      "normalized": {
+        "mode": "full_text",
+        "top_k": 5,
+        "num_candidates": null,
+        "text_fields": ["content", "summary"],
+        "metadata_fields": ["metadata.kind"]
+      }
+    },
+    {
+      "name": "text fields reject scalar strings",
+      "input": {
+        "mode": "full_text",
+        "search_index_name": "knowledge_text",
+        "text_fields": "content"
+      },
+      "valid": false,
+      "error_contains": "explicit list or tuple"
+    },
+    {
+      "name": "metadata fields reject scalar strings",
+      "input": {
+        "mode": "full_text",
+        "search_index_name": "knowledge_text",
+        "metadata_fields": "metadata.kind"
+      },
+      "valid": false,
+      "error_contains": "explicit list or tuple"
     }
   ],
   "filter_cases": [
@@ -192,6 +229,56 @@
           }
         }
       ]
+    }
+  ],
+  "filter_validation_cases": [
+    {
+      "name": "BSON int64 lower boundary",
+      "ast": {
+        "operator": "eq",
+        "field": "value",
+        "value": -9223372036854775808
+      },
+      "valid": true
+    },
+    {
+      "name": "BSON int64 upper boundary in membership",
+      "ast": {
+        "operator": "in",
+        "field": "value",
+        "values": [9223372036854775807]
+      },
+      "valid": true
+    },
+    {
+      "name": "integer below BSON int64",
+      "ast": {
+        "operator": "eq",
+        "field": "value",
+        "value": -9223372036854775809
+      },
+      "valid": false,
+      "error_contains": "BSON int64 range"
+    },
+    {
+      "name": "integer above BSON int64 in membership",
+      "ast": {
+        "operator": "in",
+        "field": "value",
+        "values": [9223372036854775808]
+      },
+      "valid": false,
+      "error_contains": "BSON int64 range"
+    },
+    {
+      "name": "range rejects boolean numeric semantics",
+      "ast": {
+        "operator": "gte",
+        "field": "value",
+        "value": true
+      },
+      "valid": false,
+      "error_contains": "numeric or datetime"
     }
   ],
   "result": {

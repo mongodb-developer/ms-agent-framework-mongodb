@@ -53,6 +53,10 @@ def test_language_neutral_option_contract() -> None:
             assert options.mode.value == normalized["mode"], case["name"]
             assert options.top_k == normalized["top_k"], case["name"]
             assert options.num_candidates == normalized["num_candidates"], case["name"]
+            if "text_fields" in normalized:
+                assert list(options.text_fields) == normalized["text_fields"], case["name"]
+            if "metadata_fields" in normalized:
+                assert list(options.metadata_fields) == normalized["metadata_fields"], case["name"]
         else:
             with pytest.raises(
                 MongoDBConfigurationError,
@@ -71,6 +75,15 @@ def test_language_neutral_filter_translation_contract() -> None:
             "vector": case["vector"],
             "search": case["search"],
         }
+
+
+def test_language_neutral_filter_value_validation_contract() -> None:
+    for case in _fixture()["filter_validation_cases"]:
+        if case["valid"]:
+            _filter(case["ast"])
+        else:
+            with pytest.raises(MongoDBConfigurationError, match=case["error_contains"]):
+                _filter(case["ast"])
 
 
 def test_language_neutral_result_and_citation_contract() -> None:

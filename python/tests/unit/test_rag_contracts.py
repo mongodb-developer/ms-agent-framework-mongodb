@@ -47,13 +47,39 @@ def test_provider_options_validate_bounds_and_names(changes: dict[str, Any], mes
 
 
 def test_ann_options_normalize_sequences_and_defaults() -> None:
-    options = ann_options(text_fields=["content", "summary"], metadata_fields=["metadata.kind"])
+    options = ann_options(
+        text_fields=["content", "summary", "content"],
+        metadata_fields=["metadata.kind", "metadata.kind"],
+    )
 
     assert options.mode is MongoDBSearchMode.VECTOR_ANN
     assert options.text_fields == ("content", "summary")
     assert options.metadata_fields == ("metadata.kind",)
     assert options.top_k == 5
     assert options.num_candidates == 50
+
+
+@pytest.mark.parametrize("option_name", ["text_fields", "metadata_fields"])
+@pytest.mark.parametrize("value", ["content", b"content"])
+def test_sequence_valued_field_options_reject_scalar_strings_and_bytes(
+    option_name: str,
+    value: object,
+) -> None:
+    with pytest.raises(MongoDBConfigurationError, match="explicit list or tuple"):
+        ann_options(**{option_name: value})
+
+
+@pytest.mark.parametrize("option_name", ["text_fields", "metadata_fields"])
+def test_sequence_valued_field_options_reject_non_sequence_iterables(
+    option_name: str,
+) -> None:
+    with pytest.raises(MongoDBConfigurationError, match="explicit list or tuple"):
+        ann_options(**{option_name: iter(("content",))})
+
+
+def test_text_fields_must_remain_non_empty_after_normalization() -> None:
+    with pytest.raises(MongoDBConfigurationError, match="at least one"):
+        ann_options(text_fields=[])
 
 
 def test_enn_forbids_candidates_and_search_index() -> None:

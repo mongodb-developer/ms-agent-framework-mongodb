@@ -83,3 +83,9 @@ operators, and pipelines are not accepted as filter input. The package exports
 `MongoDBSearchMode`. Direct `search` currently reports that the selected mode
 implementation is not installed. Vector ANN, vector ENN, full-text, and hybrid
 RRF execution are delivered by later independently tested feature slices.
+
+Membership values and field-path collections must be explicit lists or tuples;
+scalar strings and bytes are rejected rather than split into characters.
+Integer filter values must fit BSON int64, and range filters do not treat
+booleans as numbers. Repeated configured field paths are normalized once in
+first-seen order.

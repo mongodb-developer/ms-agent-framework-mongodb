@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from datetime import datetime, timezone
 from math import inf
 from typing import Any, cast
@@ -21,6 +22,15 @@ from agent_framework_mongodb import (
 from agent_framework_mongodb.rag._filters import compile_filter
 from agent_framework_mongodb.rag.options import MongoDBSearchMode
 
+_OUT_OF_RANGE_FACTORIES: tuple[Callable[[int], MongoDBFilter], ...] = (
+    lambda value: EqualFilter("value", value),
+    lambda value: NotEqualFilter("value", value),
+    lambda value: InFilter("value", [value]),
+    lambda value: NotInFilter("value", (value,)),
+    lambda value: GreaterThanFilter("value", value),
+    lambda value: LessThanOrEqualFilter("value", value),
+)
+
 
 def test_filter_ast_supports_required_operator_surface() -> None:
     created = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -36,6 +46,57 @@ def test_filter_ast_supports_required_operator_surface() -> None:
     )
 
     assert isinstance(expression, MongoDBFilter)
+
+
+@pytest.mark.parametrize("filter_type", [InFilter, NotInFilter])
+@pytest.mark.parametrize("values", ["tenant-a", b"tenant-a"])
+def test_membership_filters_reject_scalar_string_and_bytes(
+    filter_type: type[InFilter],
+    values: object,
+) -> None:
+    with pytest.raises(MongoDBConfigurationError, match="explicit list or tuple"):
+        filter_type("tenant_id", cast(Any, values))
+
+
+@pytest.mark.parametrize("filter_type", [InFilter, NotInFilter])
+def test_membership_filters_accept_and_normalize_explicit_lists(
+    filter_type: type[InFilter],
+) -> None:
+    expression = filter_type("tenant_id", ["tenant-a", "tenant-b"])
+
+    assert expression.values == ("tenant-a", "tenant-b")
+
+
+@pytest.mark.parametrize("value", [-(2**63), 2**63 - 1])
+def test_filter_integer_values_accept_bson_int64_boundaries(value: int) -> None:
+    assert EqualFilter("value", value).value == value
+    assert InFilter("value", [value]).values == (value,)
+    assert GreaterThanOrEqualFilter("value", value).value == value
+
+
+@pytest.mark.parametrize("value", [-(2**63) - 1, 2**63])
+@pytest.mark.parametrize(
+    "factory",
+    _OUT_OF_RANGE_FACTORIES,
+)
+def test_filter_integer_values_reject_outside_bson_int64(
+    factory: Callable[[int], MongoDBFilter],
+    value: int,
+) -> None:
+    with pytest.raises(MongoDBConfigurationError, match="BSON int64 range"):
+        factory(value)
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [
+        lambda: GreaterThanFilter("value", True),
+        lambda: LessThanOrEqualFilter("value", False),
+    ],
+)
+def test_range_filters_reject_boolean_numeric_values(factory: Any) -> None:
+    with pytest.raises(MongoDBConfigurationError, match="numeric or datetime"):
+        factory()
 
 
 @pytest.mark.parametrize(
