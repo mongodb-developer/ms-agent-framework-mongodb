@@ -2,6 +2,9 @@
   <Folder Name="/src/">
     <Project Path="src/MongoDB.AgentFramework/MongoDB.AgentFramework.csproj" />
   </Folder>
+  <Folder Name="/samples/">
+    <Project Path="samples/MemoryQuickstart/MemoryQuickstart.csproj" />
+  </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/MongoDB.AgentFramework.Tests/MongoDB.AgentFramework.Tests.csproj" />
   </Folder>
