@@ -20,3 +20,7 @@ This documentation explains the implemented system at the code level. The
 
 - [Python Chat History implementation](history/python-history.md)
 - [.NET Chat History implementation](history/dotnet-history.md)
+
+## RAG
+
+- [.NET RAG contracts and typed filters](rag/dotnet-rag.md)
