@@ -38,13 +38,14 @@ permanent records omit it.
 Document and batch fingerprints are SHA-256 hashes of canonical sorted,
 compact JSON structures. Scope fields and message fields remain distinct JSON
 values, so delimiters or newlines inside valid identifiers and content cannot
-alias another scope or batch. When no message ID exists, one UUID is generated and retained in the
-provider-scoped Agent Framework pending-batch state, so a failed `after_run`
-retry reuses the same ID. Pending state is removed only after confirmed
-insertion or a verified idempotent replay; a later successful run with identical
-content therefore receives a new ID. Concurrent identical calls use separate
-in-flight attempt slots, while failed slots retain their IDs for the next retry.
-Cancellation moves an in-flight slot to failed state before it propagates.
+alias another scope or batch. When no message ID exists, one UUID is generated
+and retained in the provider-scoped Agent Framework pending-batch state, so a
+failed `after_run` retry reuses the same ID. Pending state is removed only after
+confirmed insertion or a verified idempotent replay; a later successful run
+with identical content therefore receives a new ID. Concurrent identical calls
+use separate in-flight attempt slots, while failed slots retain their IDs for
+the next retry. Cancellation moves an in-flight slot to failed state before it
+propagates.
 
 A duplicate-key result is replay success only when every write error identifies
 the expected `_id`, no write-concern error occurred, and a scoped follow-up read
@@ -74,9 +75,14 @@ attempt claims their IDs. The immediately preceding state shape, where each
 batch fingerprint mapped directly to its message-fingerprint/UUID mapping, is
 migrated to one failed slot on read. Pending batches using the immediately
 preceding delimiter-based fingerprint are re-keyed to the canonical fingerprint
-when their matching batch retries. Unknown or malformed shapes raise
-`MongoDBConfigurationError` with guidance to clear `memory_pending_batches` or
-restore a supported state version; they are never silently discarded.
+only when every current scope and message value is provably unambiguous in the
+legacy encoding: no pipe, C0 control, or DEL characters. If an unsafe current
+scope computes a legacy key that exists, the provider does not consume or
+rewrite that key and raises `MongoDBConfigurationError` with guidance to clear
+the provider's `memory_pending_batches`. If no such candidate key exists, the
+provider safely continues with canonical state. Unknown or malformed shapes
+also raise configuration errors with migration guidance; they are never
+silently discarded.
 
 Canonical document IDs intentionally replace delimiter-based IDs before the
 first release. This unshipped branch does not promise compatibility for

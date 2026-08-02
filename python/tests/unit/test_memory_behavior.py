@@ -313,6 +313,57 @@ async def test_delimiter_scope_values_have_unambiguous_ids_and_pending_batches()
     assert len(shared_state["memory_pending_batches"]) == 2
 
 
+async def test_ambiguous_legacy_scope_cannot_consume_another_scopes_retry_ids() -> None:
+    collection = FakeCollection()
+    first_scope = {
+        "application_id": "tenant\nuser_id=shared",
+        "user_id": "alpha",
+    }
+    colliding_scope = {
+        "application_id": "tenant",
+        "user_id": "shared\nuser_id=alpha",
+    }
+    first_legacy_batch = "\n".join(
+        [
+            "application_id=tenant\nuser_id=shared",
+            "user_id=alpha",
+            "0|user||pending",
+        ]
+    )
+    second_legacy_batch = "\n".join(
+        [
+            "application_id=tenant",
+            "user_id=shared\nuser_id=alpha",
+            "0|user||pending",
+        ]
+    )
+    assert first_legacy_batch == second_legacy_batch
+    legacy_batch_fingerprint = hashlib.sha256(first_legacy_batch.encode()).hexdigest()
+    first_legacy_message = "application_id=tenant\nuser_id=shared|user_id=alpha|user|pending|0"
+    legacy_message_fingerprint = hashlib.sha256(first_legacy_message.encode()).hexdigest()
+    state: dict[str, Any] = {
+        "memory_pending_batches": {
+            legacy_batch_fingerprint: {legacy_message_fingerprint: "first-scope-retry-id"}
+        }
+    }
+    serialized_state = json.dumps(state, sort_keys=True)
+    memory = provider(
+        collection,
+        application_id=colliding_scope["application_id"],
+        user_id=colliding_scope["user_id"],
+    )
+
+    with pytest.raises(
+        MongoDBConfigurationError,
+        match="ambiguous legacy fingerprint",
+    ):
+        await memory.store([Message("user", ["pending"])], state=state)
+
+    assert json.dumps(state, sort_keys=True) == serialized_state
+    assert collection.insert_attempts == []
+    assert first_scope != colliding_scope
+
+
 async def test_no_message_id_reuses_pending_retry_id_then_advances_after_success() -> None:
     collection = FakeCollection()
     memory = provider(collection)

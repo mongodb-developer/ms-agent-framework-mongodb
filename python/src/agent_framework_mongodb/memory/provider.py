@@ -315,11 +315,16 @@ class MongoDBMemoryContextProvider(ContextProvider):
         retry_state = state if state is not None else self._direct_retry_state
         batch_fingerprint = _batch_fingerprint(eligible, scope=scope)
         legacy_batch_fingerprint = _legacy_batch_fingerprint(eligible, scope=scope)
+        legacy_fingerprint_is_unambiguous = _legacy_fingerprint_is_unambiguous(
+            eligible,
+            scope=scope,
+        )
         retry_attempt = (
             _begin_retry_attempt(
                 retry_state,
                 batch_fingerprint,
                 legacy_batch_fingerprint,
+                legacy_fingerprint_is_unambiguous,
                 self._active_retry_attempts,
             )
             if any(not message.message_id for message in eligible)
@@ -893,6 +898,22 @@ def _legacy_message_fingerprint(
     return hashlib.sha256(serialized.encode()).hexdigest()
 
 
+def _legacy_fingerprint_is_unambiguous(
+    messages: Sequence[Message],
+    *,
+    scope: Mapping[str, Any],
+) -> bool:
+    values = [str(value) for value in scope.values()]
+    values.extend(
+        value for message in messages for value in (message.message_id or "", message.text)
+    )
+    return all(
+        "|" not in value
+        and all(ord(character) >= 32 and ord(character) != 127 for character in value)
+        for value in values
+    )
+
+
 def _canonical_json(value: object) -> str:
     return json.dumps(
         value,
@@ -911,8 +932,15 @@ def _begin_retry_attempt(
     state: dict[str, Any],
     batch_fingerprint: str,
     legacy_batch_fingerprint: str,
+    legacy_fingerprint_is_unambiguous: bool,
     active_attempts: set[str],
 ) -> tuple[str, dict[str, Any]]:
+    _reject_ambiguous_legacy_migration(
+        state,
+        legacy_batch_fingerprint=legacy_batch_fingerprint,
+        batch_fingerprint=batch_fingerprint,
+        legacy_fingerprint_is_unambiguous=legacy_fingerprint_is_unambiguous,
+    )
     retry_batches = _normalize_retry_batches(state, active_attempts)
     _migrate_legacy_batch_fingerprint(
         retry_batches,
@@ -942,6 +970,24 @@ def _begin_retry_attempt(
     in_flight[attempt_id] = retry_ids
     active_attempts.add(attempt_id)
     return attempt_id, retry_ids
+
+
+def _reject_ambiguous_legacy_migration(
+    state: dict[str, Any],
+    *,
+    legacy_batch_fingerprint: str,
+    batch_fingerprint: str,
+    legacy_fingerprint_is_unambiguous: bool,
+) -> None:
+    if legacy_fingerprint_is_unambiguous or legacy_batch_fingerprint == batch_fingerprint:
+        return
+    retry_batches = state.get("memory_pending_batches")
+    if isinstance(retry_batches, dict) and legacy_batch_fingerprint in retry_batches:
+        raise MongoDBConfigurationError(
+            "Memory provider pending state contains an ambiguous legacy fingerprint "
+            "and cannot be migrated safely. Clear memory_pending_batches for this "
+            "provider before retrying."
+        )
 
 
 def _migrate_legacy_batch_fingerprint(
