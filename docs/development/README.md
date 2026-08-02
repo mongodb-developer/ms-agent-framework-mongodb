@@ -8,6 +8,8 @@ This documentation explains the implemented system at the code level. The
 
 - [Python package, client ownership, and lifecycle](foundation/python-client-ownership.md)
 - [Python shared validation mechanics](foundation/python-validation.md)
+- [.NET package and contract verification](foundation/dotnet-contract-research.md)
+- [.NET foundation and shared internals](foundation/dotnet-foundation.md)
 
 ## Memory
 
