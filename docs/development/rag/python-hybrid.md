@@ -94,6 +94,16 @@ reapplies only the immutable provider authorization filter; a per-call relevance
 filter is not incorrectly imposed on parent documents. Same-database collection
 selection and typed field paths prevent arbitrary enrichment.
 
+Parent mode adds an application-configured but provider-controlled child
+predicate, defaulting to `record_type == "child"`.
+`MongoDBRAGParentOptions.child_record_field` must be a safe configured field
+path, and `child_record_value` must be a non-null BSON scalar. The provider
+conjoins this predicate with the complete effective filter independently inside
+both `$vectorSearch.filter` and `$search.compound.filter` before either input
+limit. Both index definitions are validated for the discriminator field before
+embedding. The bounded hydration read reapplies mandatory authorization but not
+the child predicate, so same-collection parent records remain retrievable.
+
 Direct search surfaces configuration, filter, capability, index, embedding,
 mapping, timeout, authorization, and retrieval errors with driver exceptions as
 causes. Cancellation propagates through index reads, capability commands,
@@ -132,9 +142,13 @@ behavior, parent authorization, adapter policy, and cancellation.
 `python/tests/integration_rag_hybrid/test_rag_hybrid_integration.py` uses a
 unique `af_rag_hybrid_test_` collection, explicitly provisions both indexes,
 checks cross-tenant exclusion, native de-duplication, positive fused scores, and
-non-tied weight-sensitive ordering, and drops only that prefixed collection in
-`finally`. It skips when credentials or the required deployment capability are
-absent.
+non-tied weight-sensitive ordering. It also proves that an otherwise competitive
+same-collection parent cannot consume an input candidate and that the selected
+child still hydrates that parent. Cleanup drops only the unique prefixed
+collection in `finally`. The test skips only when credentials are absent or
+public capability commands positively identify the deployment/native
+`$rankFusion` capability as unavailable. Index provisioning, mismatch, failed,
+and not-ready errors fail the test.
 
 The package quality gate is run from `python/`:
 

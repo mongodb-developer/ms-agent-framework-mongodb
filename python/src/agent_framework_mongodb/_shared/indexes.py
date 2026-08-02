@@ -214,7 +214,8 @@ class VectorIndexManager:
         missing = set(self.expected.filter_paths) - actual_filters
         if missing:
             raise MongoDBIndexMismatchError(
-                f"Vector Search index '{self.expected.name}' is missing required filter paths."
+                f"Vector Search index '{self.expected.name}' is missing required filter paths: "
+                f"{', '.join(sorted(missing))}."
             )
 
 

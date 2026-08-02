@@ -91,7 +91,9 @@ class FakeCollection:
     def __init__(self) -> None:
         self.database = FakeDatabase()
         self.pipeline: list[dict[str, Any]] | None = None
+        self.pipelines: list[list[dict[str, Any]]] = []
         self.documents: list[dict[str, Any]] = []
+        self.aggregate_responses: list[list[dict[str, Any]]] = []
         self.aggregate_error: BaseException | None = None
         self.cursor_error: BaseException | None = None
         self.search_indexes: list[dict[str, Any]] = [
@@ -110,6 +112,7 @@ class FakeCollection:
                         },
                         {"type": "filter", "path": "tenant_id"},
                         {"type": "filter", "path": "published_year"},
+                        {"type": "filter", "path": "record_type"},
                     ]
                 },
             },
@@ -129,6 +132,7 @@ class FakeCollection:
                             },
                             "tenant_id": {"type": "token"},
                             "published_year": {"type": "number"},
+                            "record_type": {"type": "token"},
                         },
                     }
                 },
@@ -137,9 +141,11 @@ class FakeCollection:
 
     async def aggregate(self, pipeline: list[dict[str, Any]]) -> FakeCursor:
         self.pipeline = pipeline
+        self.pipelines.append(pipeline)
         if self.aggregate_error is not None:
             raise self.aggregate_error
-        return FakeCursor(self.documents, self.cursor_error)
+        documents = self.aggregate_responses.pop(0) if self.aggregate_responses else self.documents
+        return FakeCursor(documents, self.cursor_error)
 
     async def list_search_indexes(self, *, name: str) -> FakeCursor:
         return FakeCursor([index for index in self.search_indexes if index["name"] == name])
@@ -312,6 +318,35 @@ async def test_hybrid_validates_both_indexes_and_all_filter_paths_before_embeddi
     assert embeddings.calls == []
     assert collection.database.command_calls == []
     assert collection.pipeline is None
+
+
+@pytest.mark.parametrize(
+    ("index_kind", "validation_method"),
+    [
+        ("vector", "validate_vector_search_index"),
+        ("search", "validate_search_index"),
+    ],
+)
+async def test_parent_index_validation_requires_child_discriminator_in_both_indexes(
+    index_kind: str,
+    validation_method: str,
+) -> None:
+    collection = FakeCollection()
+    if index_kind == "vector":
+        fields = collection.search_indexes[0]["latestDefinition"]["fields"]
+        collection.search_indexes[0]["latestDefinition"]["fields"] = [
+            field for field in fields if field.get("path") != "record_type"
+        ]
+    else:
+        collection.search_indexes[1]["latestDefinition"]["mappings"]["fields"].pop("record_type")
+    provider = MongoDBRAGProvider(
+        hybrid_options(parent=MongoDBRAGParentOptions()),
+        embedding_generator=FakeEmbeddingGenerator(),
+        collection=collection,  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(MongoDBIndexMismatchError, match="record_type"):
+        await getattr(provider, validation_method)()
 
 
 async def test_hybrid_caches_only_confirmed_unsupported_rank_fusion_evidence() -> None:
@@ -494,27 +529,26 @@ async def test_hybrid_context_provider_does_not_suppress_capability_failure() ->
 
 
 async def test_hybrid_parent_hydration_reapplies_only_mandatory_authorization() -> None:
-    children = FakeCollection()
-    parents = FakeCollection()
-    children.database.collections["parents"] = parents
-    children.documents = [
-        {
-            "_id": "chunk-1",
-            "parent_id": "parent-1",
-            "content": "matching child",
-            "_ragScore": 0.03,
-        }
-    ]
+    collection = FakeCollection()
     parent_document = {
         "_id": "parent-1",
         "tenant_id": "tenant-a",
+        "record_type": "parent",
         "content": "Authorized parent",
     }
-    parents.documents = [parent_document]
+    child_document = {
+        "_id": "chunk-1",
+        "parent_id": "parent-1",
+        "tenant_id": "tenant-a",
+        "record_type": "child",
+        "content": "matching child",
+        "_ragScore": 0.03,
+    }
+    collection.aggregate_responses = [[child_document], [parent_document]]
     provider = MongoDBRAGProvider(
-        hybrid_options(parent=MongoDBRAGParentOptions(collection_name="parents")),
+        hybrid_options(parent=MongoDBRAGParentOptions()),
         embedding_generator=FakeEmbeddingGenerator(),
-        collection=children,  # type: ignore[arg-type]
+        collection=collection,  # type: ignore[arg-type]
     )
 
     results = await provider.search(
@@ -526,7 +560,32 @@ async def test_hybrid_parent_hydration_reapplies_only_mandatory_authorization() 
         ("parent-1", "Authorized parent", 0.03)
     ]
     assert results[0].raw_document is parent_document
-    assert parents.pipeline == [
+    rank_fusion = collection.pipelines[0][0]["$rankFusion"]
+    vector_filter = rank_fusion["input"]["pipelines"]["vector"][0]["$vectorSearch"]["filter"]
+    search_filter = rank_fusion["input"]["pipelines"]["text"][0]["$search"]["compound"]["filter"]
+    assert vector_filter == {
+        "$and": [
+            {
+                "$and": [
+                    {"tenant_id": {"$eq": "tenant-a"}},
+                    {"published_year": {"$gte": 2025}},
+                ]
+            },
+            {"record_type": {"$eq": "child"}},
+        ]
+    }
+    assert search_filter == [
+        {
+            "compound": {
+                "filter": [
+                    {"equals": {"path": "tenant_id", "value": "tenant-a"}},
+                    {"range": {"path": "published_year", "gte": 2025}},
+                ]
+            }
+        },
+        {"equals": {"path": "record_type", "value": "child"}},
+    ]
+    assert collection.pipelines[1] == [
         {
             "$match": {
                 "$and": [

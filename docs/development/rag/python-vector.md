@@ -50,6 +50,13 @@ sorts by score and original child relevance order, then limits parent count and
 bounds text/context. Unordered `$in` results therefore cannot discard a more
 relevant parent. Chunk and parent writes remain ingestion concerns.
 
+Parent mode also owns a required child discriminator, defaulting to
+`record_type == "child"`. `child_record_field` is field-path validated and
+`child_record_value` is a non-null BSON scalar. The predicate is conjoined inside
+`$vectorSearch.filter` before candidates are selected, and the Vector Search
+index validation/ensure contract requires that field as a filter path. It is not
+reapplied to hydrated parents, including same-collection parents.
+
 ## Index lifecycle and ownership
 
 `VectorIndexManager` in `_shared/indexes.py` is the internal lifecycle mechanic.

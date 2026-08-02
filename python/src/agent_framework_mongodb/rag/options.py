@@ -11,7 +11,7 @@ from typing import cast
 from .._shared.embeddings import validate_dimensions
 from .._shared.field_paths import validate_field_path
 from ..errors import MongoDBConfigurationError
-from .filters import AndFilter, MongoDBFilter
+from .filters import AndFilter, EqualFilter, FilterScalar, MongoDBFilter
 
 _BUILTIN_SEARCH_ANALYZERS = frozenset(
     {
@@ -165,6 +165,8 @@ class MongoDBRAGParentOptions:
     parent_id_field: str = "parent_id"
     parent_document_id_field: str = "_id"
     parent_text_field: str = "content"
+    child_record_field: str = "record_type"
+    child_record_value: FilterScalar = "child"
     max_parents: int = 10
     max_parent_text_length: int = 50_000
     max_lookup_fan_out: int = 20
@@ -181,12 +183,21 @@ class MongoDBRAGParentOptions:
                 "collection_name",
                 _name(self.collection_name, "parent collection_name", required=True),
             )
-        for name in ("parent_id_field", "parent_document_id_field", "parent_text_field"):
+        for name in (
+            "parent_id_field",
+            "parent_document_id_field",
+            "parent_text_field",
+            "child_record_field",
+        ):
             object.__setattr__(
                 self,
                 name,
                 validate_field_path(getattr(self, name), option_name=name),
             )
+        child_record_filter = EqualFilter(self.child_record_field, self.child_record_value)
+        if child_record_filter.value is None:
+            raise MongoDBConfigurationError("child_record_value must be a non-null BSON scalar.")
+        object.__setattr__(self, "child_record_value", child_record_filter.value)
         object.__setattr__(
             self,
             "max_parents",

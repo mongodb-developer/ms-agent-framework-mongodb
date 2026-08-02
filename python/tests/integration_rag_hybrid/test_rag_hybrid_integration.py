@@ -12,9 +12,7 @@ from pymongo import AsyncMongoClient
 from agent_framework_mongodb import (
     EqualFilter,
     MongoDBCapabilityError,
-    MongoDBIndexFailedError,
-    MongoDBIndexMismatchError,
-    MongoDBIndexNotReadyError,
+    MongoDBRAGParentOptions,
     MongoDBRAGProvider,
     MongoDBRAGProviderOptions,
     MongoDBSearchMode,
@@ -80,6 +78,20 @@ async def test_hybrid_rrf_deduplicates_weights_and_excludes_cross_tenant_candida
 
     vector_favored = provider(10.0, 0.0)
     text_favored = provider(0.0, 10.0)
+    parent_search = MongoDBRAGProvider(
+        MongoDBRAGProviderOptions(
+            mode=MongoDBSearchMode.HYBRID_RRF,
+            vector_dimensions=3,
+            vector_index_name=vector_index,
+            search_index_name=search_index,
+            filter=EqualFilter("tenant_id", "tenant-a"),
+            top_k=1,
+            num_candidates=10,
+            parent=MongoDBRAGParentOptions(),
+        ),
+        embedding_generator=IntegrationEmbeddingGenerator(),
+        collection=collection,
+    )
     try:
         await collection.insert_many(
             [
@@ -112,28 +124,23 @@ async def test_hybrid_rrf_deduplicates_weights_and_excludes_cross_tenant_candida
                 },
             ]
         )
+        await parent_search.ensure_vector_search_index(
+            wait_until_ready=True,
+            timeout=180,
+            poll_interval=2,
+        )
+        await parent_search.ensure_search_index(
+            wait_until_ready=True,
+            timeout=180,
+            poll_interval=2,
+        )
         try:
-            await vector_favored.ensure_vector_search_index(
-                wait_until_ready=True,
-                timeout=180,
-                poll_interval=2,
-            )
-            await vector_favored.ensure_search_index(
-                wait_until_ready=True,
-                timeout=180,
-                poll_interval=2,
-            )
             await vector_favored.validate_capabilities(refresh=True)
             vector_results = await vector_favored.search("hybridkeyword")
             text_results = await text_favored.search("hybridkeyword")
-        except (
-            MongoDBCapabilityError,
-            MongoDBIndexFailedError,
-            MongoDBIndexMismatchError,
-            MongoDBIndexNotReadyError,
-        ) as exc:
+        except MongoDBCapabilityError as exc:
             pytest.skip(
-                "native hybrid capability/index unavailable after public validation: "
+                "native hybrid deployment capability positively detected as unavailable: "
                 f"{type(exc).__name__}: {exc}"
             )
 
@@ -146,9 +153,43 @@ async def test_hybrid_rrf_deduplicates_weights_and_excludes_cross_tenant_candida
             assert identifiers.count("both-branches") == 1
             assert len(identifiers) == len(set(identifiers))
             assert all(result.score > 0 for result in results)
+
+        await collection.insert_many(
+            [
+                {
+                    "_id": "same-collection-parent",
+                    "tenant_id": "tenant-a",
+                    "record_type": "parent",
+                    "content": "parentkeyword parentkeyword parentkeyword",
+                    "embedding": [1.0, 0.0, 0.0],
+                },
+                {
+                    "_id": "same-collection-child",
+                    "parent_id": "same-collection-parent",
+                    "tenant_id": "tenant-a",
+                    "record_type": "child",
+                    "content": "parentkeyword",
+                    "embedding": [0.9, 0.435889894, 0.0],
+                },
+            ]
+        )
+        try:
+            parent_results = await parent_search.search("parentkeyword")
+        except MongoDBCapabilityError as exc:
+            pytest.skip(
+                "native hybrid deployment capability positively detected as unavailable: "
+                f"{type(exc).__name__}: {exc}"
+            )
+        assert [(result.id, result.text) for result in parent_results] == [
+            (
+                "same-collection-parent",
+                "parentkeyword parentkeyword parentkeyword",
+            )
+        ]
     finally:
         assert collection_name.startswith("af_rag_hybrid_test_")
         await client[database_name].drop_collection(collection_name)
         await vector_favored.close()
         await text_favored.close()
+        await parent_search.close()
         await client.close()

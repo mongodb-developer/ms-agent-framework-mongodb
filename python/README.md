@@ -105,6 +105,14 @@ Integer filter values must fit BSON int64, and range filters do not treat
 booleans as numbers. Repeated configured field paths are normalized once in
 first-seen order.
 
+Parent-document mode defaults to a provider-controlled
+`record_type == "child"` retrieval predicate. Configure
+`MongoDBRAGParentOptions.child_record_field` and `child_record_value` only for a
+different safe schema. The field path and non-null scalar value are validated,
+the discriminator is required in each active search index, and it is applied
+before child candidates are limited. Parent hydration reapplies authorization
+but not this child-only predicate.
+
 Run `samples\rag_vector_quickstart.py` after setting `MONGODB_URI`,
 `MONGODB_DATABASE`, `MONGODB_RAG_COLLECTION`, `MONGODB_RAG_VECTOR_INDEX`, and
 `MONGODB_RAG_TENANT`. The collection must already contain three-dimensional

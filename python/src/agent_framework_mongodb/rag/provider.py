@@ -189,9 +189,10 @@ class MongoDBRAGProvider:
                 "configure an embedding generator and MongoDB collection."
             )
         effective = self.options.normalize_search_options(options)
+        retrieval_filter = _with_parent_child_filter(effective.filter, self.options)
         compiled_filter = (
-            compile_filter(effective.filter, self.options.mode)
-            if effective.filter is not None
+            compile_filter(retrieval_filter, self.options.mode)
+            if retrieval_filter is not None
             else None
         )
         if self.options.mode is MongoDBSearchMode.HYBRID_RRF:
@@ -201,8 +202,8 @@ class MongoDBRAGProvider:
                 hybrid_filter = cast(MongoDocument, compiled_filter)
                 vector_filter = cast(MongoDocument, hybrid_filter["vector"])
                 search_filter = cast(list[MongoDocument], hybrid_filter["search"])
-            await self._validate_effective_vector_search_index(effective.filter)
-            await self._validate_effective_search_index(effective.filter)
+            await self._validate_effective_vector_search_index(retrieval_filter)
+            await self._validate_effective_search_index(retrieval_filter)
             await self.validate_capabilities()
             vector = await self._embed(query)
             hybrid_vector_stage: MongoDocument = {
@@ -279,7 +280,7 @@ class MongoDBRAGProvider:
                 return await self._hydrate_parents(documents)
             return [self._map_result(document) for document in documents]
         if self.options.mode is MongoDBSearchMode.FULL_TEXT:
-            await self._validate_effective_search_index(effective.filter)
+            await self._validate_effective_search_index(retrieval_filter)
             compound: MongoDocument = {
                 "must": [
                     {
@@ -312,7 +313,7 @@ class MongoDBRAGProvider:
                 return await self._hydrate_parents(documents)
             return [self._map_result(document) for document in documents]
 
-        await self._validate_effective_vector_search_index(effective.filter)
+        await self._validate_effective_vector_search_index(retrieval_filter)
         if self.options.mode is MongoDBSearchMode.VECTOR_ENN:
             await self.validate_capabilities()
         vector = await self._embed(query)
@@ -744,7 +745,9 @@ class MongoDBRAGProvider:
         )
 
     def _search_index_manager(self) -> SearchIndexManager:
-        return self._search_index_manager_for_filter(self.options.filter)
+        return self._search_index_manager_for_filter(
+            _with_parent_child_filter(self.options.filter, self.options)
+        )
 
     def _search_index_manager_for_filter(
         self,
@@ -761,7 +764,9 @@ class MongoDBRAGProvider:
         return SearchIndexManager(cast(Any, self.collection), expected)
 
     def _index_manager(self) -> VectorIndexManager:
-        return self._index_manager_for_filter(self.options.filter)
+        return self._index_manager_for_filter(
+            _with_parent_child_filter(self.options.filter, self.options)
+        )
 
     def _index_manager_for_filter(
         self,
@@ -999,6 +1004,17 @@ def _filter_paths(expression: MongoDBFilter | None) -> set[str]:
         field = getattr(expression, "field", None)
         return {field} if isinstance(field, str) else set()
     return set()
+
+
+def _with_parent_child_filter(
+    expression: MongoDBFilter | None,
+    options: MongoDBRAGProviderOptions,
+) -> MongoDBFilter | None:
+    parent = options.parent
+    if parent is None:
+        return expression
+    child_filter = EqualFilter(parent.child_record_field, parent.child_record_value)
+    return child_filter if expression is None else AndFilter(expression, child_filter)
 
 
 def _search_filter_fields(expression: MongoDBFilter | None) -> dict[str, str]:
