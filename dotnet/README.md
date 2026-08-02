@@ -117,7 +117,7 @@ Optional variables are `MONGODB_HISTORY_COLLECTION`,
 sample's authorized session should be removed. See the
 [.NET Chat History developer guide](../docs/development/history/dotnet-history.md).
 
-## RAG contracts and typed filters
+## RAG contracts, typed filters, and Vector Search (ANN/ENN)
 
 `MongoDBSearchMode` (`VectorAnn`, `VectorEnn`, `FullText`, `HybridRrf`), the bounded typed `MongoDBRAGFilter` AST,
 the immutable `MongoDBRAGResult`, and `MongoDBRAGProviderOptions` are available under
@@ -125,6 +125,11 @@ the immutable `MongoDBRAGResult`, and `MongoDBRAGProviderOptions` are available 
 (`Equal`, `NotEqual`, `In`, `NotIn`, `Range`, `And`, `Or`) with bounded nesting depth and value counts, and is
 completely translatable into a `$vectorSearch` match filter or a `$search` compound filter through the internal
 `RAGFilterTranslator`.
+
+`MongoDBRAGProvider` executes live `VectorAnn`/`VectorEnn` retrieval through `SearchAsync`, and
+`MongoDBRAGContextProvider` composes it as a before-invoke `AIContextProvider` that supplies retrieved chunks as
+attributed `ChatRole.Tool` context messages. `FullText` and `HybridRrf` are not yet implemented; selecting them
+throws `MongoDBCapabilityException`.
 
 ```csharp
 MongoDBRAGFilter filter = MongoDBRAGFilter.And(
@@ -139,8 +144,30 @@ var options = new MongoDBRAGProviderOptions
     TopK = 5,
     MandatoryFilter = filter,
 };
+
+await using var rag = new MongoDBRAGProvider(
+    database,
+    "knowledge_chunks",
+    embeddingGenerator,
+    vectorDimensions: 1536,
+    options);
+
+IReadOnlyList<MongoDBRAGResult> results = await rag.SearchAsync("What color do widgets ship in?");
+
+var contextProvider = new MongoDBRAGContextProvider(rag);
 ```
 
-This slice is contracts and filters only; it does not perform live retrieval. See the
-[.NET RAG contracts developer guide](../docs/development/rag/dotnet-rag.md) for the full public surface,
-translation behavior, and deferred work.
+This slice does not provision Vector Search indexes; the target index must already exist. Injected
+clients/databases/collections/embedding generators remain caller-owned; only a client created by the
+connection-string constructor is disposed by the provider.
+
+Run the sample after setting `MONGODB_URI`, `MONGODB_DATABASE`, and a pre-provisioned Vector Search index
+(`MONGODB_RAG_VECTOR_INDEX`, optionally `MONGODB_RAG_COLLECTION`):
+
+```powershell
+dotnet run --project samples\RAGQuickstart\RAGQuickstart.csproj
+```
+
+See the [.NET RAG contracts developer guide](../docs/development/rag/dotnet-rag.md) and the
+[.NET Vector RAG developer guide](../docs/development/rag/dotnet-rag-vector-search.md) for the full public surface,
+pipeline shape, and deferred work.
