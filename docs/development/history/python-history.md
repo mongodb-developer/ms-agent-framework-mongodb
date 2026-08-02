@@ -27,16 +27,18 @@ does not contact MongoDB or provision indexes.
 
 Every authoritative message document has `_kind: "message"`, `schema_version: 1`,
 `framework_version: 1`, all configured scope fields, `session_id`, monotonic
-`sequence`, `message_id`, role, UTC `created_at`, optional `expires_at`, and the
-public `Message.to_json()` payload parsed as structured BSON-safe data under
+`sequence`, required internal `stable_message_id`, optional framework `message_id`,
+role, UTC `created_at`, optional `expires_at`, and the public `Message.to_json()`
+payload parsed as structured BSON-safe data under
 `message`. Replay uses `Message.from_dict()`. Raw service representations excluded
 by Agent Framework public serialization are intentionally not persisted.
 
 An internal `_kind: "sequence"` document identifies the same complete scope.
 `find_one_and_update($inc, upsert=True, return_document=AFTER)` atomically assigns
-sequence numbers. Stable scoped document IDs and the message uniqueness index make
+sequence ranges. Stable scoped document IDs and the message uniqueness index make
 retries idempotent; duplicate stored data is accepted only when its payload and
-versions agree. Messages without framework IDs receive IDs before persistence.
+versions agree. Messages without framework IDs retain `message_id: null` in their
+exact payload while a separate provider identity supports same-attempt retries.
 Latest-N reads filter the complete scope in MongoDB, sort descending, limit, then
 reverse the bounded result. Optional `max_age` adds a server-side `created_at`
 predicate. Tool calls and results remain separate ordered messages.

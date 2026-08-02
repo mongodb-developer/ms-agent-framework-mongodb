@@ -337,7 +337,7 @@ async def test_batch_retry_and_duplicate_message_are_idempotent() -> None:
     ]
 
 
-async def test_messages_without_ids_receive_retry_stable_framework_ids() -> None:
+async def test_messages_without_ids_round_trip_exactly_and_retry_idempotently() -> None:
     collection = FakeCollection()
     provider = MongoDBHistoryProvider(cast(Any, collection), options=options())
     message = Message("user", ["hello"])
@@ -345,8 +345,23 @@ async def test_messages_without_ids_receive_retry_stable_framework_ids() -> None
     await provider.save_messages("session-1", [message])
     await provider.save_messages("session-1", [message])
 
-    assert message.message_id
+    assert message.message_id is None
     assert len(collection.documents) == 1
+    restored = await provider.get_messages("session-1")
+    assert restored[0].message_id is None
+    assert restored[0].to_dict() == message.to_dict()
+
+
+async def test_framework_state_deduplicates_reconstructed_anonymous_batch() -> None:
+    collection = FakeCollection()
+    provider = MongoDBHistoryProvider(cast(Any, collection), options=options())
+    state: dict[str, Any] = {}
+
+    await provider.save_messages("session-1", [Message("user", ["hello"])], state=state)
+    await provider.save_messages("session-1", [Message("user", ["hello"])], state=state)
+
+    assert len(collection.documents) == 1
+    assert (await provider.get_messages("session-1"))[0].message_id is None
 
 
 async def test_scope_mismatch_is_rejected_before_mongodb_access() -> None:

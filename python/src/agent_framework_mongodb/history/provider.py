@@ -170,6 +170,7 @@ class MongoDBHistoryProvider(HistoryProvider):
         self.options = options
         self.database_name = cast(str, _scope_value(database_name, "database_name"))
         self.collection_name = cast(str, _scope_value(collection_name, "collection_name"))
+        self._direct_message_ids: dict[int, tuple[Message, str]] = {}
         self._client_handle: MongoClientHandle | None
         if collection is not None:
             self._client_handle = None
@@ -318,24 +319,32 @@ class MongoDBHistoryProvider(HistoryProvider):
     ) -> None:
         pending: list[tuple[str, str, Message, MongoDocument]] = []
         for ordinal, message in enumerate(messages):
-            message_id = _stable_message_id(message, scope, messages, ordinal, state)
-            document_id = _document_id(scope, message_id)
             payload = _serialize_message(message)
+            stable_message_id = _stable_message_id(
+                message,
+                scope,
+                messages,
+                ordinal,
+                state,
+                self._direct_message_ids,
+            )
+            document_id = _document_id(scope, stable_message_id)
             existing = await self.collection.find_one({"_id": document_id})
             candidate_identity: MongoDocument = {
                 "schema_version": self.SCHEMA_VERSION,
                 "framework_version": self.FRAMEWORK_SERIALIZATION_VERSION,
-                "message_id": message_id,
+                "stable_message_id": stable_message_id,
+                "message_id": message.message_id,
                 "message": payload,
             }
             if existing is not None:
                 _validate_duplicate(existing, candidate_identity)
                 continue
-            pending.append((document_id, message_id, message, payload))
+            pending.append((document_id, stable_message_id, message, payload))
         if not pending:
             return
         first_sequence = await self._allocate_sequence(scope, len(pending))
-        for offset, (document_id, message_id, message, payload) in enumerate(pending):
+        for offset, (document_id, stable_message_id, message, payload) in enumerate(pending):
             now = datetime.now(timezone.utc)
             document: MongoDocument = {
                 "_id": document_id,
@@ -344,7 +353,8 @@ class MongoDBHistoryProvider(HistoryProvider):
                 "framework_version": self.FRAMEWORK_SERIALIZATION_VERSION,
                 **scope,
                 "sequence": first_sequence + offset,
-                "message_id": message_id,
+                "stable_message_id": stable_message_id,
+                "message_id": message.message_id,
                 "role": message.role,
                 "created_at": now,
                 "message": payload,
@@ -355,7 +365,11 @@ class MongoDBHistoryProvider(HistoryProvider):
                 await self.collection.insert_one(document)
             except DuplicateKeyError:
                 existing = await self.collection.find_one(
-                    {"_kind": "message", **scope, "message_id": message_id}
+                    {
+                        "_kind": "message",
+                        **scope,
+                        "stable_message_id": stable_message_id,
+                    }
                 )
                 if existing is None:
                     raise
@@ -425,7 +439,7 @@ class MongoDBHistoryProvider(HistoryProvider):
         partial = {"_kind": "message"}
         definitions: list[tuple[list[tuple[str, int]], MongoDocument]] = [
             (
-                [*scope_keys, ("message_id", ASCENDING)],
+                [*scope_keys, ("stable_message_id", ASCENDING)],
                 {
                     "name": "history_scoped_message_unique",
                     "unique": True,
@@ -477,7 +491,7 @@ class MongoDBHistoryProvider(HistoryProvider):
                 ("application_id", 1),
                 ("agent_id", 1),
                 ("session_id", 1),
-                ("message_id", 1),
+                ("stable_message_id", 1),
             ),
             "history_scoped_sequence": (
                 ("tenant_id", 1),
@@ -585,6 +599,7 @@ def _stable_message_id(
     batch: Sequence[Message],
     ordinal: int,
     state: dict[str, Any] | None,
+    direct_message_ids: dict[int, tuple[Message, str]],
 ) -> str:
     if message.message_id:
         return message.message_id
@@ -601,11 +616,19 @@ def _stable_message_id(
             raise MongoDBConfigurationError("History provider pending ID state is invalid.")
         ids = cast(dict[str, Any], raw_ids)
     key = f"{batch_key}:{ordinal}"
-    existing = ids.get(key) if ids is not None else None
+    direct_entry = direct_message_ids.get(id(message))
+    existing = (
+        ids.get(key)
+        if ids is not None
+        else direct_entry[1]
+        if direct_entry is not None and direct_entry[0] is message
+        else None
+    )
     message_id = existing if isinstance(existing, str) else str(uuid.uuid4())
     if ids is not None:
         ids[key] = message_id
-    message.message_id = message_id
+    else:
+        direct_message_ids[id(message)] = (message, message_id)
     return message_id
 
 
@@ -626,7 +649,13 @@ def _canonical_hash(value: object) -> str:
 
 
 def _validate_duplicate(existing: Mapping[str, Any], candidate: Mapping[str, Any]) -> None:
-    for field in ("schema_version", "framework_version", "message_id", "message"):
+    for field in (
+        "schema_version",
+        "framework_version",
+        "stable_message_id",
+        "message_id",
+        "message",
+    ):
         if existing.get(field) != candidate.get(field):
             raise MongoDBPersistenceError(
                 "A duplicate History message identity contains incompatible stored data."
