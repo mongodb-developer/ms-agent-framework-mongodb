@@ -69,7 +69,7 @@ public sealed class MongoDBChatHistoryBehaviorTests
         Assert.Equal([1L, 2L, 3L], MessageDocuments(state).Select(d => d["sequence"].AsInt64));
         Assert.All(MessageDocuments(state), document =>
         {
-            Assert.Equal(1, document["schema_version"]);
+            Assert.Equal(MongoDBChatHistoryProvider.SchemaVersion, document["schema_version"]);
             Assert.Equal(1, document["framework_version"]);
             Assert.IsType<BsonDocument>(document["message"]);
         });
@@ -139,6 +139,39 @@ public sealed class MongoDBChatHistoryBehaviorTests
     }
 
     [Fact]
+    public async Task TenantlessScopeCannotReadOrClearTenantScopedDocuments()
+    {
+        var state = new HistoryCollectionState();
+        var tenantless = CreateProvider(state);
+        var tenant = CreateProvider(
+            state,
+            ValidOptions() with { TenantId = "tenant-a" });
+        await tenantless.SaveMessagesAsync(
+            "session",
+            [new ChatMessage(ChatRole.User, "tenantless") { MessageId = "tenantless" }]);
+        await tenant.SaveMessagesAsync(
+            "session",
+            [new ChatMessage(ChatRole.User, "tenant") { MessageId = "tenant" }]);
+
+        Assert.Equal(
+            ["tenantless"],
+            (await tenantless.GetMessagesAsync("session")).Select(message => message.MessageId));
+        BsonDocument tenantlessDocument =
+            MessageDocuments(state).Single(document => document["message_id"] == "tenantless");
+        Assert.True(tenantlessDocument["tenant_id"].IsBsonNull);
+        Assert.True(tenantlessDocument["user_id"].IsBsonNull);
+        Assert.NotEqual(
+            tenantlessDocument["scope_discriminator"],
+            MessageDocuments(state).Single(document => document["message_id"] == "tenant")[
+                "scope_discriminator"]);
+
+        Assert.Equal(1, await tenantless.ClearMessagesAsync("session"));
+        Assert.Equal(
+            ["tenant"],
+            (await tenant.GetMessagesAsync("session")).Select(message => message.MessageId));
+    }
+
+    [Fact]
     public async Task AgeAndRetentionAreAppliedServerSideAndToStoredEnvelope()
     {
         var state = new HistoryCollectionState();
@@ -187,21 +220,70 @@ public sealed class MongoDBChatHistoryBehaviorTests
             () => provider.SaveMessagesAsync(
                 "session",
                 [new ChatMessage(ChatRole.User, "same")]));
-        string failedId = state.InsertAttempts[0]["message_id"].AsString;
+        string failedId = state.InsertAttempts[0]["stable_message_id"].AsString;
 
         state.InsertException = null;
         await provider.SaveMessagesAsync(
             "session",
             [new ChatMessage(ChatRole.User, "same")]);
-        string retryId = state.InsertAttempts[1]["message_id"].AsString;
+        string retryId = state.InsertAttempts[1]["stable_message_id"].AsString;
         await provider.SaveMessagesAsync(
             "session",
             [new ChatMessage(ChatRole.User, "same")]);
-        string laterId = state.InsertAttempts[2]["message_id"].AsString;
+        string laterId = state.InsertAttempts[2]["stable_message_id"].AsString;
 
         Assert.Equal(failedId, retryId);
         Assert.NotEqual(retryId, laterId);
         Assert.Equal(2, MessageDocuments(state).Count);
+    }
+
+    [Fact]
+    public async Task PartialRetryFillsReservedSequencesBeforeLaterBatch()
+    {
+        var state = new HistoryCollectionState();
+        int inserts = 0;
+        state.InsertHandler = (_, _) =>
+            ++inserts == 2
+                ? Task.FromException(OfflineException())
+                : Task.CompletedTask;
+        var provider = CreateProvider(state);
+        ChatMessage[] firstBatch =
+        [
+            new(ChatRole.User, "a") { MessageId = "a" },
+            new(ChatRole.Assistant, "b") { MessageId = "b" },
+        ];
+
+        await Assert.ThrowsAsync<MongoDBPersistenceException>(
+            () => provider.SaveMessagesAsync("session", firstBatch));
+        BsonDocument reservation =
+            state.Documents.Single(document => document["_kind"] == "reservation");
+        Assert.Equal(1L, reservation["first_sequence"].AsInt64);
+        Assert.Equal(2, reservation["count"].AsInt32);
+        Assert.True(reservation["tenant_id"].IsBsonNull);
+        Assert.True(reservation["user_id"].IsBsonNull);
+        Assert.True(reservation["scope_discriminator"].IsString);
+        state.InsertHandler = null;
+        await provider.SaveMessagesAsync(
+            "session",
+            [new ChatMessage(ChatRole.User, "later") { MessageId = "later" }]);
+        await provider.SaveMessagesAsync("session", firstBatch);
+
+        Assert.Equal(
+            new Dictionary<string, long>
+            {
+                ["a"] = 1,
+                ["b"] = 2,
+                ["later"] = 3,
+            },
+            MessageDocuments(state).ToDictionary(
+                document => document["message_id"].AsString,
+                document => document["sequence"].AsInt64));
+        Assert.Equal(
+            ["a", "b", "later"],
+            (await provider.GetMessagesAsync("session")).Select(message => message.MessageId));
+        Assert.DoesNotContain(
+            state.Documents,
+            document => document["_kind"] == "reservation");
     }
 
     [Fact]
@@ -219,8 +301,8 @@ public sealed class MongoDBChatHistoryBehaviorTests
 
         Assert.Equal(2, state.InsertAttempts.Count);
         Assert.NotEqual(
-            state.InsertAttempts[0]["message_id"],
-            state.InsertAttempts[1]["message_id"]);
+            state.InsertAttempts[0]["stable_message_id"],
+            state.InsertAttempts[1]["stable_message_id"]);
         Assert.Equal(2, MessageDocuments(state).Count);
     }
 
@@ -236,7 +318,7 @@ public sealed class MongoDBChatHistoryBehaviorTests
             async () => await firstProvider.InvokedAsync(
                 Invoked(session, "retry me"),
                 default));
-        string failedId = state.InsertAttempts[0]["message_id"].AsString;
+        string failedId = state.InsertAttempts[0]["stable_message_id"].AsString;
         Assert.Single(firstProvider.StateKeys);
 
         var restored = new TestSession(
@@ -245,7 +327,7 @@ public sealed class MongoDBChatHistoryBehaviorTests
         MongoDBChatHistoryProvider recreatedProvider = CreateProvider(state);
         await recreatedProvider.InvokedAsync(Invoked(restored, "retry me"), default);
 
-        Assert.Equal(failedId, state.InsertAttempts[1]["message_id"].AsString);
+        Assert.Equal(failedId, state.InsertAttempts[1]["stable_message_id"].AsString);
         Assert.True(restored.StateBag.TryGetValue(
             "unrelated",
             out Dictionary<string, int>? unrelated));
@@ -278,7 +360,7 @@ public sealed class MongoDBChatHistoryBehaviorTests
             Invoked(original, "retry me"),
             cancellation.Token).AsTask();
         await firstStarted.Task;
-        string inFlightId = state.InsertAttempts[0]["message_id"].AsString;
+        string inFlightId = state.InsertAttempts[0]["stable_message_id"].AsString;
 
         var restored = new TestSession(
             AgentSessionStateBag.Deserialize(original.StateBag.Serialize()));
@@ -287,7 +369,7 @@ public sealed class MongoDBChatHistoryBehaviorTests
         cancellation.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => firstAttempt);
 
-        Assert.Equal(inFlightId, state.InsertAttempts[1]["message_id"].AsString);
+        Assert.Equal(inFlightId, state.InsertAttempts[1]["stable_message_id"].AsString);
         Assert.False(restored.StateBag.TryGetValue<Dictionary<string, object>>(
             recreatedProvider.StateKeys.Single(),
             out _));
@@ -313,11 +395,11 @@ public sealed class MongoDBChatHistoryBehaviorTests
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(
             async () => await provider.InvokedAsync(Invoked(session, "same"), default));
-        string cancelledId = state.InsertAttempts[0]["message_id"].AsString;
+        string cancelledId = state.InsertAttempts[0]["stable_message_id"].AsString;
         await provider.InvokedAsync(Invoked(session, "same"), default);
-        string retryId = state.InsertAttempts[1]["message_id"].AsString;
+        string retryId = state.InsertAttempts[1]["stable_message_id"].AsString;
         await provider.InvokedAsync(Invoked(session, "same"), default);
-        string laterId = state.InsertAttempts[2]["message_id"].AsString;
+        string laterId = state.InsertAttempts[2]["stable_message_id"].AsString;
 
         Assert.Equal(cancelledId, retryId);
         Assert.NotEqual(retryId, laterId);
@@ -348,8 +430,8 @@ public sealed class MongoDBChatHistoryBehaviorTests
 
         Assert.Equal(2, state.InsertAttempts.Count);
         Assert.NotEqual(
-            state.InsertAttempts[0]["message_id"],
-            state.InsertAttempts[1]["message_id"]);
+            state.InsertAttempts[0]["stable_message_id"],
+            state.InsertAttempts[1]["stable_message_id"]);
         Assert.False(session.StateBag.TryGetValue<Dictionary<string, object>>(
             provider.StateKeys.Single(),
             out _));
@@ -369,6 +451,31 @@ public sealed class MongoDBChatHistoryBehaviorTests
             malformed
                 ? new { Version = version, Batches = new[] { "invalid" } }
                 : (object)new { Version = version, Batches = new { } });
+        session = new TestSession(
+            AgentSessionStateBag.Deserialize(session.StateBag.Serialize()));
+
+        MongoDBConfigurationException exception =
+            await Assert.ThrowsAsync<MongoDBConfigurationException>(
+                async () => await provider.InvokedAsync(
+                    Invoked(session, "retry me"),
+                    default));
+
+        Assert.Contains("migration", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(1, session.StateBag.Count);
+    }
+
+    [Fact]
+    public async Task FrameworkRejectsAmbiguousVersionOneRetryState()
+    {
+        MongoDBChatHistoryProvider provider = CreateProvider(new HistoryCollectionState());
+        var session = new TestSession();
+        session.StateBag.SetValue(
+            provider.StateKeys.Single(),
+            new
+            {
+                Version = 1,
+                Batches = new Dictionary<string, object>(),
+            });
         session = new TestSession(
             AgentSessionStateBag.Deserialize(session.StateBag.Serialize()));
 
@@ -403,12 +510,12 @@ public sealed class MongoDBChatHistoryBehaviorTests
         await provider.SaveMessagesAsync(
             "session",
             [new ChatMessage(ChatRole.User, "same")]);
-        string convergedId = state.InsertAttempts[0]["message_id"].AsString;
+        string convergedId = state.InsertAttempts[0]["stable_message_id"].AsString;
         await provider.SaveMessagesAsync(
             "session",
             [new ChatMessage(ChatRole.User, "same")]);
 
-        Assert.NotEqual(convergedId, state.InsertAttempts[1]["message_id"].AsString);
+        Assert.NotEqual(convergedId, state.InsertAttempts[1]["stable_message_id"].AsString);
         Assert.Equal(2, MessageDocuments(state).Count);
     }
 
@@ -429,14 +536,14 @@ public sealed class MongoDBChatHistoryBehaviorTests
             () => provider.SaveMessagesAsync(
                 "session",
                 [new ChatMessage(ChatRole.User, "same")]));
-        string incompatibleId = state.InsertAttempts[0]["message_id"].AsString;
+        string incompatibleId = state.InsertAttempts[0]["stable_message_id"].AsString;
 
         state.InsertHandler = null;
         await provider.SaveMessagesAsync(
             "session",
             [new ChatMessage(ChatRole.User, "same")]);
 
-        Assert.NotEqual(incompatibleId, state.InsertAttempts[1]["message_id"].AsString);
+        Assert.NotEqual(incompatibleId, state.InsertAttempts[1]["stable_message_id"].AsString);
     }
 
     [Fact]
@@ -519,6 +626,77 @@ public sealed class MongoDBChatHistoryBehaviorTests
         Assert.True(state.CreatedIndexes[0].Options.Unique);
         Assert.Equal(TimeSpan.Zero, state.CreatedIndexes[2].Options.ExpireAfter);
         await provider.ValidateIndexesAsync();
+    }
+
+    [Fact]
+    public async Task IndexValidationRejectsUniqueAndPartialFilterMismatches()
+    {
+        var state = new HistoryCollectionState();
+        var provider = CreateProvider(state);
+        await provider.EnsureIndexesAsync();
+        CreateIndexModel<BsonDocument> original = state.CreatedIndexes[0];
+        state.CreatedIndexes[0] = new CreateIndexModel<BsonDocument>(
+            Builders<BsonDocument>.IndexKeys.Ascending("wrong"),
+            original.Options);
+        await Assert.ThrowsAsync<MongoDBIndexMismatchException>(
+            () => provider.ValidateIndexesAsync());
+
+        state.CreatedIndexes[0] = original;
+        state.CreatedIndexes[0].Options.Unique = false;
+        await Assert.ThrowsAsync<MongoDBIndexMismatchException>(
+            () => provider.ValidateIndexesAsync());
+
+        state.CreatedIndexes[0].Options.Unique = true;
+        state.CreatedIndexes[1].Options.PartialFilterExpression =
+            new BsonDocument("_kind", "wrong");
+        await Assert.ThrowsAsync<MongoDBIndexMismatchException>(
+            () => provider.ValidateIndexesAsync());
+    }
+
+    [Fact]
+    public async Task IndexValidationRejectsCompleteTtlDefinitionMismatches()
+    {
+        var state = new HistoryCollectionState();
+        var provider = CreateProvider(
+            state,
+            ValidOptions() with { Retention = TimeSpan.FromDays(1) });
+        await provider.EnsureIndexesAsync();
+        state.CreatedIndexes[2].Options.Unique = true;
+        await Assert.ThrowsAsync<MongoDBIndexMismatchException>(
+            () => provider.ValidateIndexesAsync());
+
+        state.CreatedIndexes[2].Options.Unique = false;
+        state.CreatedIndexes[2].Options.PartialFilterExpression =
+            new BsonDocument("_kind", "wrong");
+        await Assert.ThrowsAsync<MongoDBIndexMismatchException>(
+            () => provider.ValidateIndexesAsync());
+
+        state.CreatedIndexes[2].Options.PartialFilterExpression =
+            new BsonDocument
+            {
+                { "_kind", "message" },
+                { "scope_discriminator", new BsonDocument("$type", "string") },
+            };
+        state.CreatedIndexes[2].Options.ExpireAfter = TimeSpan.FromSeconds(1);
+        await Assert.ThrowsAsync<MongoDBIndexMismatchException>(
+            () => provider.ValidateIndexesAsync());
+    }
+
+    [Fact]
+    public async Task VersionOneDocumentsAreRejectedWithBreakingMigrationGuidance()
+    {
+        var state = new HistoryCollectionState();
+        var provider = CreateProvider(state);
+        await provider.SaveMessagesAsync(
+            "session",
+            [new ChatMessage(ChatRole.User, "legacy") { MessageId = "legacy" }]);
+        MessageDocuments(state).Single()["schema_version"] = 1;
+
+        MongoDBMappingException exception = await Assert.ThrowsAsync<MongoDBMappingException>(
+            () => provider.GetMessagesAsync("session"));
+
+        Assert.Contains("breaking", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("migration", exception.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
