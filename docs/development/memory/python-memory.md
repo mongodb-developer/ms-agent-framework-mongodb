@@ -97,5 +97,13 @@ and MongoDB boundaries. The language-neutral scope fixture under
 `tests/fixtures/memory/` is exercised through the public search API by the
 Python contract test.
 
-The Python source gate is pytest, Ruff lint and format checks, mypy, and
-Pyright.
+Credentialed `python/tests/integration_memory/test_memory_integration.py`
+creates a uniquely prefixed collection, explicitly provisions and waits for
+the index, exercises ENN storage/retrieval/deletion, and targets only that
+collection in `finally`. It skips unless `MONGODB_URI` and
+`MONGODB_DATABASE` are set.
+
+The Python gate is pytest, Ruff lint and format checks, mypy, Pyright, wheel and
+sdist build, Twine validation, and clean installation/import from each exact
+artifact. Real-deployment evidence remains environment-specific and is not
+claimed when the credentialed test skips.
