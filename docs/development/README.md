@@ -21,3 +21,4 @@ This documentation explains the implemented system at the code level. The
 
 - [Python RAG contracts and typed filters](rag/python-contracts.md)
 - [Python Vector Search implementation](rag/python-vector.md)
+- [Python full-text Search implementation](rag/python-full-text.md)

@@ -13,6 +13,58 @@ from .._shared.field_paths import validate_field_path
 from ..errors import MongoDBConfigurationError
 from .filters import AndFilter, MongoDBFilter
 
+_BUILTIN_SEARCH_ANALYZERS = frozenset(
+    {
+        "lucene.arabic",
+        "lucene.armenian",
+        "lucene.basque",
+        "lucene.bengali",
+        "lucene.brazilian",
+        "lucene.bulgarian",
+        "lucene.catalan",
+        "lucene.chinese",
+        "lucene.cjk",
+        "lucene.czech",
+        "lucene.danish",
+        "lucene.dutch",
+        "lucene.english",
+        "lucene.finnish",
+        "lucene.french",
+        "lucene.galician",
+        "lucene.german",
+        "lucene.greek",
+        "lucene.hindi",
+        "lucene.hungarian",
+        "lucene.indonesian",
+        "lucene.irish",
+        "lucene.italian",
+        "lucene.japanese",
+        "lucene.keyword",
+        "lucene.korean",
+        "lucene.kuromoji",
+        "lucene.latvian",
+        "lucene.lithuanian",
+        "lucene.morfologik",
+        "lucene.nori",
+        "lucene.norwegian",
+        "lucene.persian",
+        "lucene.polish",
+        "lucene.portuguese",
+        "lucene.romanian",
+        "lucene.russian",
+        "lucene.simple",
+        "lucene.smartcn",
+        "lucene.sorani",
+        "lucene.spanish",
+        "lucene.standard",
+        "lucene.swedish",
+        "lucene.thai",
+        "lucene.turkish",
+        "lucene.ukrainian",
+        "lucene.whitespace",
+    }
+)
+
 
 class MongoDBSearchMode(str, Enum):
     """Supported MongoDB retrieval modes."""
@@ -46,6 +98,16 @@ def _name(value: object, name: str, *, required: bool) -> str | None:
     if not isinstance(value, str) or not fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", value):
         raise MongoDBConfigurationError(
             f"{name} must be 1-128 letters, digits, dots, underscores, or hyphens."
+        )
+    return value
+
+
+def _analyzer(value: object) -> str:
+    if not isinstance(value, str) or value not in _BUILTIN_SEARCH_ANALYZERS:
+        raise MongoDBConfigurationError(
+            "search_analyzer must be a documented MongoDB built-in analyzer such as "
+            "'lucene.standard' or 'lucene.english'; custom analyzer definitions are not "
+            "supported by this option."
         )
     return value
 
@@ -178,6 +240,7 @@ class MongoDBRAGProviderOptions:
     vector_dimensions: int | None = None
     vector_index_name: str | None = None
     search_index_name: str | None = None
+    search_analyzer: str = "lucene.standard"
     id_field: str = "_id"
     text_fields: tuple[str, ...] | list[str] = ("content",)
     vector_field: str = "embedding"
@@ -224,6 +287,7 @@ class MongoDBRAGProviderOptions:
             if value is not None:
                 object.__setattr__(self, name, validate_field_path(value, option_name=name))
         object.__setattr__(self, "filter", _filter(self.filter))
+        object.__setattr__(self, "search_analyzer", _analyzer(self.search_analyzer))
         _boolean(self.include_score_details, "include_score_details")
 
         vector_mode = mode in (
@@ -277,12 +341,10 @@ class MongoDBRAGProviderOptions:
         object.__setattr__(self, "text_weight", text_weight)
         if mode is MongoDBSearchMode.HYBRID_RRF and vector_weight == text_weight == 0:
             raise MongoDBConfigurationError("at least one hybrid fusion weight must be positive.")
-        if self.parent is not None and mode not in (
-            MongoDBSearchMode.VECTOR_ANN,
-            MongoDBSearchMode.VECTOR_ENN,
-            MongoDBSearchMode.HYBRID_RRF,
-        ):
-            raise MongoDBConfigurationError("parent retrieval requires a vector-capable mode.")
+        if self.parent is not None and mode is MongoDBSearchMode.HYBRID_RRF:
+            raise MongoDBConfigurationError(
+                "parent retrieval is not implemented for hybrid_rrf mode."
+            )
 
     def normalize_search_options(
         self,

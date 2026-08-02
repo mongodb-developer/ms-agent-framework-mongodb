@@ -14,6 +14,7 @@ from pymongo.operations import SearchIndexModel
 from ..errors import (
     MongoDBAuthorizationError,
     MongoDBCapabilityError,
+    MongoDBConfigurationError,
     MongoDBIndexFailedError,
     MongoDBIndexMismatchError,
     MongoDBIndexMissingError,
@@ -233,3 +234,305 @@ def _translate_index_error(error: PyMongoError) -> Exception:
             "MongoDB Vector Search index operation failed transiently."
         )
     return MongoDBRetrievalError("MongoDB Vector Search index operation failed.")
+
+
+@dataclass(frozen=True, slots=True)
+class SearchIndexDefinition:
+    """Expected application-owned MongoDB Search index properties."""
+
+    name: str
+    text_paths: tuple[str, ...]
+    analyzer: str
+    filter_fields: tuple[tuple[str, str], ...] = ()
+
+    def document(self) -> dict[str, Any]:
+        fields: dict[str, object] = {}
+        for path in self.text_paths:
+            _set_search_mapping(
+                fields,
+                path,
+                {
+                    "type": "string",
+                    "analyzer": self.analyzer,
+                    "searchAnalyzer": self.analyzer,
+                },
+            )
+        for path, field_type in self.filter_fields:
+            _set_search_mapping(fields, path, {"type": field_type})
+        return {"mappings": {"dynamic": True, "fields": fields}}
+
+
+class SearchIndexManager:
+    """Inspect, validate, and explicitly provision one MongoDB Search index."""
+
+    def __init__(
+        self,
+        collection: _SearchIndexCollection,
+        expected: SearchIndexDefinition,
+    ) -> None:
+        self._collection = collection
+        self.expected = expected
+
+    async def inspect(self) -> Mapping[str, Any] | None:
+        try:
+            cursor = await self._collection.list_search_indexes(name=self.expected.name)
+            documents = await cursor.to_list(length=1)
+        except asyncio.CancelledError:
+            raise
+        except PyMongoError as exc:
+            raise _translate_search_index_error(exc) from exc
+        return documents[0] if documents else None
+
+    async def validate(self, *, require_ready: bool = True) -> Mapping[str, Any]:
+        inspected = await self.inspect()
+        if inspected is None:
+            raise MongoDBIndexMissingError(
+                f"MongoDB Search index '{self.expected.name}' does not exist; create it explicitly."
+            )
+        self._validate_inspected(inspected, require_ready=require_ready)
+        return inspected
+
+    def _validate_inspected(
+        self,
+        inspected: Mapping[str, Any],
+        *,
+        require_ready: bool,
+    ) -> None:
+        status = self._raise_if_failed(inspected)
+        self._validate_definition(inspected)
+        if require_ready and (status != "READY" or inspected.get("queryable") is not True):
+            raise MongoDBIndexNotReadyError(
+                f"MongoDB Search index '{self.expected.name}' is not READY and queryable."
+            )
+
+    def _raise_if_failed(self, inspected: Mapping[str, Any]) -> object:
+        raw_status = inspected.get("status")
+        status = raw_status.upper() if isinstance(raw_status, str) else raw_status
+        if status == "FAILED":
+            raise MongoDBIndexFailedError(
+                f"MongoDB Search index '{self.expected.name}' is FAILED; remediation: "
+                "inspect the deployment index error, then explicitly update, drop, or recreate "
+                "the index definition."
+            )
+        return status
+
+    async def ensure(
+        self,
+        *,
+        wait_until_ready: bool,
+        timeout: float,
+        poll_interval: float,
+    ) -> Mapping[str, Any] | None:
+        inspected = await self.inspect()
+        definition = self.expected.document()
+        try:
+            if inspected is None:
+                await self._collection.create_search_index(
+                    SearchIndexModel(definition=definition, name=self.expected.name)
+                )
+            else:
+                self._raise_if_failed(inspected)
+                try:
+                    self._validate_definition(inspected)
+                except MongoDBIndexMismatchError:
+                    await self._collection.update_search_index(self.expected.name, definition)
+        except asyncio.CancelledError:
+            raise
+        except PyMongoError as exc:
+            raise _translate_search_index_error(exc) from exc
+        if not wait_until_ready:
+            final = await self.inspect()
+            if final is None:
+                raise MongoDBIndexMissingError(
+                    f"MongoDB Search index '{self.expected.name}' was not inspectable after "
+                    "the ensure command was accepted; inspect it again before use."
+                )
+            self._validate_inspected(final, require_ready=False)
+            return final
+        return await self.wait_until_ready(timeout=timeout, poll_interval=poll_interval)
+
+    async def wait_until_ready(
+        self,
+        *,
+        timeout: float,
+        poll_interval: float,
+    ) -> Mapping[str, Any]:
+        if timeout <= 0 or poll_interval <= 0:
+            raise ValueError("timeout and poll_interval must be positive.")
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                return await self.validate(require_ready=True)
+            except (MongoDBIndexMissingError, MongoDBIndexNotReadyError) as exc:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise MongoDBIndexNotReadyError(
+                        f"MongoDB Search index '{self.expected.name}' was not queryable "
+                        f"before timeout; last state: {type(exc).__name__}."
+                    ) from exc
+                await asyncio.sleep(min(poll_interval, remaining))
+
+    def _validate_definition(self, inspected: Mapping[str, Any]) -> None:
+        if inspected.get("type", "search") != "search":
+            raise MongoDBIndexMismatchError(
+                f"MongoDB Search index '{self.expected.name}' has the wrong index type."
+            )
+        raw_definition = inspected.get("latestDefinition", inspected.get("definition"))
+        if not isinstance(raw_definition, Mapping):
+            raise MongoDBIndexMismatchError(
+                f"MongoDB Search index '{self.expected.name}' has no inspectable definition."
+            )
+        mappings = cast(Mapping[str, object], raw_definition).get("mappings")
+        if not isinstance(mappings, Mapping):
+            raise MongoDBIndexMismatchError(
+                f"MongoDB Search index '{self.expected.name}' has no mappings definition."
+            )
+        fields = cast(Mapping[str, object], mappings).get("fields")
+        if not isinstance(fields, Mapping):
+            raise MongoDBIndexMismatchError(
+                f"MongoDB Search index '{self.expected.name}' has no fields definition."
+            )
+        typed_fields = cast(Mapping[str, object], fields)
+        for path in self.expected.text_paths:
+            mappings_for_path = _search_mappings_for_path(typed_fields, path)
+            string_mappings = tuple(
+                mapping for mapping in mappings_for_path if mapping.get("type") == "string"
+            )
+            if not string_mappings:
+                raise MongoDBIndexMismatchError(
+                    f"MongoDB Search index '{self.expected.name}' is missing text path '{path}'."
+                )
+            matching_analyzer = tuple(
+                mapping
+                for mapping in string_mappings
+                if mapping.get("analyzer") == self.expected.analyzer
+            )
+            if not matching_analyzer:
+                raise MongoDBIndexMismatchError(
+                    f"MongoDB Search index '{self.expected.name}' has the wrong analyzer "
+                    f"for text path '{path}'."
+                )
+            if not any(
+                mapping.get("searchAnalyzer", mapping.get("analyzer")) == self.expected.analyzer
+                for mapping in matching_analyzer
+            ):
+                raise MongoDBIndexMismatchError(
+                    f"MongoDB Search index '{self.expected.name}' has the wrong search analyzer "
+                    f"for text path '{path}'."
+                )
+        for path, expected_type in self.expected.filter_fields:
+            mappings_for_path = _search_mappings_for_path(typed_fields, path)
+            if not any(mapping.get("type") == expected_type for mapping in mappings_for_path):
+                raise MongoDBIndexMismatchError(
+                    f"MongoDB Search index '{self.expected.name}' is missing required "
+                    f"filter path '{path}' with type '{expected_type}'."
+                )
+
+
+def _set_search_mapping(
+    fields: dict[str, object],
+    path: str,
+    mapping: dict[str, object],
+) -> None:
+    segments = path.split(".")
+    current = fields
+    for segment in segments[:-1]:
+        existing = current.get(segment)
+        document_mapping: dict[str, object] | None
+        if existing is None:
+            document_mapping = {"type": "document", "fields": {}}
+            current[segment] = document_mapping
+        else:
+            mappings = _construction_mappings(existing, path)
+            document_mapping = next(
+                (candidate for candidate in mappings if candidate.get("type") == "document"),
+                None,
+            )
+            if document_mapping is None:
+                document_mapping = {"type": "document", "fields": {}}
+                mappings.append(document_mapping)
+                current[segment] = _canonical_mapping_value(mappings)
+        nested = document_mapping.get("fields")
+        if not isinstance(nested, dict):
+            raise MongoDBConfigurationError(
+                f"Search index path '{path}' conflicts with a non-document mapping."
+            )
+        current = cast(dict[str, object], nested)
+    existing_leaf = current.get(segments[-1])
+    if existing_leaf is None:
+        current[segments[-1]] = mapping
+    else:
+        mappings = _construction_mappings(existing_leaf, path)
+        if mapping not in mappings:
+            mappings.append(mapping)
+        current[segments[-1]] = _canonical_mapping_value(mappings)
+
+
+def _construction_mappings(value: object, path: str) -> list[dict[str, object]]:
+    raw_mappings: list[object] = cast(list[object], value) if isinstance(value, list) else [value]
+    if not all(isinstance(item, dict) for item in raw_mappings):
+        raise MongoDBConfigurationError(
+            f"Search index path '{path}' has an invalid scalar/document mapping conflict."
+        )
+    return [cast(dict[str, object], item) for item in raw_mappings]
+
+
+def _canonical_mapping_value(mappings: list[dict[str, object]]) -> object:
+    order = {
+        "string": 0,
+        "token": 1,
+        "boolean": 2,
+        "date": 3,
+        "number": 4,
+        "document": 5,
+        "embeddedDocuments": 6,
+    }
+    mappings.sort(key=lambda item: order.get(str(item.get("type")), len(order)))
+    return mappings[0] if len(mappings) == 1 else mappings
+
+
+def _search_mappings_for_path(
+    fields: Mapping[str, object],
+    path: str,
+) -> tuple[Mapping[str, object], ...]:
+    current = fields
+    segments = path.split(".")
+    for index, segment in enumerate(segments):
+        value = current.get(segment)
+        mappings = _search_mapping_sequence(value)
+        if index == len(segments) - 1:
+            return mappings
+        parent_mapping = next(
+            (mapping for mapping in mappings if isinstance(mapping.get("fields"), Mapping)),
+            None,
+        )
+        if parent_mapping is None:
+            return ()
+        nested = parent_mapping.get("fields")
+        if not isinstance(nested, Mapping):
+            return ()
+        current = cast(Mapping[str, object], nested)
+    return ()
+
+
+def _search_mapping_sequence(value: object) -> tuple[Mapping[str, object], ...]:
+    if isinstance(value, Mapping):
+        return (cast(Mapping[str, object], value),)
+    if isinstance(value, list):
+        return tuple(
+            cast(Mapping[str, object], item)
+            for item in cast(list[object], value)
+            if isinstance(item, Mapping)
+        )
+    return ()
+
+
+def _translate_search_index_error(error: PyMongoError) -> Exception:
+    translated = _translate_index_error(error)
+    if isinstance(translated, MongoDBCapabilityError):
+        return MongoDBCapabilityError("MongoDB Search indexes are unavailable.")
+    if isinstance(translated, MongoDBTransientRetrievalError):
+        return MongoDBTransientRetrievalError("MongoDB Search index operation failed transiently.")
+    if isinstance(translated, MongoDBRetrievalError):
+        return MongoDBRetrievalError("MongoDB Search index operation failed.")
+    return translated
