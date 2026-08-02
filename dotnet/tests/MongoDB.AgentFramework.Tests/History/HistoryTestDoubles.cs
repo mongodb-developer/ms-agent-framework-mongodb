@@ -151,13 +151,18 @@ internal class HistoryCollectionProxy : DispatchProxy
     {
         var document = ((BsonDocument)args[0]!).DeepClone().AsBsonDocument;
         var cancellationToken = (CancellationToken)args[^1]!;
-        State.InsertAttempts.Add(document.DeepClone().AsBsonDocument);
-        if (State.InsertException is not null)
+        bool isMessage = document.GetValue("_kind", "") == "message";
+        if (isMessage)
+        {
+            State.InsertAttempts.Add(document.DeepClone().AsBsonDocument);
+        }
+
+        if (isMessage && State.InsertException is not null)
         {
             throw State.InsertException;
         }
 
-        if (State.InsertHandler is not null)
+        if (isMessage && State.InsertHandler is not null)
         {
             await State.InsertHandler(document.DeepClone().AsBsonDocument, cancellationToken);
         }
@@ -269,6 +274,15 @@ internal class HistoryIndexManagerProxy : DispatchProxy
                                 BsonSerializer.SerializerRegistry))
                     },
                     { "unique", model.Options.Unique ?? false },
+                    {
+                        "partialFilterExpression",
+                        model.Options.PartialFilterExpression is null
+                            ? BsonNull.Value
+                            : model.Options.PartialFilterExpression.Render(
+                                new RenderArgs<BsonDocument>(
+                                    BsonDocumentSerializer.Instance,
+                                    BsonSerializer.SerializerRegistry))
+                    },
                     {
                         "expireAfterSeconds",
                         model.Options.ExpireAfter is { } ttl

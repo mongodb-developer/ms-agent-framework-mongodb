@@ -6,6 +6,7 @@ using MongoDB.Bson.IO;
 using MongoDB.Driver;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 
 namespace MongoDB.AgentFramework;
@@ -14,12 +15,12 @@ namespace MongoDB.AgentFramework;
 public sealed class MongoDBChatHistoryProvider : ChatHistoryProvider, IAsyncDisposable
 {
     /// <summary>The stored MongoDB envelope schema version.</summary>
-    public const int SchemaVersion = 1;
+    public const int SchemaVersion = 2;
 
     /// <summary>The public Agent Framework JSON serialization version.</summary>
     public const int FrameworkSerializationVersion = 1;
 
-    private const int RetryStateVersion = 1;
+    private const int RetryStateVersion = 2;
     private static readonly IReadOnlyList<string> ProviderStateKeys =
         ["mongodb_history_pending_batches"];
     private readonly IMongoCollection<BsonDocument> _collection;
@@ -205,12 +206,13 @@ public sealed class MongoDBChatHistoryProvider : ChatHistoryProvider, IAsyncDisp
                                 !string.IsNullOrWhiteSpace(message.MessageId)));
                     }
 
-                    if (prepared.Any(static item => !item.HasFrameworkId))
-                    {
-                        retryAttempt = BeginRetryAttempt(
-                            BatchFingerprint(scope, prepared),
-                            sessionState);
-                    }
+                    string batchFingerprint = BatchFingerprint(scope, prepared);
+                    retryAttempt = BeginRetryAttempt(
+                        batchFingerprint,
+                        sessionState,
+                        prepared.All(static item => item.HasFrameworkId)
+                            ? $"explicit:{batchFingerprint}"
+                            : null);
 
                     foreach (PreparedMessage item in prepared)
                     {
@@ -221,98 +223,120 @@ public sealed class MongoDBChatHistoryProvider : ChatHistoryProvider, IAsyncDisp
 
                         string key = item.Ordinal.ToString(
                             System.Globalization.CultureInfo.InvariantCulture);
-                        if (!retryAttempt!.Ids.TryGetValue(key, out string? fallbackId))
+                        if (!retryAttempt.Attempt.Ids!.TryGetValue(key, out string? fallbackId))
                         {
                             fallbackId = Guid.NewGuid().ToString();
-                            retryAttempt.Ids.Add(key, fallbackId);
+                            retryAttempt.Attempt.Ids.Add(key, fallbackId);
                         }
-
-                        item.Payload["messageId"] = fallbackId;
                     }
 
-                    if (retryAttempt is not null)
-                    {
-                        PersistRetryAttempt(retryAttempt, sessionState);
-                    }
+                    PersistRetryAttempt(retryAttempt, sessionState);
 
-                    var pending = new List<(
-                        string Id,
-                        string MessageId,
-                        ChatMessage Message,
-                        BsonDocument Payload)>();
+                    var candidates = new List<BsonDocument>(prepared.Count);
+                    var existingById = new Dictionary<string, BsonDocument>(
+                        StringComparer.Ordinal);
                     foreach (PreparedMessage item in prepared)
                     {
-                        string messageId = item.HasFrameworkId
+                        string stableMessageId = item.HasFrameworkId
                             ? item.Message.MessageId!
-                            : retryAttempt!.Ids[item.Ordinal.ToString(
+                            : retryAttempt.Attempt.Ids![item.Ordinal.ToString(
                                 System.Globalization.CultureInfo.InvariantCulture)];
-                        string documentId = ScopedId(scope, messageId);
-                        BsonDocument? existing = await FindOneAsync(
-                            Builders<BsonDocument>.Filter.Eq("_id", documentId),
-                            token).ConfigureAwait(false);
-                        if (existing is not null)
+                        string documentId = ScopedId(scope, stableMessageId);
+                        var candidate = new BsonDocument
                         {
-                            ValidateDuplicate(existing, messageId, item.Payload);
-                            continue;
-                        }
-
-                        pending.Add((documentId, messageId, item.Message, item.Payload));
-                    }
-
-                    if (pending.Count == 0)
-                    {
-                        return;
-                    }
-
-                    long firstSequence = await AllocateSequenceAsync(
-                        scope,
-                        pending.Count,
-                        token).ConfigureAwait(false);
-                    for (int offset = 0; offset < pending.Count; offset++)
-                    {
-                        var item = pending[offset];
-                        DateTime now = DateTime.UtcNow;
-                        var document = new BsonDocument
-                        {
-                            { "_id", item.Id },
+                            { "_id", documentId },
                             { "_kind", "message" },
                             { "schema_version", SchemaVersion },
                             { "framework_version", FrameworkSerializationVersion },
-                            { "sequence", firstSequence + offset },
-                            { "message_id", item.MessageId },
+                            { "stable_message_id", stableMessageId },
+                            {
+                                "message_id",
+                                item.Message.MessageId is null
+                                    ? BsonNull.Value
+                                    : item.Message.MessageId
+                            },
                             { "role", item.Message.Role.Value },
-                            { "created_at", now },
                             { "message", item.Payload },
                         };
-                        document.AddRange(scope);
+                        candidate.AddRange(scope);
+                        candidates.Add(candidate);
+                        BsonDocument? existing = await FindOneAsync(
+                            Builders<BsonDocument>.Filter.Eq("_id", documentId) &
+                                Builders<BsonDocument>.Filter.Eq("_kind", "message") &
+                                ScopeFilter(scope),
+                            token).ConfigureAwait(false);
+                        if (existing is not null)
+                        {
+                            ValidateDuplicate(existing, candidate, includeSequence: false);
+                            existingById.Add(documentId, existing);
+                        }
+                    }
+
+                    string reservationToken = retryAttempt.Attempt.Token!;
+                    if (existingById.Count == candidates.Count)
+                    {
+                        await DeleteReservationAsync(
+                            scope,
+                            reservationToken,
+                            token).ConfigureAwait(false);
+                        return;
+                    }
+
+                    long firstSequence = await ReserveSequenceAsync(
+                        scope,
+                        reservationToken,
+                        candidates.Count,
+                        token).ConfigureAwait(false);
+                    DateTime now = DateTime.UtcNow;
+                    for (int ordinal = 0; ordinal < candidates.Count; ordinal++)
+                    {
+                        BsonDocument candidate = candidates[ordinal];
+                        candidate["sequence"] = firstSequence + ordinal;
+                        candidate["created_at"] = now;
                         if (_options.Retention is { } retention)
                         {
-                            document["expires_at"] = now + retention;
+                            candidate["expires_at"] = now + retention;
+                        }
+
+                        if (existingById.TryGetValue(
+                                candidate["_id"].AsString,
+                                out BsonDocument? existing))
+                        {
+                            ValidateDuplicate(existing, candidate, includeSequence: true);
+                            continue;
                         }
 
                         try
                         {
                             await _collection.InsertOneAsync(
-                                document,
+                                candidate,
                                 cancellationToken: token).ConfigureAwait(false);
                         }
                         catch (MongoException exception) when (IsDuplicateKey(exception))
                         {
-                            BsonDocument? existing = await FindOneAsync(
+                            BsonDocument? duplicateExisting = await FindOneAsync(
                                 ScopeFilter(scope) &
                                     Builders<BsonDocument>.Filter.Eq("_kind", "message") &
                                     Builders<BsonDocument>.Filter.Eq(
-                                        "message_id",
-                                        item.MessageId),
+                                    "stable_message_id",
+                                    candidate["stable_message_id"]),
                                 token).ConfigureAwait(false);
-                            if (existing is null)
+                            if (duplicateExisting is null)
                             {
                                 throw;
                             }
 
-                            ValidateDuplicate(existing, item.MessageId, item.Payload);
+                            ValidateDuplicate(
+                                duplicateExisting,
+                                candidate,
+                                includeSequence: true);
                         }
                     }
+
+                    await DeleteReservationAsync(
+                        scope,
+                        reservationToken,
+                        token).ConfigureAwait(false);
                 },
                 _options.PersistenceTimeout,
                 "MongoDB History persistence deadline exceeded.",
@@ -363,6 +387,10 @@ public sealed class MongoDBChatHistoryProvider : ChatHistoryProvider, IAsyncDisp
                             Builders<BsonDocument>.Filter.Eq("_kind", "sequence") &
                             ScopeFilter(scope),
                         token).ConfigureAwait(false);
+                    await _collection.DeleteManyAsync(
+                        ScopeFilter(scope) &
+                            Builders<BsonDocument>.Filter.Eq("_kind", "reservation"),
+                        token).ConfigureAwait(false);
                     if (!result.IsAcknowledged)
                     {
                         throw new MongoDBPersistenceException(
@@ -398,17 +426,19 @@ public sealed class MongoDBChatHistoryProvider : ChatHistoryProvider, IAsyncDisp
         cancellationToken.ThrowIfCancellationRequested();
         var scopeKeys = new BsonDocument
         {
-            { "tenant_id", 1 },
-            { "application_id", 1 },
-            { "agent_id", 1 },
+            { "scope_discriminator", 1 },
             { "session_id", 1 },
         };
-        var partial = new BsonDocument("_kind", "message");
+        var partial = new BsonDocument
+        {
+            { "_kind", "message" },
+            { "scope_discriminator", new BsonDocument("$type", "string") },
+        };
         var models = new List<CreateIndexModel<BsonDocument>>
         {
             new(
                 new BsonDocumentIndexKeysDefinition<BsonDocument>(
-                    new BsonDocument(scopeKeys).Add("message_id", 1)),
+                    new BsonDocument(scopeKeys).Add("stable_message_id", 1)),
                 new CreateIndexOptions<BsonDocument>
                 {
                     Name = "history_scoped_message_unique",
@@ -470,24 +500,32 @@ public sealed class MongoDBChatHistoryProvider : ChatHistoryProvider, IAsyncDisp
                 indexes.AddRange(cursor.Current);
             }
 
-            string[] scopeKeys = ["tenant_id", "application_id", "agent_id", "session_id"];
+            string[] scopeKeys = ["scope_discriminator", "session_id"];
+            var partial = new BsonDocument
+            {
+                { "_kind", "message" },
+                { "scope_discriminator", new BsonDocument("$type", "string") },
+            };
             ValidateIndex(
                 indexes,
                 "history_scoped_message_unique",
-                [.. scopeKeys, "message_id"],
-                requireUnique: true);
+                [.. scopeKeys, "stable_message_id"],
+                expectedUnique: true,
+                partial);
             ValidateIndex(
                 indexes,
                 "history_scoped_sequence",
                 [.. scopeKeys, "sequence"],
-                requireUnique: true);
+                expectedUnique: true,
+                partial);
             if (_options.Retention is not null)
             {
                 BsonDocument ttl = ValidateIndex(
                     indexes,
                     "history_expiration_ttl",
                     ["expires_at"],
-                    requireUnique: false);
+                    expectedUnique: false,
+                    partial);
                 if (!ttl.TryGetValue("expireAfterSeconds", out BsonValue seconds) ||
                     seconds.IsBsonNull ||
                     seconds.ToDouble() != 0)
@@ -548,18 +586,28 @@ public sealed class MongoDBChatHistoryProvider : ChatHistoryProvider, IAsyncDisp
                 "The requested SessionId does not match this provider's authorized session.");
         }
 
-        var scope = new BsonDocument
+        var dimensions = new BsonDocument
         {
+            { "tenant_id", _options.TenantId is null ? BsonNull.Value : _options.TenantId },
             { "application_id", _options.ApplicationId },
             { "agent_id", _options.AgentId },
+            { "user_id", BsonNull.Value },
+        };
+        return new BsonDocument
+        {
+            {
+                "scope_discriminator",
+                CanonicalScopeDiscriminator(
+                    _options.TenantId,
+                    _options.ApplicationId,
+                    _options.AgentId)
+            },
+            { "tenant_id", dimensions["tenant_id"] },
+            { "application_id", dimensions["application_id"] },
+            { "agent_id", dimensions["agent_id"] },
+            { "user_id", BsonNull.Value },
             { "session_id", _options.SessionId },
         };
-        if (_options.TenantId is not null)
-        {
-            scope.InsertAt(0, new BsonElement("tenant_id", _options.TenantId));
-        }
-
-        return scope;
     }
 
     private static FilterDefinition<BsonDocument> ScopeFilter(BsonDocument scope) =>
@@ -609,6 +657,71 @@ public sealed class MongoDBChatHistoryProvider : ChatHistoryProvider, IAsyncDisp
         return sequence.ToInt64() - count + 1;
     }
 
+    private async Task<long> ReserveSequenceAsync(
+        BsonDocument scope,
+        string token,
+        int count,
+        CancellationToken cancellationToken)
+    {
+        string reservationId = ReservationId(scope, token);
+        FilterDefinition<BsonDocument> filter =
+            Builders<BsonDocument>.Filter.Eq("_id", reservationId) &
+            Builders<BsonDocument>.Filter.Eq("_kind", "reservation") &
+            ScopeFilter(scope);
+        BsonDocument? existing = await FindOneAsync(filter, cancellationToken)
+            .ConfigureAwait(false);
+        if (existing is not null)
+        {
+            return ValidateReservation(existing, count);
+        }
+
+        long firstSequence = await AllocateSequenceAsync(
+            scope,
+            count,
+            cancellationToken).ConfigureAwait(false);
+        var reservation = new BsonDocument
+        {
+            { "_id", reservationId },
+            { "_kind", "reservation" },
+            { "schema_version", SchemaVersion },
+            { "framework_version", FrameworkSerializationVersion },
+            { "token", token },
+            { "count", count },
+            { "first_sequence", firstSequence },
+        };
+        reservation.AddRange(scope);
+        try
+        {
+            await _collection.InsertOneAsync(
+                reservation,
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+        }
+        catch (MongoException exception) when (IsDuplicateKey(exception))
+        {
+            existing = await FindOneAsync(filter, cancellationToken).ConfigureAwait(false);
+            if (existing is null)
+            {
+                throw;
+            }
+
+            return ValidateReservation(existing, count);
+        }
+
+        return firstSequence;
+    }
+
+    private async Task DeleteReservationAsync(
+        BsonDocument scope,
+        string token,
+        CancellationToken cancellationToken)
+    {
+        await _collection.DeleteOneAsync(
+            Builders<BsonDocument>.Filter.Eq("_id", ReservationId(scope, token)) &
+                Builders<BsonDocument>.Filter.Eq("_kind", "reservation") &
+                ScopeFilter(scope),
+            cancellationToken).ConfigureAwait(false);
+    }
+
     private static BsonDocument SerializeMessage(ChatMessage message)
     {
         try
@@ -633,7 +746,9 @@ public sealed class MongoDBChatHistoryProvider : ChatHistoryProvider, IAsyncDisp
             schema.AsInt32 != SchemaVersion)
         {
             throw new MongoDBMappingException(
-                $"Unsupported History schema version; run a supported migration before replay.");
+                "Unsupported History schema version. Version 1 cannot be read because " +
+                "schema version 2 introduces a breaking authorization-scope boundary; " +
+                "run a supported migration before replay.");
         }
 
         if (!document.TryGetValue("framework_version", out BsonValue framework) ||
@@ -689,12 +804,70 @@ public sealed class MongoDBChatHistoryProvider : ChatHistoryProvider, IAsyncDisp
     private static string CounterId(BsonDocument scope) =>
         $"history-sequence:{Hash(scope.ToJson())}";
 
+    private static string ReservationId(BsonDocument scope, string token) =>
+        $"history-reservation:{Hash(new BsonDocument
+        {
+            { "scope", scope },
+            { "token", token },
+        }.ToJson())}";
+
+    private static long ValidateReservation(BsonDocument document, int expectedCount)
+    {
+        if (document.GetValue("schema_version", BsonNull.Value) != SchemaVersion ||
+            document.GetValue("framework_version", BsonNull.Value) !=
+                FrameworkSerializationVersion ||
+            document.GetValue("count", BsonNull.Value) != expectedCount ||
+            !document.TryGetValue("first_sequence", out BsonValue firstSequence) ||
+            !firstSequence.IsInt64)
+        {
+            throw new MongoDBPersistenceException(
+                "Stored History sequence reservation is incompatible; " +
+                "clear the authorized session reservation after migration review.");
+        }
+
+        return firstSequence.AsInt64;
+    }
+
     private static string Hash(string value) =>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
 
+    private static string CanonicalScopeDiscriminator(
+        string? tenantId,
+        string applicationId,
+        string agentId)
+    {
+        using var stream = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(
+            stream,
+            new JsonWriterOptions { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping }))
+        {
+            writer.WriteStartObject();
+            writer.WritePropertyName("dimensions");
+            writer.WriteStartObject();
+            writer.WriteString("agent_id", agentId);
+            writer.WriteString("application_id", applicationId);
+            if (tenantId is null)
+            {
+                writer.WriteNull("tenant_id");
+            }
+            else
+            {
+                writer.WriteString("tenant_id", tenantId);
+            }
+
+            writer.WriteNull("user_id");
+            writer.WriteEndObject();
+            writer.WriteNumber("version", 1);
+            writer.WriteEndObject();
+        }
+
+        return Convert.ToHexString(SHA256.HashData(stream.ToArray())).ToLowerInvariant();
+    }
+
     private RetryAttempt BeginRetryAttempt(
         string fingerprint,
-        AgentSessionStateBag? sessionState)
+        AgentSessionStateBag? sessionState,
+        string? tokenHint)
     {
         lock (_retryLock)
         {
@@ -706,8 +879,12 @@ public sealed class MongoDBChatHistoryProvider : ChatHistoryProvider, IAsyncDisp
                 state.Batches.Add(fingerprint, batch);
             }
 
-            Dictionary<string, string> ids = batch.Failed!.Count == 0
-                ? []
+            RetryAttemptState attempt = batch.Failed!.Count == 0
+                ? new RetryAttemptState
+                {
+                    Token = tokenHint ?? Guid.NewGuid().ToString(),
+                    Ids = [],
+                }
                 : batch.Failed[0];
             if (batch.Failed.Count > 0)
             {
@@ -715,9 +892,9 @@ public sealed class MongoDBChatHistoryProvider : ChatHistoryProvider, IAsyncDisp
             }
 
             string attemptId = Guid.NewGuid().ToString();
-            batch.InFlight!.Add(attemptId, ids);
+            batch.InFlight!.Add(attemptId, attempt);
             _activeRetryAttempts.Add(attemptId);
-            return new RetryAttempt(fingerprint, attemptId, ids, state);
+            return new RetryAttempt(fingerprint, attemptId, attempt, state);
         }
     }
 
@@ -727,7 +904,7 @@ public sealed class MongoDBChatHistoryProvider : ChatHistoryProvider, IAsyncDisp
     {
         lock (_retryLock)
         {
-            ValidateIdMap(attempt.Ids, "in-flight attempt");
+            ValidateRetryAttempt(attempt.Attempt, "in-flight attempt");
             SaveRetryState(sessionState, attempt.State);
         }
     }
@@ -755,7 +932,7 @@ public sealed class MongoDBChatHistoryProvider : ChatHistoryProvider, IAsyncDisp
             batch.InFlight!.Remove(attempt.AttemptId);
             if (retryableFailure)
             {
-                batch.Failed!.Add(attempt.Ids);
+                batch.Failed!.Add(attempt.Attempt);
             }
 
             if (batch.Failed!.Count == 0 && batch.InFlight.Count == 0)
@@ -804,12 +981,12 @@ public sealed class MongoDBChatHistoryProvider : ChatHistoryProvider, IAsyncDisp
         ValidateRetryState(state);
         foreach (RetryBatch batch in state.Batches!.Values)
         {
-            foreach ((string attemptId, Dictionary<string, string> ids) in
+            foreach ((string attemptId, RetryAttemptState attempt) in
                      batch.InFlight!.ToArray())
             {
                 if (!_activeRetryAttempts.Contains(attemptId))
                 {
-                    batch.Failed!.Add(ids);
+                    batch.Failed!.Add(attempt);
                     batch.InFlight!.Remove(attemptId);
                 }
             }
@@ -833,34 +1010,35 @@ public sealed class MongoDBChatHistoryProvider : ChatHistoryProvider, IAsyncDisp
                 throw InvalidRetryState("a batch has an invalid shape");
             }
 
-            foreach (Dictionary<string, string>? ids in batch.Failed)
+            foreach (RetryAttemptState? attempt in batch.Failed)
             {
-                ValidateIdMap(ids, "failed attempt");
+                ValidateRetryAttempt(attempt, "failed attempt");
             }
 
-            foreach ((string attemptId, Dictionary<string, string>? ids) in batch.InFlight)
+            foreach ((string attemptId, RetryAttemptState? attempt) in batch.InFlight)
             {
                 if (string.IsNullOrWhiteSpace(attemptId))
                 {
                     throw InvalidRetryState("an in-flight attempt ID is empty");
                 }
 
-                ValidateIdMap(ids, "in-flight attempt");
+                ValidateRetryAttempt(attempt, "in-flight attempt");
             }
         }
     }
 
-    private static void ValidateIdMap(
-        Dictionary<string, string>? ids,
+    private static void ValidateRetryAttempt(
+        RetryAttemptState? attempt,
         string location)
     {
-        if (ids is null ||
-            ids.Count == 0 ||
-            ids.Any(static pair =>
+        if (attempt is null ||
+            string.IsNullOrWhiteSpace(attempt.Token) ||
+            attempt.Ids is null ||
+            attempt.Ids.Any(static pair =>
                 string.IsNullOrWhiteSpace(pair.Key) ||
                 string.IsNullOrWhiteSpace(pair.Value)))
         {
-            throw InvalidRetryState($"{location} contains invalid fallback IDs");
+            throw InvalidRetryState($"{location} contains an invalid reservation token or fallback IDs");
         }
     }
 
@@ -906,16 +1084,29 @@ public sealed class MongoDBChatHistoryProvider : ChatHistoryProvider, IAsyncDisp
 
     private static void ValidateDuplicate(
         BsonDocument existing,
-        string messageId,
-        BsonDocument payload)
+        BsonDocument candidate,
+        bool includeSequence)
     {
         if (existing.GetValue("schema_version", BsonNull.Value) != SchemaVersion ||
             existing.GetValue("framework_version", BsonNull.Value) != FrameworkSerializationVersion ||
-            existing.GetValue("message_id", BsonNull.Value) != messageId ||
-            existing.GetValue("message", BsonNull.Value) != payload)
+            existing.GetValue("stable_message_id", BsonNull.Value) !=
+                candidate.GetValue("stable_message_id", BsonNull.Value) ||
+            existing.GetValue("message_id", BsonNull.Value) !=
+                candidate.GetValue("message_id", BsonNull.Value) ||
+            existing.GetValue("message", BsonNull.Value) !=
+                candidate.GetValue("message", BsonNull.Value))
         {
             throw new MongoDBPersistenceException(
                 "A duplicate History message identity contains incompatible stored data.");
+        }
+
+        if (includeSequence &&
+            existing.GetValue("sequence", BsonNull.Value) !=
+                candidate.GetValue("sequence", BsonNull.Value))
+        {
+            throw new MongoDBPersistenceException(
+                "A duplicate History message identity has an incompatible sequence; " +
+                "retry with the original sequence reservation.");
         }
     }
 
@@ -923,7 +1114,8 @@ public sealed class MongoDBChatHistoryProvider : ChatHistoryProvider, IAsyncDisp
         IEnumerable<BsonDocument> indexes,
         string name,
         IReadOnlyList<string> expectedKeys,
-        bool requireUnique)
+        bool expectedUnique,
+        BsonDocument expectedPartial)
     {
         BsonDocument? index = indexes.FirstOrDefault(
             value => value.GetValue("name", "").AsString == name);
@@ -937,7 +1129,8 @@ public sealed class MongoDBChatHistoryProvider : ChatHistoryProvider, IAsyncDisp
             !keys.IsBsonDocument ||
             !keys.AsBsonDocument.Names.SequenceEqual(expectedKeys, StringComparer.Ordinal) ||
             keys.AsBsonDocument.Values.Any(value => value.ToInt32() != 1) ||
-            (requireUnique && !index.GetValue("unique", false).ToBoolean()))
+            index.GetValue("unique", false).ToBoolean() != expectedUnique ||
+            index.GetValue("partialFilterExpression", BsonNull.Value) != expectedPartial)
         {
             throw new MongoDBIndexMismatchException(
                 $"Regular index '{name}' does not match the required History definition.");
@@ -995,7 +1188,7 @@ public sealed class MongoDBChatHistoryProvider : ChatHistoryProvider, IAsyncDisp
     private sealed record RetryAttempt(
         string Fingerprint,
         string AttemptId,
-        Dictionary<string, string> Ids,
+        RetryAttemptState Attempt,
         RetryState State);
 
     private sealed class RetryState
@@ -1007,8 +1200,15 @@ public sealed class MongoDBChatHistoryProvider : ChatHistoryProvider, IAsyncDisp
 
     private sealed class RetryBatch
     {
-        public List<Dictionary<string, string>>? Failed { get; set; } = [];
+        public List<RetryAttemptState>? Failed { get; set; } = [];
 
-        public Dictionary<string, Dictionary<string, string>>? InFlight { get; set; } = [];
+        public Dictionary<string, RetryAttemptState>? InFlight { get; set; } = [];
+    }
+
+    private sealed class RetryAttemptState
+    {
+        public string? Token { get; set; }
+
+        public Dictionary<string, string>? Ids { get; set; } = [];
     }
 }

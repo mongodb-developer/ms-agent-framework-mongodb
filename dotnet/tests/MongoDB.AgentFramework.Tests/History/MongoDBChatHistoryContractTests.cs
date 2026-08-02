@@ -13,6 +13,11 @@ public sealed class MongoDBChatHistoryContractTests
                 Path.Combine(AppContext.BaseDirectory, "Fixtures", "history_contract.json")));
         JsonElement root = fixture.RootElement;
         JsonElement scope = root.GetProperty("scope");
+        Assert.Equal(MongoDBChatHistoryProvider.SchemaVersion, root.GetProperty("schema_version").GetInt32());
+        Assert.Equal(
+            MongoDBChatHistoryProvider.FrameworkSerializationVersion,
+            root.GetProperty("framework_version").GetInt32());
+        Assert.Equal(JsonValueKind.Null, scope.GetProperty("user_id").ValueKind);
         var state = new HistoryCollectionState();
         var provider = new MongoDBChatHistoryProvider(
             HistoryCollectionProxy.Create(state),
@@ -45,5 +50,10 @@ public sealed class MongoDBChatHistoryContractTests
         Assert.Equal(
             root.GetProperty("retry_expected_document_count").GetInt32(),
             state.Documents.Count(document => document["_kind"] == "message"));
+        Assert.All(
+            state.Documents.Where(document => document["_kind"] == "message"),
+            document => Assert.Equal(
+                root.GetProperty("expected_scope_discriminator").GetString(),
+                document["scope_discriminator"].AsString));
     }
 }

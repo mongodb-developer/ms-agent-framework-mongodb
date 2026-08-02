@@ -101,7 +101,9 @@ IReadOnlyList<ChatMessage> messages =
 `EnsureIndexesAsync` is the only mutating provisioning operation. Runtime history
 does not use MongoDB Search or the Memory collection. `ClearMessagesAsync` rejects
 any session other than the configured authorization scope. Unknown stored versions
-fail with migration guidance.
+fail with migration guidance. History schema version 2 adds canonical scope
+discrimination and is a breaking authorization-boundary change; version 1
+collections require migration before replay or index provisioning.
 
 Run the sample after setting `MONGODB_URI` and `MONGODB_DATABASE`:
 
