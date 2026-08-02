@@ -51,6 +51,93 @@ public sealed class MongoDBRAGProviderSearchTests
         Assert.Equal("https://example.test", result.SourceUrl);
         Assert.Equal("docs", result.Metadata["category"].AsString);
         Assert.Equal("chunk-1", result.RawDocument["_id"].AsString);
+        // The complete original document survives mapping, not just the configured field mappings.
+        Assert.Equal("docs", result.RawDocument["category"].AsString);
+        Assert.Equal("Doc", result.RawDocument["source"].AsBsonDocument["name"].AsString);
+        // The internal reserved score alias must never leak into the public raw document.
+        Assert.False(result.RawDocument.Contains("_ragScore"));
+    }
+
+    [Fact]
+    public async Task PipelineDoesNotIncludeANarrowingProjectStage()
+    {
+        var state = new RAGCollectionState
+        {
+            Results = [new BsonDocument { { "_id", "chunk-1" }, { "text", "chunk" }, { "_ragScore", 0.5 } }],
+        };
+        MongoDBRAGProvider provider = CreateProvider(state);
+
+        await provider.SearchAsync("query");
+
+        Assert.Equal(2, state.AggregateStages.Count);
+        Assert.DoesNotContain(state.AggregateStages, stage => stage.Contains("$project"));
+    }
+
+    [Fact]
+    public async Task MissingRagScoreFieldIsAMappingError()
+    {
+        var state = new RAGCollectionState
+        {
+            Results = [new BsonDocument { { "_id", "chunk-1" }, { "text", "chunk" } }],
+        };
+        MongoDBRAGProvider provider = CreateProvider(state);
+
+        await Assert.ThrowsAsync<MongoDBMappingException>(() => provider.SearchAsync("query"));
+    }
+
+    [Fact]
+    public async Task NonNumericRagScoreIsAMappingError()
+    {
+        var state = new RAGCollectionState
+        {
+            Results =
+            [
+                new BsonDocument
+                {
+                    { "_id", "chunk-1" },
+                    { "text", "chunk" },
+                    { "_ragScore", "not-a-number" },
+                },
+            ],
+        };
+        MongoDBRAGProvider provider = CreateProvider(state);
+
+        await Assert.ThrowsAsync<MongoDBMappingException>(() => provider.SearchAsync("query"));
+    }
+
+    [Fact]
+    public async Task NonFiniteRagScoreIsAMappingError()
+    {
+        var state = new RAGCollectionState
+        {
+            Results =
+            [
+                new BsonDocument
+                {
+                    { "_id", "chunk-1" },
+                    { "text", "chunk" },
+                    { "_ragScore", double.NaN },
+                },
+            ],
+        };
+        MongoDBRAGProvider provider = CreateProvider(state);
+
+        await Assert.ThrowsAsync<MongoDBMappingException>(() => provider.SearchAsync("query"));
+    }
+
+    [Fact]
+    public async Task RawEmbeddingGeneratorFailuresAreWrappedAsEmbeddingExceptions()
+    {
+        var embeddings = new RecordingEmbeddingGenerator
+        {
+            FailWith = new InvalidOperationException("embedding service unavailable"),
+        };
+        MongoDBRAGProvider provider = CreateProvider(new RAGCollectionState(), embeddings);
+
+        MongoDBEmbeddingException exception = await Assert.ThrowsAsync<MongoDBEmbeddingException>(
+            () => provider.SearchAsync("query"));
+
+        Assert.IsType<InvalidOperationException>(exception.InnerException);
     }
 
     [Fact]
@@ -164,7 +251,10 @@ public sealed class MongoDBRAGProviderSearchTests
     {
         var state = new RAGCollectionState
         {
-            Results = [new BsonDocument { { "_id", "chunk-1" }, { "text", "chunk" } }],
+            Results =
+            [
+                new BsonDocument { { "_id", "chunk-1" }, { "text", "chunk" }, { "_ragScore", 0.5 } },
+            ],
         };
         MongoDBRAGProvider provider = CreateProvider(state);
 
@@ -223,7 +313,7 @@ public sealed class MongoDBRAGProviderSearchTests
         // metadata accessors), so a passing search is itself proof that no write path was exercised.
         var state = new RAGCollectionState
         {
-            Results = [new BsonDocument { { "_id", "chunk-1" }, { "text", "chunk" } }],
+            Results = [new BsonDocument { { "_id", "chunk-1" }, { "text", "chunk" }, { "_ragScore", 0.5 } }],
         };
         MongoDBRAGProvider provider = CreateProvider(state);
 

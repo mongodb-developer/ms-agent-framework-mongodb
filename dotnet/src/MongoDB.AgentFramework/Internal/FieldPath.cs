@@ -4,7 +4,13 @@ namespace MongoDB.AgentFramework.Internal;
 
 internal static class FieldPath
 {
-    private const string ReservedScoreAlias = "_ragScore";
+    /// <summary>
+    /// The reserved alias the vector/search pipelines use to carry MongoDB's native score under, shared by
+    /// <see cref="Validate"/> (which rejects any configured field path that collides with it) and by
+    /// <c>RAGPipelineBuilder</c>/<c>MongoDBRAGProvider</c> (which write and read it, respectively), so the literal
+    /// is defined exactly once.
+    /// </summary>
+    internal const string ReservedScoreAlias = "_ragScore";
 
     public static string Validate(string path, string optionName = "field path")
     {

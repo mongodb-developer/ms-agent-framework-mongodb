@@ -20,6 +20,8 @@ internal sealed class RecordingEmbeddingGenerator :
 
     public Func<string, float[]>? EmbeddingFactory { get; set; }
 
+    public Exception? FailWith { get; set; }
+
     public int ReturnedVectorCount { get; set; } = -1;
 
     public async Task<GeneratedEmbeddings<Embedding<float>>> GenerateAsync(
@@ -31,6 +33,11 @@ internal sealed class RecordingEmbeddingGenerator :
         if (Cancel)
         {
             throw new OperationCanceledException(cancellationToken);
+        }
+
+        if (FailWith is { } failure)
+        {
+            throw failure;
         }
 
         if (Delay > TimeSpan.Zero)

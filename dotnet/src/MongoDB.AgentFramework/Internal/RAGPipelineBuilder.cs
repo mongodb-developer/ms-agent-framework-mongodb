@@ -9,8 +9,12 @@ namespace MongoDB.AgentFramework.Internal;
 /// and <see cref="MongoDBSearchMode.VectorEnn"/>, per the pipeline pseudocode in
 /// <c>docs/spec/features/rag.md</c>. The <c>$vectorSearch</c> stage itself is rendered from the typed
 /// <see cref="PipelineStageDefinitionBuilder.VectorSearch{TInput}"/> builder, as required by the specification's
-/// "typed MongoDB.Driver builders for supported stages" rule; only the trailing score/projection stages, which the
-/// driver has no dedicated typed builder for in this context, are assembled directly as BSON.
+/// "typed MongoDB.Driver builders for supported stages" rule; the trailing score stage, which the driver has no
+/// dedicated typed builder for in this context, is assembled directly as BSON. The pipeline intentionally does
+/// <b>not</b> include a narrowing <c>$project</c> stage: <see cref="MongoDBRAGResult.RawDocument"/> must preserve
+/// the complete original document, so the only field this pipeline adds beyond the original document is the
+/// reserved <see cref="FieldPath.ReservedScoreAlias"/> score alias, which <c>MongoDBRAGProvider.MapResult</c> reads
+/// and then strips before constructing the public result.
 /// </summary>
 internal static class RAGPipelineBuilder
 {
@@ -19,9 +23,10 @@ internal static class RAGPipelineBuilder
         BsonSerializer.SerializerRegistry);
 
     /// <summary>
-    /// Builds the complete ANN/ENN retrieval pipeline: <c>$vectorSearch</c> first, a <c>$set</c> stage that
-    /// captures MongoDB's native <c>vectorSearchScore</c> under the reserved <c>_ragScore</c> alias, and a final
-    /// <c>$project</c> stage that narrows the result to the caller-supplied <paramref name="projection"/>.
+    /// Builds the complete ANN/ENN retrieval pipeline: <c>$vectorSearch</c> first, then a <c>$set</c> stage that
+    /// captures MongoDB's native <c>vectorSearchScore</c> under the reserved
+    /// <see cref="FieldPath.ReservedScoreAlias"/> alias. No stage narrows the document, so every field of the
+    /// original document survives alongside the added score alias.
     /// </summary>
     /// <param name="indexName">The configured Vector Search index name.</param>
     /// <param name="vectorFieldName">The configured embedding field path.</param>
@@ -39,7 +44,6 @@ internal static class RAGPipelineBuilder
     /// The translated <c>$vectorSearch.filter</c> match document, or <see langword="null"/> to omit the property
     /// entirely when there is no effective mandatory filter.
     /// </param>
-    /// <param name="projection">The <c>$project</c> stage's mapped result fields.</param>
     public static BsonDocument[] BuildVectorSearchPipeline(
         string indexName,
         string vectorFieldName,
@@ -47,8 +51,7 @@ internal static class RAGPipelineBuilder
         int limit,
         bool exact,
         int? numCandidates,
-        BsonDocument? filter,
-        BsonDocument projection)
+        BsonDocument? filter)
     {
         if (exact && numCandidates is not null)
         {
@@ -73,51 +76,9 @@ internal static class RAGPipelineBuilder
         return
         [
             vectorSearchStage.Render(RenderArgs).Document,
-            new BsonDocument("$set", new BsonDocument("_ragScore", new BsonDocument("$meta", "vectorSearchScore"))),
-            new BsonDocument("$project", projection),
+            new BsonDocument(
+                "$set",
+                new BsonDocument(FieldPath.ReservedScoreAlias, new BsonDocument("$meta", "vectorSearchScore"))),
         ];
-    }
-
-    /// <summary>
-    /// Builds the <c>$project</c> stage's mapped result fields from the configured RAG field mappings: the
-    /// document identifier, chunk text, optional source name/URL, and optional metadata fields, plus the reserved
-    /// <c>_ragScore</c> alias. Duplicate field paths (for example a metadata field that repeats the source-name
-    /// field) contribute a single projection entry.
-    /// </summary>
-    public static BsonDocument BuildProjection(MongoDBRAGProviderOptions options)
-    {
-        ArgumentNullException.ThrowIfNull(options);
-
-        var projection = new BsonDocument();
-        Include(projection, options.IdFieldName);
-        Include(projection, options.ChunkTextFieldName);
-        if (options.SourceNameFieldName is { } sourceName)
-        {
-            Include(projection, sourceName);
-        }
-
-        if (options.SourceUrlFieldName is { } sourceUrl)
-        {
-            Include(projection, sourceUrl);
-        }
-
-        if (options.MetadataFieldNames is { } metadataFieldNames)
-        {
-            foreach (string field in metadataFieldNames)
-            {
-                Include(projection, field);
-            }
-        }
-
-        Include(projection, "_ragScore");
-        return projection;
-    }
-
-    private static void Include(BsonDocument projection, string path)
-    {
-        if (!projection.Contains(path))
-        {
-            projection.Add(path, 1);
-        }
     }
 }

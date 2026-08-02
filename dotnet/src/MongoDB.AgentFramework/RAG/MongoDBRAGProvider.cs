@@ -165,7 +165,6 @@ public sealed class MongoDBRAGProvider : IAsyncDisposable
             ? null
             : _options.NumCandidates ?? DefaultNumCandidates(_options.TopK);
         BsonDocument? filter = RAGFilterTranslator.TranslateVectorFilter(_options.MandatoryFilter);
-        BsonDocument projection = RAGPipelineBuilder.BuildProjection(_options);
         BsonDocument[] stages = RAGPipelineBuilder.BuildVectorSearchPipeline(
             _options.VectorIndexName,
             _options.VectorFieldName,
@@ -173,8 +172,7 @@ public sealed class MongoDBRAGProvider : IAsyncDisposable
             _options.TopK,
             exact,
             numCandidates,
-            filter,
-            projection);
+            filter);
 
         try
         {
@@ -217,18 +215,38 @@ public sealed class MongoDBRAGProvider : IAsyncDisposable
         CancellationToken cancellationToken)
     {
         string[] inputs = values.ToArray();
-        GeneratedEmbeddings<Embedding<float>> generated = await _embeddingGenerator.GenerateAsync(
-            inputs,
-            cancellationToken: cancellationToken).ConfigureAwait(false);
-        IReadOnlyList<ReadOnlyMemory<float>> normalized = EmbeddingValidator.Normalize(
-            generated.Select(static embedding => embedding.Vector),
-            inputs.Length,
-            _vectorDimensions);
-        return [.. normalized.Select(static vector => vector.ToArray())];
+        try
+        {
+            GeneratedEmbeddings<Embedding<float>> generated = await _embeddingGenerator.GenerateAsync(
+                inputs,
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            IReadOnlyList<ReadOnlyMemory<float>> normalized = EmbeddingValidator.Normalize(
+                generated.Select(static embedding => embedding.Vector),
+                inputs.Length,
+                _vectorDimensions);
+            return [.. normalized.Select(static vector => vector.ToArray())];
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (MongoDBEmbeddingException)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            throw new MongoDBEmbeddingException("Embedding generation failed.", exception);
+        }
     }
 
     private MongoDBRAGResult MapResult(BsonDocument document)
     {
+        double score = MapScore(document);
+        // Strip the internal reserved alias from a copy of the document before it becomes the public RawDocument;
+        // MongoDBRAGResult deep-clones its input, so mutating this instance here does not affect the cursor.
+        document.Remove(FieldPath.ReservedScoreAlias);
+
         BsonValue idValue = FieldPath.Resolve(document, _options.IdFieldName);
         string id = MapId(idValue);
         BsonValue textValue = FieldPath.Resolve(document, _options.ChunkTextFieldName);
@@ -238,9 +256,6 @@ public sealed class MongoDBRAGProvider : IAsyncDisposable
                 $"Field '{_options.ChunkTextFieldName}' must be a string.");
         }
 
-        double score = document.TryGetValue("_ragScore", out BsonValue? scoreValue)
-            ? scoreValue.ToDouble()
-            : 0.0;
         string? sourceName = OptionalString(document, _options.SourceNameFieldName);
         string? sourceUrl = OptionalString(document, _options.SourceUrlFieldName);
         Dictionary<string, BsonValue>? metadata = null;
@@ -264,6 +279,38 @@ public sealed class MongoDBRAGProvider : IAsyncDisposable
             sourceUrl,
             metadata,
             document);
+    }
+
+    /// <summary>
+    /// Resolves and validates the reserved <see cref="FieldPath.ReservedScoreAlias"/> field. A missing,
+    /// non-numeric, or non-finite score is a mapping defect per the RAG score contract, not a value to default to
+    /// <c>0.0</c> for, since a fabricated score would silently corrupt result ranking for callers.
+    /// </summary>
+    private static double MapScore(BsonDocument document)
+    {
+        if (!document.TryGetValue(FieldPath.ReservedScoreAlias, out BsonValue? scoreValue))
+        {
+            throw new MongoDBMappingException(
+                $"Required field '{FieldPath.ReservedScoreAlias}' is missing from the result.");
+        }
+
+        double score = scoreValue.BsonType switch
+        {
+            BsonType.Double => scoreValue.AsDouble,
+            BsonType.Int32 => scoreValue.AsInt32,
+            BsonType.Int64 => scoreValue.AsInt64,
+            BsonType.Decimal128 => (double)scoreValue.AsDecimal128,
+            _ => throw new MongoDBMappingException(
+                $"Field '{FieldPath.ReservedScoreAlias}' must be a numeric value."),
+        };
+
+        if (!double.IsFinite(score))
+        {
+            throw new MongoDBMappingException(
+                $"Field '{FieldPath.ReservedScoreAlias}' must be a finite numeric value.");
+        }
+
+        return score;
     }
 
     private static string MapId(BsonValue value) => value.BsonType switch

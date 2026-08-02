@@ -57,10 +57,16 @@ BSON for the two trailing stages the driver has no dedicated builder for:
    exclusive by construction; `RAGPipelineBuilder.BuildVectorSearchPipeline` throws
    `MongoDBConfigurationException` if both are supplied). The mandatory filter is placed **inside** this stage, not
    applied afterward, so authorization/tenancy narrows the candidate set MongoDB itself searches.
-2. `$set` — captures MongoDB's native `{ $meta: "vectorSearchScore" }` under the reserved `_ragScore` alias.
-3. `$project` — narrows the result to the configured field mappings (`IdFieldName`, `ChunkTextFieldName`,
-   `SourceNameFieldName`, `SourceUrlFieldName`, `MetadataFieldNames`) plus `_ragScore`, built by
-   `RAGPipelineBuilder.BuildProjection`.
+2. `$set` — captures MongoDB's native `{ $meta: "vectorSearchScore" }` under the reserved
+   `Internal.FieldPath.ReservedScoreAlias` (`_ragScore`) alias.
+
+The pipeline intentionally does **not** include a trailing `$project` stage: an earlier revision narrowed the result
+to the configured field mappings there, which silently discarded any original document field the mapping
+configuration did not name, breaking the guarantee that `MongoDBRAGResult.RawDocument` preserves the complete
+original document. `MongoDBRAGProvider.MapResult` instead reads and validates the reserved score alias directly from
+the unmodified cursor document, then removes that one internal key from a copy before constructing the public
+`MongoDBRAGResult` (whose constructor deep-clones its input), so every other original field survives and the
+internal alias never leaks into `RawDocument`.
 
 ### ANN candidate default
 
@@ -71,20 +77,24 @@ When `NumCandidates` is not explicitly configured for `VectorAnn`, `MongoDBRAGPr
 
 ## Result mapping
 
-`MongoDBRAGProvider.MapResult` resolves each configured field path against the projected document with
+`MongoDBRAGProvider.MapResult` resolves each configured field path against the (unnarrowed) document with
 `Internal.FieldPath`:
 
 - **Id** — resolved with the throwing `FieldPath.Resolve` (a missing ID is a mapping defect, not an optional field)
   and converted from its BSON type (`String`, `ObjectId`, `Int32`, `Int64`, `Double`) to a `string`; any other BSON
   type throws `MongoDBMappingException`.
 - **Text** — resolved with `FieldPath.Resolve`; a non-string value throws `MongoDBMappingException`.
-- **Score** — read from `_ragScore` (defaults to `0.0` if somehow absent).
+- **Score** — read from the reserved `Internal.FieldPath.ReservedScoreAlias` (`_ragScore`) field and validated by
+  `MapScore`: a missing field, a non-numeric BSON type, or a non-finite (`NaN`/`Infinity`) numeric value all throw
+  `MongoDBMappingException` rather than silently defaulting to `0.0` — a fabricated score would corrupt result
+  ranking for callers without any visible signal. The alias is then removed from a copy of the document before that
+  document becomes `RawDocument`, so the internal alias never leaks into the public result.
 - **SourceName/SourceUrl** — resolved with the non-throwing `FieldPath.TryResolve`; a missing path or a non-string
   value both produce `null` rather than throwing, since these are optional per the specification.
 - **Metadata** — each configured `MetadataFieldNames` entry resolved with `FieldPath.TryResolve`; absent entries are
   skipped rather than included as `null`.
-- **RawDocument** — the full projected `BsonDocument` is passed to the `MongoDBRAGResult` constructor, which
-  deep-clones it (see [slice 6](dotnet-rag.md)).
+- **RawDocument** — the complete original document (minus the reserved score alias, stripped as described above) is
+  passed to the `MongoDBRAGResult` constructor, which deep-clones it (see [slice 6](dotnet-rag.md)).
 
 ## Errors and cancellation
 
@@ -132,13 +142,16 @@ Tests live under `dotnet/tests/MongoDB.AgentFramework.Tests/RAG/` and were writt
 
 - `FieldPathTests` — added `TryResolve` coverage (present/nested value, missing segment, non-document intermediate).
 - `RAGPipelineBuilderTests` — exact ANN/ENN `$vectorSearch` stage shape, filter omission, `exact`/`numCandidates`
-  mutual exclusivity, stage ordering, and `BuildProjection` inclusion/omission rules.
+  mutual exclusivity, stage ordering, and asserts the pipeline has exactly two stages with **no** trailing
+  `$project` stage, so the complete document survives to `MapResult`.
 - `MongoDBRAGProviderLifecycleTests` — constructor ownership (injected vs. connection-string), vector-dimension
   validation, invalid-options rejection, and null-argument rejection across all four constructors.
 - `MongoDBRAGProviderSearchTests` — ANN/ENN filter-in-stage placement, `numCandidates`/`limit`/`exact` wiring,
   capability gating before any embedding/network call, empty-query rejection, embedding dimension/finiteness
-  validation, missing-ID/missing-text mapping errors, missing-optional-field-produces-null mapping, `MongoException`
-  translation, cancellation propagation, timeout translation, and a no-write-operations guarantee.
+  validation, missing-ID/missing-text mapping errors, missing-optional-field-produces-null mapping, missing/
+  non-numeric/non-finite `_ragScore` mapping errors, complete raw-document preservation with the reserved score
+  alias stripped, `MongoException` translation, cancellation propagation, timeout translation, and a no-write-
+  operations guarantee.
 - `MongoDBRAGContextProviderTests` — attributed message shape, empty-query short-circuit, empty-results handling,
   fail-open behavior for retrieval/embedding/timeout failures, capability-error and cancellation propagation, and
   recent-message window limiting.
@@ -148,7 +161,9 @@ Tests live under `dotnet/tests/MongoDB.AgentFramework.Tests/RAG/` and were writt
 - `MongoDBRAGIntegrationTests` — a credential-gated `integration-rag` test. Because index provisioning is out of
   scope for this slice, it targets a fixed, operator-provisioned collection/index pair
   (`MONGODB_RAG_COLLECTION`/`MONGODB_RAG_VECTOR_INDEX`, both with defaults) rather than creating its own index per
-  run, and only ever inserts/deletes documents whose IDs carry a unique, test-owned prefix.
+  run, and only ever inserts/deletes documents whose IDs carry a unique, test-owned prefix. It also asserts, against
+  a real MongoDB deployment, that `RawDocument` preserves a field the mapping configuration never names
+  (`tenant_id`) and never contains the reserved `_ragScore` alias.
 
 Run:
 

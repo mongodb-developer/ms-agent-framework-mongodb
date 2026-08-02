@@ -71,6 +71,13 @@ public sealed class MongoDBRAGIntegrationTests
             Assert.Contains(annResults, result => result.Id == tenantAId);
             Assert.DoesNotContain(annResults, result => result.Id == tenantBId);
 
+            // RawDocument must preserve the complete original document against a real MongoDB deployment, not just
+            // the fields the mapping configuration narrows to, and the internal reserved score alias must never
+            // leak into it.
+            MongoDBRAGResult tenantAAnnResult = Assert.Single(annResults, result => result.Id == tenantAId);
+            Assert.Equal("tenant-a", tenantAAnnResult.RawDocument["tenant_id"].AsString);
+            Assert.False(tenantAAnnResult.RawDocument.Contains("_ragScore"));
+
             var ennOptions = new MongoDBRAGProviderOptions
             {
                 SearchMode = MongoDBSearchMode.VectorEnn,

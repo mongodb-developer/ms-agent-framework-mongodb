@@ -19,8 +19,7 @@ public sealed class RAGPipelineBuilderTests
             limit: 5,
             exact: false,
             numCandidates: 150,
-            filter: filter,
-            projection: new BsonDocument("text", 1));
+            filter: filter);
 
         BsonDocument vectorSearch = stages[0]["$vectorSearch"].AsBsonDocument;
         Assert.Equal("vector_index", vectorSearch["index"].AsString);
@@ -44,8 +43,7 @@ public sealed class RAGPipelineBuilderTests
             limit: 5,
             exact: true,
             numCandidates: null,
-            filter: null,
-            projection: new BsonDocument("text", 1));
+            filter: null);
 
         BsonDocument vectorSearch = stages[0]["$vectorSearch"].AsBsonDocument;
         Assert.True(vectorSearch["exact"].AsBoolean);
@@ -63,8 +61,7 @@ public sealed class RAGPipelineBuilderTests
             limit: 5,
             exact: false,
             numCandidates: 50,
-            filter: null,
-            projection: new BsonDocument("text", 1));
+            filter: null);
 
         BsonDocument vectorSearch = stages[0]["$vectorSearch"].AsBsonDocument;
         Assert.False(vectorSearch.Contains("filter"));
@@ -80,15 +77,12 @@ public sealed class RAGPipelineBuilderTests
             limit: 5,
             exact: true,
             numCandidates: 10,
-            filter: null,
-            projection: new BsonDocument("text", 1)));
+            filter: null));
     }
 
     [Fact]
-    public void Pipeline_appends_score_and_projection_stages_after_vectorSearch_in_order()
+    public void Pipeline_appends_only_the_score_stage_after_vectorSearch_and_does_not_narrow_the_document()
     {
-        var projection = new BsonDocument { { "text", 1 }, { "_ragScore", 1 } };
-
         BsonDocument[] stages = RAGPipelineBuilder.BuildVectorSearchPipeline(
             indexName: "vector_index",
             vectorFieldName: "embedding",
@@ -96,56 +90,32 @@ public sealed class RAGPipelineBuilderTests
             limit: 5,
             exact: false,
             numCandidates: 50,
-            filter: null,
-            projection: projection);
+            filter: null);
 
-        Assert.Equal(3, stages.Length);
+        // Exactly two stages: $vectorSearch and the $set score stage. There must be no trailing $project stage,
+        // since narrowing the result there would discard fields of the original document that were not explicitly
+        // configured, breaking the guarantee that MongoDBRAGResult.RawDocument preserves the complete document.
+        Assert.Equal(2, stages.Length);
         Assert.True(stages[0].Contains("$vectorSearch"));
         Assert.Equal(
             BsonDocument.Parse("""{"$set":{"_ragScore":{"$meta":"vectorSearchScore"}}}"""),
             stages[1]);
-        Assert.Equal(new BsonDocument("$project", projection), stages[2]);
+        Assert.DoesNotContain(stages, stage => stage.Contains("$project"));
     }
 
     [Fact]
-    public void BuildProjection_includes_configured_fields_and_the_ragScore_alias()
+    public void The_score_stage_uses_the_shared_reserved_alias_constant()
     {
-        var options = new MongoDBRAGProviderOptions
-        {
-            SearchMode = MongoDBSearchMode.VectorAnn,
-            IdFieldName = "_id",
-            ChunkTextFieldName = "text",
-            SourceNameFieldName = "source.name",
-            SourceUrlFieldName = "source.url",
-            MetadataFieldNames = ["category", "source.name"],
-        };
+        BsonDocument[] stages = RAGPipelineBuilder.BuildVectorSearchPipeline(
+            indexName: "vector_index",
+            vectorFieldName: "embedding",
+            queryVector: QueryVector,
+            limit: 5,
+            exact: false,
+            numCandidates: 50,
+            filter: null);
 
-        BsonDocument projection = RAGPipelineBuilder.BuildProjection(options);
-
-        Assert.Equal(1, projection["_id"].AsInt32);
-        Assert.Equal(1, projection["text"].AsInt32);
-        Assert.Equal(1, projection["source.name"].AsInt32);
-        Assert.Equal(1, projection["source.url"].AsInt32);
-        Assert.Equal(1, projection["category"].AsInt32);
-        Assert.Equal(1, projection["_ragScore"].AsInt32);
-        // A metadata field duplicating the source-name field must not produce two entries.
-        Assert.Equal(6, projection.ElementCount);
-    }
-
-    [Fact]
-    public void BuildProjection_omits_unconfigured_optional_fields()
-    {
-        var options = new MongoDBRAGProviderOptions
-        {
-            SearchMode = MongoDBSearchMode.VectorAnn,
-            SourceNameFieldName = null,
-            SourceUrlFieldName = null,
-            MetadataFieldNames = null,
-        };
-
-        BsonDocument projection = RAGPipelineBuilder.BuildProjection(options);
-
-        Assert.False(projection.Contains("source.name"));
-        Assert.False(projection.Contains("source.url"));
+        BsonDocument setStage = stages[1]["$set"].AsBsonDocument;
+        Assert.True(setStage.Contains(FieldPath.ReservedScoreAlias));
     }
 }
