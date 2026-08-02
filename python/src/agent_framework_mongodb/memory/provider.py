@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import time
 import uuid
@@ -16,23 +17,28 @@ from typing import Any, ClassVar, cast
 from agent_framework import ContextProvider, Message, SupportsGetEmbeddings
 from pymongo import ASCENDING, AsyncMongoClient
 from pymongo.asynchronous.collection import AsyncCollection
-from pymongo.errors import BulkWriteError, PyMongoError
+from pymongo.errors import BulkWriteError, ConnectionFailure, OperationFailure, PyMongoError
 from pymongo.operations import SearchIndexModel
 
 from .._shared.client import MongoClientHandle
 from .._shared.embeddings import normalize_embeddings, validate_dimensions
 from .._shared.field_paths import validate_field_path
 from ..errors import (
+    MongoDBAuthorizationError,
+    MongoDBCapabilityError,
     MongoDBConfigurationError,
     MongoDBEmbeddingError,
     MongoDBEmbeddingGenerationError,
     MongoDBIndexMismatchError,
     MongoDBIndexMissingError,
     MongoDBIndexNotReadyError,
+    MongoDBIntegrationError,
     MongoDBMappingError,
     MongoDBPersistenceError,
     MongoDBRetrievalError,
     MongoDBTimeoutError,
+    MongoDBTransientPersistenceError,
+    MongoDBTransientRetrievalError,
 )
 
 MongoDocument = dict[str, Any]
@@ -268,7 +274,7 @@ class MongoDBMemoryContextProvider(ContextProvider):
         except asyncio.CancelledError:
             raise
         except PyMongoError as exc:
-            raise MongoDBRetrievalError("MongoDB Memory retrieval failed.") from exc
+            raise _translate_mongo_error(exc, operation="retrieval") from exc
         return [_message_from_document(document) for document in documents]
 
     async def store(
@@ -308,10 +314,17 @@ class MongoDBMemoryContextProvider(ContextProvider):
         now = datetime.now(timezone.utc)
         retry_state = state if state is not None else self._direct_retry_state
         batch_fingerprint = _batch_fingerprint(eligible, scope=scope)
+        legacy_batch_fingerprint = _legacy_batch_fingerprint(eligible, scope=scope)
+        legacy_fingerprint_is_unambiguous = _legacy_fingerprint_is_unambiguous(
+            eligible,
+            scope=scope,
+        )
         retry_attempt = (
             _begin_retry_attempt(
                 retry_state,
                 batch_fingerprint,
+                legacy_batch_fingerprint,
+                legacy_fingerprint_is_unambiguous,
                 self._active_retry_attempts,
             )
             if any(not message.message_id for message in eligible)
@@ -364,19 +377,45 @@ class MongoDBMemoryContextProvider(ContextProvider):
             details = exc.details or {}
             write_errors = details.get("writeErrors", [])
             write_concern_errors = details.get("writeConcernErrors", [])
-            if (
-                write_errors
-                and not write_concern_errors
-                and all(error.get("code") == 11000 for error in write_errors)
+            if not write_concern_errors and _contains_only_expected_id_collisions(
+                write_errors,
+                documents,
             ):
-                _finish_retry_attempt(
-                    retry_state,
-                    batch_fingerprint,
-                    retry_attempt,
-                    self._active_retry_attempts,
-                    succeeded=True,
-                )
-                return int(details.get("nInserted", 0))
+                try:
+                    replay_confirmed = await self._confirm_idempotent_replay(
+                        documents,
+                        scope=scope,
+                    )
+                except asyncio.CancelledError:
+                    _finish_retry_attempt(
+                        retry_state,
+                        batch_fingerprint,
+                        retry_attempt,
+                        self._active_retry_attempts,
+                        succeeded=False,
+                    )
+                    raise
+                except PyMongoError as confirmation_error:
+                    _finish_retry_attempt(
+                        retry_state,
+                        batch_fingerprint,
+                        retry_attempt,
+                        self._active_retry_attempts,
+                        succeeded=False,
+                    )
+                    raise _translate_mongo_error(
+                        confirmation_error,
+                        operation="persistence",
+                    ) from confirmation_error
+                if replay_confirmed:
+                    _finish_retry_attempt(
+                        retry_state,
+                        batch_fingerprint,
+                        retry_attempt,
+                        self._active_retry_attempts,
+                        succeeded=True,
+                    )
+                    return int(details.get("nInserted", 0))
             _finish_retry_attempt(
                 retry_state,
                 batch_fingerprint,
@@ -393,7 +432,20 @@ class MongoDBMemoryContextProvider(ContextProvider):
                 self._active_retry_attempts,
                 succeeded=False,
             )
-            raise MongoDBPersistenceError("MongoDB Memory persistence failed.") from exc
+            raise _translate_mongo_error(exc, operation="persistence") from exc
+
+    async def _confirm_idempotent_replay(
+        self,
+        documents: Sequence[MongoDocument],
+        *,
+        scope: MongoDocument,
+    ) -> bool:
+        expected_ids = [str(document["_id"]) for document in documents]
+        query: MongoDocument = {"_id": {"$in": expected_ids}, **scope}
+        cursor = self.collection.find(query, {"_id": 1})
+        existing = await cursor.to_list(length=len(expected_ids))
+        existing_ids = {str(document["_id"]) for document in existing if "_id" in document}
+        return len(existing) == len(expected_ids) and existing_ids == set(expected_ids)
 
     async def before_run(
         self,
@@ -412,7 +464,7 @@ class MongoDBMemoryContextProvider(ContextProvider):
             messages = await self.search(query)
         except asyncio.CancelledError:
             raise
-        except (MongoDBRetrievalError, MongoDBEmbeddingGenerationError, MongoDBTimeoutError):
+        except (MongoDBTransientRetrievalError, MongoDBTimeoutError):
             _LOGGER.warning(
                 "MongoDB Memory adapter operation failed",
                 extra={"feature": "memory", "operation": "retrieve", "outcome": "failed"},
@@ -449,8 +501,7 @@ class MongoDBMemoryContextProvider(ContextProvider):
         except asyncio.CancelledError:
             raise
         except (
-            MongoDBPersistenceError,
-            MongoDBEmbeddingGenerationError,
+            MongoDBTransientPersistenceError,
             MongoDBTimeoutError,
         ):
             if self.persistence_fail_fast:
@@ -489,7 +540,7 @@ class MongoDBMemoryContextProvider(ContextProvider):
         except asyncio.CancelledError:
             raise
         except PyMongoError as exc:
-            raise MongoDBPersistenceError("MongoDB Memory deletion failed.") from exc
+            raise _translate_mongo_error(exc, operation="persistence") from exc
 
     async def list_metadata(
         self,
@@ -521,7 +572,7 @@ class MongoDBMemoryContextProvider(ContextProvider):
         except asyncio.CancelledError:
             raise
         except PyMongoError as exc:
-            raise MongoDBRetrievalError("MongoDB Memory metadata listing failed.") from exc
+            raise _translate_mongo_error(exc, operation="retrieval") from exc
         has_more = len(documents) > size
         selected = documents[:size]
         items = tuple(_metadata_from_document(document) for document in selected)
@@ -553,7 +604,7 @@ class MongoDBMemoryContextProvider(ContextProvider):
         except asyncio.CancelledError:
             raise
         except PyMongoError as exc:
-            raise MongoDBPersistenceError("MongoDB Memory index creation failed.") from exc
+            raise _translate_mongo_error(exc, operation="persistence") from exc
 
     async def ensure_vector_search_index(
         self,
@@ -617,7 +668,7 @@ class MongoDBMemoryContextProvider(ContextProvider):
         except asyncio.CancelledError:
             raise
         except PyMongoError as exc:
-            raise MongoDBRetrievalError("MongoDB Memory index inspection failed.") from exc
+            raise _translate_mongo_error(exc, operation="retrieval") from exc
 
     async def list_vector_search_indexes(self) -> tuple[Mapping[str, Any], ...]:
         """Read the configured Vector Search index state without mutation."""
@@ -650,7 +701,7 @@ class MongoDBMemoryContextProvider(ContextProvider):
         except asyncio.CancelledError:
             raise
         except PyMongoError as exc:
-            raise MongoDBPersistenceError("MongoDB Memory regular index creation failed.") from exc
+            raise _translate_mongo_error(exc, operation="persistence") from exc
 
     async def list_regular_indexes(self) -> tuple[Mapping[str, Any], ...]:
         """Read regular index definitions without mutation."""
@@ -660,7 +711,7 @@ class MongoDBMemoryContextProvider(ContextProvider):
         except asyncio.CancelledError:
             raise
         except PyMongoError as exc:
-            raise MongoDBRetrievalError("MongoDB Memory regular index inspection failed.") from exc
+            raise _translate_mongo_error(exc, operation="retrieval") from exc
 
     async def validate_regular_indexes(self) -> None:
         """Validate required administrative and configured TTL indexes."""
@@ -768,14 +819,33 @@ def _memory_id(
     ordinal: int,
     retry_ids: dict[str, Any],
 ) -> str:
-    stable_scope = "|".join(f"{key}={scope[key]}" for key in sorted(scope))
     if message.message_id:
-        source = f"{stable_scope}|message={message.message_id}"
+        source = _canonical_json(
+            {
+                "message_id": message.message_id,
+                "scope": dict(scope),
+            }
+        )
         return hashlib.sha256(source.encode()).hexdigest()
-    fingerprint = hashlib.sha256(
-        f"{stable_scope}|{message.role}|{message.text}|{ordinal}".encode()
-    ).hexdigest()
+    fingerprint = _canonical_hash(
+        {
+            "ordinal": ordinal,
+            "role": message.role,
+            "scope": dict(scope),
+            "text": message.text,
+        }
+    )
     existing = retry_ids.get(fingerprint)
+    if not isinstance(existing, str):
+        legacy_fingerprint = _legacy_message_fingerprint(
+            message,
+            scope=scope,
+            ordinal=ordinal,
+        )
+        legacy_existing = retry_ids.pop(legacy_fingerprint, None)
+        if isinstance(legacy_existing, str):
+            retry_ids[fingerprint] = legacy_existing
+            existing = legacy_existing
     if isinstance(existing, str):
         return existing
     generated = str(uuid.uuid4())
@@ -788,6 +858,27 @@ def _batch_fingerprint(
     *,
     scope: Mapping[str, Any],
 ) -> str:
+    return _canonical_hash(
+        {
+            "messages": [
+                {
+                    "message_id": message.message_id,
+                    "ordinal": ordinal,
+                    "role": message.role,
+                    "text": message.text,
+                }
+                for ordinal, message in enumerate(messages)
+            ],
+            "scope": dict(scope),
+        }
+    )
+
+
+def _legacy_batch_fingerprint(
+    messages: Sequence[Message],
+    *,
+    scope: Mapping[str, Any],
+) -> str:
     parts = [f"{key}={scope[key]}" for key in sorted(scope)]
     parts.extend(
         f"{ordinal}|{message.role}|{message.message_id or ''}|{message.text}"
@@ -796,12 +887,66 @@ def _batch_fingerprint(
     return hashlib.sha256("\n".join(parts).encode()).hexdigest()
 
 
+def _legacy_message_fingerprint(
+    message: Message,
+    *,
+    scope: Mapping[str, Any],
+    ordinal: int,
+) -> str:
+    stable_scope = "|".join(f"{key}={scope[key]}" for key in sorted(scope))
+    serialized = f"{stable_scope}|{message.role}|{message.text}|{ordinal}"
+    return hashlib.sha256(serialized.encode()).hexdigest()
+
+
+def _legacy_fingerprint_is_unambiguous(
+    messages: Sequence[Message],
+    *,
+    scope: Mapping[str, Any],
+) -> bool:
+    values = [str(value) for value in scope.values()]
+    values.extend(
+        value for message in messages for value in (message.message_id or "", message.text)
+    )
+    return all(
+        "|" not in value
+        and all(ord(character) >= 32 and ord(character) != 127 for character in value)
+        for value in values
+    )
+
+
+def _canonical_json(value: object) -> str:
+    return json.dumps(
+        value,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def _canonical_hash(value: object) -> str:
+    return hashlib.sha256(_canonical_json(value).encode()).hexdigest()
+
+
 def _begin_retry_attempt(
     state: dict[str, Any],
     batch_fingerprint: str,
+    legacy_batch_fingerprint: str,
+    legacy_fingerprint_is_unambiguous: bool,
     active_attempts: set[str],
 ) -> tuple[str, dict[str, Any]]:
+    _reject_ambiguous_legacy_migration(
+        state,
+        legacy_batch_fingerprint=legacy_batch_fingerprint,
+        batch_fingerprint=batch_fingerprint,
+        legacy_fingerprint_is_unambiguous=legacy_fingerprint_is_unambiguous,
+    )
     retry_batches = _normalize_retry_batches(state, active_attempts)
+    _migrate_legacy_batch_fingerprint(
+        retry_batches,
+        legacy_batch_fingerprint=legacy_batch_fingerprint,
+        batch_fingerprint=batch_fingerprint,
+    )
     batch_value = retry_batches.setdefault(
         batch_fingerprint,
         {"failed": [], "in_flight": {}},
@@ -825,6 +970,51 @@ def _begin_retry_attempt(
     in_flight[attempt_id] = retry_ids
     active_attempts.add(attempt_id)
     return attempt_id, retry_ids
+
+
+def _reject_ambiguous_legacy_migration(
+    state: dict[str, Any],
+    *,
+    legacy_batch_fingerprint: str,
+    batch_fingerprint: str,
+    legacy_fingerprint_is_unambiguous: bool,
+) -> None:
+    if legacy_fingerprint_is_unambiguous or legacy_batch_fingerprint == batch_fingerprint:
+        return
+    retry_batches = state.get("memory_pending_batches")
+    if isinstance(retry_batches, dict) and legacy_batch_fingerprint in retry_batches:
+        raise MongoDBConfigurationError(
+            "Memory provider pending state contains an ambiguous legacy fingerprint "
+            "and cannot be migrated safely. Clear memory_pending_batches for this "
+            "provider before retrying."
+        )
+
+
+def _migrate_legacy_batch_fingerprint(
+    retry_batches: dict[str, Any],
+    *,
+    legacy_batch_fingerprint: str,
+    batch_fingerprint: str,
+) -> None:
+    if (
+        legacy_batch_fingerprint == batch_fingerprint
+        or legacy_batch_fingerprint not in retry_batches
+    ):
+        return
+    legacy_batch = cast(dict[str, Any], retry_batches.pop(legacy_batch_fingerprint))
+    current_batch_value = retry_batches.get(batch_fingerprint)
+    if current_batch_value is None:
+        retry_batches[batch_fingerprint] = legacy_batch
+        return
+    current_batch = cast(dict[str, Any], current_batch_value)
+    legacy_failed = cast(list[Any], legacy_batch["failed"])
+    current_failed = cast(list[Any], current_batch["failed"])
+    legacy_in_flight = cast(dict[str, Any], legacy_batch["in_flight"])
+    current_in_flight = cast(dict[str, Any], current_batch["in_flight"])
+    if set(legacy_in_flight).intersection(current_in_flight):
+        raise _invalid_retry_state("legacy and current attempt identifiers collide")
+    current_failed.extend(legacy_failed)
+    current_in_flight.update(legacy_in_flight)
 
 
 def _normalize_retry_batches(
@@ -987,6 +1177,121 @@ def _metadata_from_document(document: Mapping[str, Any]) -> MemoryMetadata:
         if isinstance(document.get("expires_at"), datetime)
         else None,
     )
+
+
+def _translate_mongo_error(
+    error: PyMongoError,
+    *,
+    operation: str,
+) -> MongoDBIntegrationError:
+    code: int | None = None
+    code_name: str | None = None
+    if isinstance(error, OperationFailure):
+        code = error.code
+        details_value: object = error.details
+        if isinstance(details_value, Mapping):
+            details = cast(Mapping[str, object], details_value)
+            raw_code_name = details.get("codeName")
+            if isinstance(raw_code_name, str):
+                code_name = raw_code_name
+
+    if code in {13, 18} or code_name in {"Unauthorized", "AuthenticationFailed"}:
+        return MongoDBAuthorizationError("MongoDB authentication or authorization failed.")
+    if code == 27 or code_name in {"IndexNotFound", "SearchIndexNotFound"}:
+        return MongoDBIndexMissingError("The required MongoDB Memory index is missing.")
+    if code in {85, 86} or code_name in {"IndexOptionsConflict", "IndexKeySpecsConflict"}:
+        return MongoDBIndexMismatchError(
+            "The configured MongoDB Memory index definition does not match."
+        )
+    if code_name in {"SearchIndexNotReady", "IndexBuildAlreadyInProgress"}:
+        return MongoDBIndexNotReadyError("The required MongoDB Memory index is not ready.")
+    if code == 59 or code_name == "CommandNotFound":
+        return MongoDBCapabilityError("The required MongoDB capability is unavailable.")
+    if code in {2, 9, 14, 72} or code_name in {
+        "BadValue",
+        "FailedToParse",
+        "InvalidOptions",
+        "TypeMismatch",
+    }:
+        return MongoDBConfigurationError("MongoDB rejected the configured Memory operation.")
+
+    transient_codes = {
+        6,
+        7,
+        89,
+        91,
+        189,
+        262,
+        9001,
+        10107,
+        11600,
+        11602,
+        13435,
+        13436,
+    }
+    transient_names = {
+        "HostUnreachable",
+        "HostNotFound",
+        "NetworkTimeout",
+        "ShutdownInProgress",
+        "PrimarySteppedDown",
+        "ExceededTimeLimit",
+        "NotWritablePrimary",
+        "InterruptedAtShutdown",
+        "InterruptedDueToReplStateChange",
+        "NotPrimaryNoSecondaryOk",
+        "NotPrimaryOrSecondary",
+    }
+    is_transient = (
+        isinstance(error, ConnectionFailure)
+        or code in transient_codes
+        or code_name in transient_names
+        or error.has_error_label("RetryableReadError")
+        or error.has_error_label("RetryableWriteError")
+    )
+    if operation == "retrieval":
+        if is_transient:
+            return MongoDBTransientRetrievalError("MongoDB Memory retrieval failed transiently.")
+        return MongoDBRetrievalError("MongoDB Memory retrieval failed.")
+    if is_transient:
+        return MongoDBTransientPersistenceError("MongoDB Memory persistence failed transiently.")
+    return MongoDBPersistenceError("MongoDB Memory persistence failed.")
+
+
+def _contains_only_expected_id_collisions(
+    write_errors: object,
+    documents: Sequence[MongoDocument],
+) -> bool:
+    if not isinstance(write_errors, list) or not write_errors:
+        return False
+    expected_ids = [str(document["_id"]) for document in documents]
+    if len(set(expected_ids)) != len(expected_ids):
+        return False
+    collided_indexes: set[int] = set()
+    typed_write_errors = cast(list[object], write_errors)
+    for raw_error in typed_write_errors:
+        if not isinstance(raw_error, Mapping):
+            return False
+        error = cast(Mapping[str, object], raw_error)
+        index = error.get("index")
+        if (
+            error.get("code") != 11000
+            or not isinstance(index, int)
+            or isinstance(index, bool)
+            or not 0 <= index < len(expected_ids)
+            or index in collided_indexes
+        ):
+            return False
+        key_pattern_value = error.get("keyPattern")
+        key_value_value = error.get("keyValue")
+        if not isinstance(key_pattern_value, Mapping) or not isinstance(key_value_value, Mapping):
+            return False
+        key_pattern = cast(Mapping[object, object], key_pattern_value)
+        key_value = cast(Mapping[object, object], key_value_value)
+        if dict(key_pattern) != {"_id": 1} or dict(key_value) != {"_id": expected_ids[index]}:
+            return False
+        collided_indexes.add(index)
+    return True
 
 
 def _optional_str(value: object) -> str | None:

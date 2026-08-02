@@ -15,3 +15,7 @@ This documentation explains the implemented system at the code level. The
 
 - [Python Memory implementation](memory/python-memory.md)
 - [.NET Memory implementation](memory/dotnet-memory.md)
+
+## Chat History
+
+- [Python Chat History implementation](history/python-history.md)

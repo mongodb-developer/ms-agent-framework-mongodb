@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from collections.abc import Awaitable, Sequence
 from datetime import datetime, timedelta, timezone
@@ -15,13 +16,16 @@ from agent_framework import (
     Message,
     SessionContext,
 )
-from pymongo.errors import ConnectionFailure
+from pymongo.errors import BulkWriteError, ConnectionFailure, OperationFailure, PyMongoError
 
 from agent_framework_mongodb import (
     MemoryMetadataPage,
+    MongoDBAuthorizationError,
+    MongoDBCapabilityError,
     MongoDBConfigurationError,
     MongoDBIndexMismatchError,
     MongoDBIndexMissingError,
+    MongoDBIndexNotReadyError,
     MongoDBMemoryContextProvider,
     MongoDBPersistenceError,
     MongoDBRetrievalError,
@@ -100,10 +104,18 @@ class FakeCollection:
         self.created_search_model: Any | None = None
         self.created_indexes: list[tuple[Any, dict[str, Any]]] = []
         self.regular_indexes: list[dict[str, Any]] = []
+        self.replay_documents: list[dict[str, Any]] = []
+        self.replay_filter: dict[str, Any] | None = None
+        self.duplicate_key_field: str | None = None
+        self.confirm_duplicate_ids = False
         self.fail_reads = False
         self.fail_writes = False
+        self.read_error: PyMongoError | None = None
+        self.write_error: PyMongoError | None = None
 
     async def aggregate(self, pipeline: list[dict[str, Any]]) -> FakeCursor:
+        if self.read_error is not None:
+            raise self.read_error
         if self.fail_reads:
             raise ConnectionFailure("sensitive-host.invalid")
         self.aggregate_pipeline = pipeline
@@ -112,6 +124,26 @@ class FakeCollection:
     async def insert_many(self, documents: list[dict[str, Any]], *, ordered: bool) -> Result:
         assert ordered is False
         self.insert_attempts.append(documents)
+        if self.duplicate_key_field is not None:
+            field = self.duplicate_key_field
+            if field == "_id" and self.confirm_duplicate_ids:
+                self.replay_documents = [{"_id": document["_id"]} for document in documents]
+            key_value = documents[0]["_id"] if field == "_id" else "unrelated-collision"
+            raise BulkWriteError(
+                {
+                    "nInserted": 0,
+                    "writeErrors": [
+                        {
+                            "index": 0,
+                            "code": 11000,
+                            "keyPattern": {field: 1},
+                            "keyValue": {field: key_value},
+                        }
+                    ],
+                }
+            )
+        if self.write_error is not None:
+            raise self.write_error
         if self.fail_writes:
             raise ConnectionFailure("sensitive-host.invalid")
         self.inserted = documents
@@ -124,6 +156,9 @@ class FakeCollection:
         return Result(deleted_count=2)
 
     def find(self, query: dict[str, Any], projection: dict[str, Any]) -> FakeCursor:
+        if isinstance(query.get("_id"), dict) and "$in" in query["_id"]:
+            self.replay_filter = query
+            return FakeCursor(self.replay_documents)
         self.find_filter = query
         self.find_projection = projection
         return FakeCursor(self.metadata_documents)
@@ -249,6 +284,86 @@ async def test_store_batches_embeddings_and_uses_stable_message_ids() -> None:
     assert later_ids[1] != first_ids[1]
 
 
+async def test_delimiter_scope_values_have_unambiguous_ids_and_pending_batches() -> None:
+    collection = FakeCollection()
+    first = provider(
+        collection,
+        application_id="a|user_id=b",
+        user_id="c",
+    )
+    second = provider(
+        collection,
+        application_id="a",
+        user_id="b|user_id=c",
+    )
+
+    await first.store([Message("user", ["content"], message_id="message-1")])
+    await second.store([Message("user", ["content"], message_id="message-1")])
+    first_id = collection.insert_attempts[0][0]["_id"]
+    second_id = collection.insert_attempts[1][0]["_id"]
+
+    shared_state: dict[str, Any] = {}
+    collection.fail_writes = True
+    with pytest.raises(MongoDBPersistenceError):
+        await first.store([Message("user", ["pending"])], state=shared_state)
+    with pytest.raises(MongoDBPersistenceError):
+        await second.store([Message("user", ["pending"])], state=shared_state)
+
+    assert first_id != second_id
+    assert len(shared_state["memory_pending_batches"]) == 2
+
+
+async def test_ambiguous_legacy_scope_cannot_consume_another_scopes_retry_ids() -> None:
+    collection = FakeCollection()
+    first_scope = {
+        "application_id": "tenant\nuser_id=shared",
+        "user_id": "alpha",
+    }
+    colliding_scope = {
+        "application_id": "tenant",
+        "user_id": "shared\nuser_id=alpha",
+    }
+    first_legacy_batch = "\n".join(
+        [
+            "application_id=tenant\nuser_id=shared",
+            "user_id=alpha",
+            "0|user||pending",
+        ]
+    )
+    second_legacy_batch = "\n".join(
+        [
+            "application_id=tenant",
+            "user_id=shared\nuser_id=alpha",
+            "0|user||pending",
+        ]
+    )
+    assert first_legacy_batch == second_legacy_batch
+    legacy_batch_fingerprint = hashlib.sha256(first_legacy_batch.encode()).hexdigest()
+    first_legacy_message = "application_id=tenant\nuser_id=shared|user_id=alpha|user|pending|0"
+    legacy_message_fingerprint = hashlib.sha256(first_legacy_message.encode()).hexdigest()
+    state: dict[str, Any] = {
+        "memory_pending_batches": {
+            legacy_batch_fingerprint: {legacy_message_fingerprint: "first-scope-retry-id"}
+        }
+    }
+    serialized_state = json.dumps(state, sort_keys=True)
+    memory = provider(
+        collection,
+        application_id=colliding_scope["application_id"],
+        user_id=colliding_scope["user_id"],
+    )
+
+    with pytest.raises(
+        MongoDBConfigurationError,
+        match="ambiguous legacy fingerprint",
+    ):
+        await memory.store([Message("user", ["pending"])], state=state)
+
+    assert json.dumps(state, sort_keys=True) == serialized_state
+    assert collection.insert_attempts == []
+    assert first_scope != colliding_scope
+
+
 async def test_no_message_id_reuses_pending_retry_id_then_advances_after_success() -> None:
     collection = FakeCollection()
     memory = provider(collection)
@@ -268,6 +383,64 @@ async def test_no_message_id_reuses_pending_retry_id_then_advances_after_success
 
     assert retry_id == failed_id
     assert later_run_id != retry_id
+
+
+async def test_expected_id_duplicate_confirms_scoped_replay_before_success() -> None:
+    collection = FakeCollection()
+    collection.duplicate_key_field = "_id"
+    collection.confirm_duplicate_ids = True
+    memory = provider(collection)
+    state: dict[str, Any] = {}
+
+    inserted = await memory.store(
+        [Message("user", ["replayed content"])],
+        session_id="session-1",
+        state=state,
+    )
+
+    expected_id = collection.insert_attempts[0][0]["_id"]
+    assert inserted == 0
+    assert collection.replay_filter == {
+        "_id": {"$in": [expected_id]},
+        "application_id": "app-1",
+        "user_id": "user-1",
+        "session_id": "session-1",
+    }
+    assert state == {}
+
+
+async def test_unrelated_unique_index_duplicate_is_not_replay_success() -> None:
+    collection = FakeCollection()
+    collection.duplicate_key_field = "external_unique"
+    memory = provider(collection)
+    state: dict[str, Any] = {}
+
+    with pytest.raises(MongoDBPersistenceError):
+        await memory.store(
+            [Message("user", ["colliding content"])],
+            session_id="session-1",
+            state=state,
+        )
+
+    assert collection.replay_filter is None
+    assert state
+
+
+async def test_expected_id_duplicate_requires_every_scoped_document() -> None:
+    collection = FakeCollection()
+    collection.duplicate_key_field = "_id"
+    memory = provider(collection)
+    state: dict[str, Any] = {}
+
+    with pytest.raises(MongoDBPersistenceError):
+        await memory.store(
+            [Message("user", ["missing replay content"])],
+            session_id="session-1",
+            state=state,
+        )
+
+    assert collection.replay_filter is not None
+    assert state
 
 
 async def test_concurrent_identical_batches_receive_distinct_fallback_ids() -> None:
@@ -352,9 +525,25 @@ async def test_prior_pending_state_shape_migrates_and_reuses_ids() -> None:
         await memory.store(messages, session_id="session-1", state=state)
     failed_id = collection.insert_attempts[0][0]["_id"]
     batches = cast(dict[str, Any], state["memory_pending_batches"])
-    batch_fingerprint, current_batch = next(iter(batches.items()))
+    _, current_batch = next(iter(batches.items()))
     failed_ids = cast(dict[str, str], current_batch["failed"][0])
-    legacy_state = {"memory_pending_batches": {batch_fingerprint: failed_ids}}
+    assert list(failed_ids.values()) == [failed_id]
+    legacy_serialized = "\n".join(
+        [
+            "application_id=app-1",
+            "session_id=session-1",
+            "user_id=user-1",
+            "0|user||legacy pending content",
+        ]
+    )
+    legacy_fingerprint = hashlib.sha256(legacy_serialized.encode()).hexdigest()
+    legacy_message_serialized = (
+        "application_id=app-1|session_id=session-1|user_id=user-1|user|legacy pending content|0"
+    )
+    legacy_message_fingerprint = hashlib.sha256(legacy_message_serialized.encode()).hexdigest()
+    legacy_state = {
+        "memory_pending_batches": {legacy_fingerprint: {legacy_message_fingerprint: failed_id}}
+    }
 
     collection.fail_writes = False
     await memory.store(messages, session_id="session-1", state=legacy_state)
@@ -430,6 +619,106 @@ async def test_hooks_fail_open_for_operations_but_propagate_cancellation(
             context=context,
             state={},
         )
+
+
+@pytest.mark.parametrize(
+    ("driver_error", "expected_error"),
+    [
+        (OperationFailure("unauthorized", code=13), MongoDBAuthorizationError),
+        (OperationFailure("authentication failed", code=18), MongoDBAuthorizationError),
+        (OperationFailure("index missing", code=27), MongoDBIndexMissingError),
+        (OperationFailure("index mismatch", code=85), MongoDBIndexMismatchError),
+        (
+            OperationFailure(
+                "search index building",
+                code=125,
+                details={"codeName": "SearchIndexNotReady"},
+            ),
+            MongoDBIndexNotReadyError,
+        ),
+        (OperationFailure("command unsupported", code=59), MongoDBCapabilityError),
+        (OperationFailure("invalid command", code=2), MongoDBConfigurationError),
+        (OperationFailure("programmer error", code=8), MongoDBRetrievalError),
+    ],
+)
+async def test_before_run_propagates_non_transient_driver_categories(
+    driver_error: OperationFailure,
+    expected_error: type[Exception],
+) -> None:
+    collection = FakeCollection()
+    collection.read_error = driver_error
+    memory = provider(collection)
+    context = SessionContext(input_messages=[Message("user", ["query"])])
+
+    with pytest.raises(expected_error) as raised:
+        await memory.before_run(
+            agent=object(),
+            session=AgentSession(),
+            context=context,
+            state={},
+        )
+
+    assert raised.value.__cause__ is driver_error
+
+
+async def test_hooks_fail_open_for_transient_operation_failure_codes() -> None:
+    collection = FakeCollection()
+    collection.read_error = OperationFailure("shutdown", code=91)
+    memory = provider(collection)
+    context = SessionContext(
+        session_id="session-1",
+        input_messages=[Message("user", ["query"])],
+    )
+    cast(Any, context)._response = AgentResponse(messages=[Message("assistant", ["response"])])
+
+    await memory.before_run(
+        agent=object(),
+        session=AgentSession(),
+        context=context,
+        state={},
+    )
+    collection.read_error = None
+    collection.write_error = OperationFailure("not primary", code=10107)
+    await memory.after_run(
+        agent=object(),
+        session=AgentSession(),
+        context=context,
+        state={},
+    )
+
+    assert context.context_messages == {}
+
+
+@pytest.mark.parametrize(
+    ("driver_error", "expected_error"),
+    [
+        (OperationFailure("unauthorized", code=13), MongoDBAuthorizationError),
+        (OperationFailure("index mismatch", code=85), MongoDBIndexMismatchError),
+        (OperationFailure("programmer error", code=8), MongoDBPersistenceError),
+    ],
+)
+async def test_after_run_propagates_non_transient_driver_categories(
+    driver_error: OperationFailure,
+    expected_error: type[Exception],
+) -> None:
+    collection = FakeCollection()
+    collection.write_error = driver_error
+    memory = provider(collection)
+    context = SessionContext(
+        session_id="session-1",
+        input_messages=[Message("user", ["input"])],
+    )
+    cast(Any, context)._response = AgentResponse(messages=[Message("assistant", ["response"])])
+
+    with pytest.raises(expected_error) as raised:
+        await memory.after_run(
+            agent=object(),
+            session=AgentSession(),
+            context=context,
+            state={},
+        )
+
+    assert raised.value.__cause__ is driver_error
 
 
 async def test_before_run_injects_attributed_cross_session_memory() -> None:

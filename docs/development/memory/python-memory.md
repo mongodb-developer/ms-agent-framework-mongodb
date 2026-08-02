@@ -35,15 +35,24 @@ uses one unordered `insert_many`. Documents use the lowercase schema from the
 Memory specification. A configured positive `retention` adds `expires_at`;
 permanent records omit it.
 
-Document IDs are SHA-256 hashes of immutable scope plus framework message ID.
-When no message ID exists, one UUID is generated and retained in the
-provider-scoped Agent Framework pending-batch state, so a failed `after_run`
-retry reuses the same ID. Pending state is removed only after confirmed
-insertion or a duplicate-only idempotent replay; a later successful run with
-identical content therefore receives a new ID. Concurrent identical calls use
-separate in-flight attempt slots, while failed slots retain their IDs for the
-next retry. Cancellation moves an in-flight slot to failed state before it
+Document and batch fingerprints are SHA-256 hashes of canonical sorted,
+compact JSON structures. Scope fields and message fields remain distinct JSON
+values, so delimiters or newlines inside valid identifiers and content cannot
+alias another scope or batch. When no message ID exists, one UUID is generated
+and retained in the provider-scoped Agent Framework pending-batch state, so a
+failed `after_run` retry reuses the same ID. Pending state is removed only after
+confirmed insertion or a verified idempotent replay; a later successful run
+with identical content therefore receives a new ID. Concurrent identical calls
+use separate in-flight attempt slots, while failed slots retain their IDs for
+the next retry. Cancellation moves an in-flight slot to failed state before it
 propagates.
+
+A duplicate-key result is replay success only when every write error identifies
+the expected `_id`, no write-concern error occurred, and a scoped follow-up read
+finds every expected document under the same application, agent, user, and
+session authorization filter. Collisions on any other unique index and missing
+or out-of-scope documents remain `MongoDBPersistenceError` failures and retain
+pending retry state.
 
 The provider state is JSON-native so `AgentSession.to_dict()` can persist it:
 
@@ -64,10 +73,22 @@ Attempt UUIDs that are not active in the current provider instance are treated
 as orphaned after session restoration and moved to `failed` before the next
 attempt claims their IDs. The immediately preceding state shape, where each
 batch fingerprint mapped directly to its message-fingerprint/UUID mapping, is
-migrated to one failed slot on read. Unknown or malformed shapes raise
-`MongoDBConfigurationError` with guidance to clear
-`memory_pending_batches` or restore a supported state version; they are never
+migrated to one failed slot on read. Pending batches using the immediately
+preceding delimiter-based fingerprint are re-keyed to the canonical fingerprint
+only when every current scope and message value is provably unambiguous in the
+legacy encoding: no pipe, C0 control, or DEL characters. If an unsafe current
+scope computes a legacy key that exists, the provider does not consume or
+rewrite that key and raises `MongoDBConfigurationError` with guidance to clear
+the provider's `memory_pending_batches`. If no such candidate key exists, the
+provider safely continues with canonical state. Unknown or malformed shapes
+also raise configuration errors with migration guidance; they are never
 silently discarded.
+
+Canonical document IDs intentionally replace delimiter-based IDs before the
+first release. This unshipped branch does not promise compatibility for
+previously inserted development documents: clear affected development
+collections before upgrading. Pending fallback UUIDs are preserved by the
+state migration above.
 
 `search()` embeds one non-empty query and builds structured BSON for either ANN
 (`numCandidates`) or ENN (`exact: true`). The scope filter is inside
@@ -79,11 +100,16 @@ attribution. `after_run()` stores caller input and response while excluding
 provider context.
 
 Direct `search()` and `store()` calls always surface stable integration errors
-with the PyMongo or generator exception as `__cause__`. Adapter retrieval and
-persistence suppress only operational retrieval/persistence categories and
-emit content-free warnings. Cancellation and configuration/mapping/index
-errors propagate. `persistence_fail_fast=True` makes adapter persistence
-operational errors visible to applications requiring transactional durability.
+with the PyMongo or generator exception as `__cause__`. Adapter hooks suppress
+only transient retrieval/persistence errors: `ConnectionFailure`, retryable
+driver labels, and the tested network, topology-change, shutdown, and deadline
+codes. Authentication/authorization (codes 13 and 18), missing or conflicting
+indexes (27, 85, and 86), non-ready Search index status, unsupported commands
+(59), rejected configuration, and all unclassified/programmer operation
+failures propagate. Cancellation, capability, mapping, and embedding errors
+also propagate. Suppressed failures emit content-free warnings.
+`persistence_fail_fast=True` makes even classified transient persistence errors
+visible to applications requiring transactional durability.
 
 ## Lifecycle and administration
 

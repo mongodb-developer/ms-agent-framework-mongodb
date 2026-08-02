@@ -25,6 +25,10 @@ class MongoDBMappingError(MongoDBIntegrationError):
     """Raised when a MongoDB document cannot be mapped safely."""
 
 
+class MongoDBAuthorizationError(MongoDBIntegrationError):
+    """Raised when MongoDB authentication or authorization fails."""
+
+
 class MongoDBIndexError(MongoDBIntegrationError):
     """Base exception for Search index failures."""
 
@@ -45,8 +49,16 @@ class MongoDBRetrievalError(MongoDBIntegrationError):
     """Raised when a direct MongoDB read operation fails."""
 
 
+class MongoDBTransientRetrievalError(MongoDBRetrievalError):
+    """Raised when a MongoDB read fails for a documented transient reason."""
+
+
 class MongoDBPersistenceError(MongoDBIntegrationError):
     """Raised when a direct MongoDB write operation fails."""
+
+
+class MongoDBTransientPersistenceError(MongoDBPersistenceError):
+    """Raised when a MongoDB write fails for a documented transient reason."""
 
 
 class MongoDBTimeoutError(MongoDBIntegrationError, TimeoutError):
