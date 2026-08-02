@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Awaitable, Sequence
 from datetime import datetime, timedelta, timezone
 from typing import Any, cast
@@ -145,6 +146,35 @@ class FakeCollection:
         return FakeCursor(self.regular_indexes)
 
 
+class ConcurrentInsertCollection(FakeCollection):
+    def __init__(self) -> None:
+        super().__init__()
+        self.both_inserts_entered = asyncio.Event()
+        self.release_inserts = asyncio.Event()
+
+    async def insert_many(self, documents: list[dict[str, Any]], *, ordered: bool) -> Result:
+        assert ordered is False
+        self.insert_attempts.append(documents)
+        if len(self.insert_attempts) == 2:
+            self.both_inserts_entered.set()
+        await self.release_inserts.wait()
+        return Result(inserted_ids=[str(document["_id"]) for document in documents])
+
+
+class BlockingInsertCollection(FakeCollection):
+    def __init__(self) -> None:
+        super().__init__()
+        self.insert_entered = asyncio.Event()
+        self.release_insert = asyncio.Event()
+
+    async def insert_many(self, documents: list[dict[str, Any]], *, ordered: bool) -> Result:
+        assert ordered is False
+        self.insert_attempts.append(documents)
+        self.insert_entered.set()
+        await self.release_insert.wait()
+        return Result(inserted_ids=[str(document["_id"]) for document in documents])
+
+
 def provider(
     collection: FakeCollection,
     embeddings: FakeEmbeddingGenerator | None = None,
@@ -238,6 +268,46 @@ async def test_no_message_id_reuses_pending_retry_id_then_advances_after_success
 
     assert retry_id == failed_id
     assert later_run_id != retry_id
+
+
+async def test_concurrent_identical_batches_receive_distinct_fallback_ids() -> None:
+    collection = ConcurrentInsertCollection()
+    memory = provider(collection)
+    state: dict[str, Any] = {}
+    messages = [Message("user", ["identical concurrent content"])]
+
+    first = asyncio.create_task(memory.store(messages, session_id="session-1", state=state))
+    second = asyncio.create_task(memory.store(messages, session_id="session-1", state=state))
+    await asyncio.wait_for(collection.both_inserts_entered.wait(), timeout=1)
+    attempted_ids = [attempt[0]["_id"] for attempt in collection.insert_attempts]
+    json.dumps(state)
+    collection.release_inserts.set()
+
+    assert await asyncio.gather(first, second) == [1, 1]
+    assert attempted_ids[0] != attempted_ids[1]
+    assert state == {}
+
+
+async def test_cancelled_store_preserves_fallback_ids_for_retry() -> None:
+    collection = BlockingInsertCollection()
+    memory = provider(collection)
+    state: dict[str, Any] = {}
+    messages = [Message("user", ["cancelled pending content"])]
+
+    pending = asyncio.create_task(memory.store(messages, session_id="session-1", state=state))
+    await asyncio.wait_for(collection.insert_entered.wait(), timeout=1)
+    cancelled_id = collection.insert_attempts[0][0]["_id"]
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+
+    assert state
+    json.dumps(state)
+    collection.release_insert.set()
+    await memory.store(messages, session_id="session-1", state=state)
+
+    assert collection.insert_attempts[1][0]["_id"] == cancelled_id
+    assert state == {}
 
 
 async def test_direct_failures_surface_stable_errors_with_driver_causes() -> None:

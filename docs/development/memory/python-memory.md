@@ -40,7 +40,10 @@ When no message ID exists, one UUID is generated and retained in the
 provider-scoped Agent Framework pending-batch state, so a failed `after_run`
 retry reuses the same ID. Pending state is removed only after confirmed
 insertion or a duplicate-only idempotent replay; a later successful run with
-identical content therefore receives a new ID.
+identical content therefore receives a new ID. Concurrent identical calls use
+separate in-flight attempt slots, while failed slots retain their IDs for the
+next retry. Cancellation moves an in-flight slot to failed state before it
+propagates.
 
 `search()` embeds one non-empty query and builds structured BSON for either ANN
 (`numCandidates`) or ENN (`exact: true`). The scope filter is inside

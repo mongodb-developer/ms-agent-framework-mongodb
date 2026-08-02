@@ -307,14 +307,19 @@ class MongoDBMemoryContextProvider(ContextProvider):
         now = datetime.now(timezone.utc)
         retry_state = state if state is not None else self._direct_retry_state
         batch_fingerprint = _batch_fingerprint(eligible, scope=scope)
+        retry_attempt = (
+            _begin_retry_attempt(retry_state, batch_fingerprint)
+            if any(not message.message_id for message in eligible)
+            else None
+        )
+        retry_ids = retry_attempt[1] if retry_attempt is not None else {}
         documents: list[MongoDocument] = []
         for ordinal, (message, vector) in enumerate(zip(eligible, vectors, strict=True)):
             memory_id = _memory_id(
                 message,
                 scope=scope,
                 ordinal=ordinal,
-                state=retry_state,
-                batch_fingerprint=batch_fingerprint,
+                retry_ids=retry_ids,
             )
             document: MongoDocument = {
                 "_id": memory_id,
@@ -333,9 +338,20 @@ class MongoDBMemoryContextProvider(ContextProvider):
             documents.append(document)
         try:
             result = await self.collection.insert_many(documents, ordered=False)
-            _complete_retry_batch(retry_state, batch_fingerprint)
+            _finish_retry_attempt(
+                retry_state,
+                batch_fingerprint,
+                retry_attempt,
+                succeeded=True,
+            )
             return len(result.inserted_ids)
         except asyncio.CancelledError:
+            _finish_retry_attempt(
+                retry_state,
+                batch_fingerprint,
+                retry_attempt,
+                succeeded=False,
+            )
             raise
         except BulkWriteError as exc:
             details = exc.details or {}
@@ -346,10 +362,27 @@ class MongoDBMemoryContextProvider(ContextProvider):
                 and not write_concern_errors
                 and all(error.get("code") == 11000 for error in write_errors)
             ):
-                _complete_retry_batch(retry_state, batch_fingerprint)
+                _finish_retry_attempt(
+                    retry_state,
+                    batch_fingerprint,
+                    retry_attempt,
+                    succeeded=True,
+                )
                 return int(details.get("nInserted", 0))
+            _finish_retry_attempt(
+                retry_state,
+                batch_fingerprint,
+                retry_attempt,
+                succeeded=False,
+            )
             raise MongoDBPersistenceError("MongoDB Memory persistence failed.") from exc
         except PyMongoError as exc:
+            _finish_retry_attempt(
+                retry_state,
+                batch_fingerprint,
+                retry_attempt,
+                succeeded=False,
+            )
             raise MongoDBPersistenceError("MongoDB Memory persistence failed.") from exc
 
     async def before_run(
@@ -723,8 +756,7 @@ def _memory_id(
     *,
     scope: Mapping[str, Any],
     ordinal: int,
-    state: dict[str, Any],
-    batch_fingerprint: str,
+    retry_ids: dict[str, Any],
 ) -> str:
     stable_scope = "|".join(f"{key}={scope[key]}" for key in sorted(scope))
     if message.message_id:
@@ -733,14 +765,6 @@ def _memory_id(
     fingerprint = hashlib.sha256(
         f"{stable_scope}|{message.role}|{message.text}|{ordinal}".encode()
     ).hexdigest()
-    retry_batches_value = state.setdefault("memory_pending_batches", {})
-    if not isinstance(retry_batches_value, dict):
-        raise MongoDBConfigurationError("Memory provider retry state is invalid.")
-    retry_batches = cast(dict[str, Any], retry_batches_value)
-    retry_ids_value = retry_batches.setdefault(batch_fingerprint, {})
-    if not isinstance(retry_ids_value, dict):
-        raise MongoDBConfigurationError("Memory provider pending batch state is invalid.")
-    retry_ids = cast(dict[str, Any], retry_ids_value)
     existing = retry_ids.get(fingerprint)
     if isinstance(existing, str):
         return existing
@@ -762,12 +786,67 @@ def _batch_fingerprint(
     return hashlib.sha256("\n".join(parts).encode()).hexdigest()
 
 
-def _complete_retry_batch(state: dict[str, Any], batch_fingerprint: str) -> None:
+def _begin_retry_attempt(
+    state: dict[str, Any],
+    batch_fingerprint: str,
+) -> tuple[str, dict[str, Any]]:
+    retry_batches_value = state.setdefault("memory_pending_batches", {})
+    if not isinstance(retry_batches_value, dict):
+        raise MongoDBConfigurationError("Memory provider retry state is invalid.")
+    retry_batches = cast(dict[str, Any], retry_batches_value)
+    batch_value = retry_batches.setdefault(
+        batch_fingerprint,
+        {"failed": [], "in_flight": {}},
+    )
+    if not isinstance(batch_value, dict):
+        raise MongoDBConfigurationError("Memory provider pending batch state is invalid.")
+    batch = cast(dict[str, Any], batch_value)
+    failed_value = batch.get("failed")
+    in_flight_value = batch.get("in_flight")
+    if not isinstance(failed_value, list) or not isinstance(in_flight_value, dict):
+        raise MongoDBConfigurationError("Memory provider pending batch state is invalid.")
+    failed = cast(list[Any], failed_value)  # type: ignore[redundant-cast]
+    in_flight = cast(dict[str, Any], in_flight_value)
+    retry_ids: dict[str, Any] = {}
+    if failed:
+        failed_ids = failed.pop(0)
+        if not isinstance(failed_ids, dict):
+            raise MongoDBConfigurationError("Memory provider failed batch state is invalid.")
+        retry_ids = cast(dict[str, Any], failed_ids)
+    attempt_id = str(uuid.uuid4())
+    in_flight[attempt_id] = retry_ids
+    return attempt_id, retry_ids
+
+
+def _finish_retry_attempt(
+    state: dict[str, Any],
+    batch_fingerprint: str,
+    retry_attempt: tuple[str, dict[str, Any]] | None,
+    *,
+    succeeded: bool,
+) -> None:
+    if retry_attempt is None:
+        return
     retry_batches_value = state.get("memory_pending_batches")
     if not isinstance(retry_batches_value, dict):
         return
     retry_batches = cast(dict[str, Any], retry_batches_value)
-    retry_batches.pop(batch_fingerprint, None)
+    batch_value = retry_batches.get(batch_fingerprint)
+    if not isinstance(batch_value, dict):
+        return
+    batch = cast(dict[str, Any], batch_value)
+    failed_value = batch.get("failed")
+    in_flight_value = batch.get("in_flight")
+    if not isinstance(failed_value, list) or not isinstance(in_flight_value, dict):
+        return
+    failed = cast(list[Any], failed_value)  # type: ignore[redundant-cast]
+    in_flight = cast(dict[str, Any], in_flight_value)
+    attempt_id, retry_ids = retry_attempt
+    in_flight.pop(attempt_id, None)
+    if not succeeded:
+        failed.append(retry_ids)
+    if not failed and not in_flight:
+        retry_batches.pop(batch_fingerprint, None)
     if not retry_batches:
         state.pop("memory_pending_batches", None)
 
