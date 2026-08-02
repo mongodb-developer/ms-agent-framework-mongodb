@@ -60,11 +60,14 @@ Readiness polling computes one `time.monotonic()` deadline, fetches only the con
 name, and sleeps for at most the lesser of the interval and remaining time. On Python
 3.10, requests are bounded with an explicit child task and `asyncio.wait`, not
 `asyncio.wait_for`; external cancellation cancels and observes the child before
-immediately propagating. Poll-request `asyncio.TimeoutError` and deadline exhaustion
-become `MongoDBIndexNotReadyError` with last state `TIMEOUT`, the preceding observed
-state, index name, and remediation. No raw asyncio timeout escapes. Driver exceptions
-remain causes of stable authorization, capability, transient, missing, or retrieval
-error categories. Diagnostics do not include command documents, connection strings,
+immediately propagating the original parent cancellation. If child failure and parent
+cancellation coincide, the completed child is observed but cannot replace the parent's
+`CancelledError`; without parent cancellation, the child exception is preserved.
+Poll-request `asyncio.TimeoutError` and deadline exhaustion become
+`MongoDBIndexNotReadyError` with last state `TIMEOUT`, the preceding observed state,
+index name, and remediation. No raw asyncio timeout escapes. Driver exceptions remain
+causes of stable authorization, capability, transient, missing, or retrieval error
+categories. Diagnostics do not include command documents, connection strings,
 definitions returned by the server, embeddings, or filters.
 
 ## Privileges

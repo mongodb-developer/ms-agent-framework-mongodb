@@ -129,6 +129,28 @@ class BlockingCollection(Collection):
         raise AssertionError("unreachable")
 
 
+class FailingOnCancellationCollection(Collection):
+    def __init__(self) -> None:
+        super().__init__()
+        self.request_started = asyncio.Event()
+        self.child_failure = RuntimeError("child failed while cancellation completed")
+
+    async def list_search_indexes(self, *, name: str | None = None) -> Cursor:
+        del name
+        self.request_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            raise self.child_failure
+        raise AssertionError("unreachable")
+
+
+class FailingCollection(Collection):
+    async def list_search_indexes(self, *, name: str | None = None) -> Cursor:
+        del name
+        raise RuntimeError("ordinary child failure")
+
+
 class TimingOutCollection(Collection):
     async def list_search_indexes(self, *, name: str | None = None) -> Cursor:
         del name
@@ -275,6 +297,28 @@ async def test_external_cancellation_interrupts_an_active_poll_request() -> None
     with pytest.raises(asyncio.CancelledError):
         await task
     assert collection.request_cancelled is True
+
+
+async def test_parent_cancellation_wins_when_child_fails_during_cancellation() -> None:
+    collection = FailingOnCancellationCollection()
+    provider = rag(collection)
+    task = asyncio.create_task(
+        provider.wait_until_vector_search_index_ready(timeout=10, poll_interval=1)
+    )
+    await collection.request_started.wait()
+
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert collection.child_failure.__traceback__ is not None
+
+
+async def test_normal_child_failure_is_preserved_without_parent_cancellation() -> None:
+    provider = rag(FailingCollection())
+
+    with pytest.raises(RuntimeError, match="ordinary child failure"):
+        await provider.wait_until_vector_search_index_ready(timeout=1, poll_interval=0.01)
 
 
 async def test_asyncio_timeout_from_poll_request_becomes_stable_timeout_state() -> None:

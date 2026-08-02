@@ -70,11 +70,13 @@ async def _await_before_deadline(awaitable: Awaitable[_T], deadline: float) -> _
     task = asyncio.ensure_future(awaitable)
     try:
         done, _ = await asyncio.wait({task}, timeout=remaining)
-    except asyncio.CancelledError:
+    except asyncio.CancelledError as parent_cancellation:
         task.cancel()
-        with suppress(asyncio.CancelledError, asyncio.TimeoutError):
+        try:
             await task
-        raise
+        except BaseException:
+            pass
+        raise parent_cancellation
     if task not in done:
         task.cancel()
         with suppress(asyncio.CancelledError, asyncio.TimeoutError):
