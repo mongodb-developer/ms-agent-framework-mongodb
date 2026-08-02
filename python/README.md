@@ -92,8 +92,9 @@ Public filters are typed and bounded; raw dictionaries, BSON, field names,
 operators, and pipelines are not accepted as filter input. The package exports
 `MongoDBRAGProvider`, `MongoDBRAGContextProvider`, `MongoDBRAGProviderOptions`,
 `MongoDBRAGSearchOptions`, `MongoDBRAGParentOptions`, `MongoDBRAGResult`, and
-`MongoDBSearchMode`. Vector ANN and ENN are implemented. Full-text and hybrid
-RRF remain separate feature slices and fail clearly rather than downgrading.
+`MongoDBSearchMode`. Vector ANN/ENN and full-text Search are implemented.
+Hybrid RRF remains a separate feature slice and fails clearly rather than
+downgrading.
 ENN verifies exact-search planning through public MongoDB commands before
 embedding and caches the observed capability for a bounded interval; it does
 not infer support from an unverified server-version threshold. Only recognized
@@ -113,3 +114,34 @@ vectors produced by the sample generator; production dimensions and embeddings
 must match the configured index. Explicit index ensure requires provisioner
 privileges. Runtime search needs only read/aggregate and Search query privileges.
 The sample does not ingest or delete documents.
+
+## Full-text RAG quickstart
+
+Full-text RAG queries a pre-ingested collection without generating embeddings.
+The complete provider authorization filter and optional per-call relevance
+filter are translated into `$search.compound.filter` before `$limit`.
+
+```python
+direct = MongoDBRAGProvider(
+    MongoDBRAGProviderOptions(
+        mode=MongoDBSearchMode.FULL_TEXT,
+        search_index_name="knowledge_search",
+        text_fields=("content",),
+        search_analyzer="lucene.standard",
+        filter=EqualFilter("tenant_id", "tenant-123"),
+    ),
+    connection_string=os.environ["MONGODB_URI"],
+    database_name=os.environ["MONGODB_DATABASE"],
+    collection_name=os.environ["MONGODB_RAG_COLLECTION"],
+)
+await direct.validate_search_index()
+results = await direct.search("tenant isolation")
+```
+
+Run `samples\rag_full_text_quickstart.py` after setting `MONGODB_URI`,
+`MONGODB_DATABASE`, `MONGODB_RAG_COLLECTION`, `MONGODB_RAG_SEARCH_INDEX`, and
+`MONGODB_RAG_TENANT`. The collection must already contain the configured text
+and authorization fields. Explicit Search index ensure requires a provisioner
+identity; runtime search is read-only and needs only index inspection,
+read/aggregate, and Search query permissions. The sample performs no ingestion
+or cleanup.
