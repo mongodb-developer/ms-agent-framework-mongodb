@@ -123,6 +123,57 @@ internal class RAGCollectionProxy : DispatchProxy
     }
 }
 
+/// <summary>
+/// Tracks calls made to a <see cref="FakeMongoClientProxy"/>, used to prove a connection-string constructor
+/// disposes its owned client if a step after client creation (for example resolving the database/collection)
+/// throws.
+/// </summary>
+internal sealed class FakeMongoClientState
+{
+    public Exception? GetDatabaseException { get; set; }
+
+    public int DisposeCount { get; set; }
+}
+
+/// <summary>
+/// A minimal <see cref="IMongoClient"/> test double built the same way as <see cref="RAGCollectionProxy"/>: a
+/// <see cref="DispatchProxy"/> only needs to handle the specific members exercised by production code
+/// (<c>GetDatabase</c> and <c>Dispose</c>); every other member is intentionally unsupported.
+/// </summary>
+internal class FakeMongoClientProxy : DispatchProxy
+{
+    public FakeMongoClientState State { get; set; } = null!;
+
+    protected override object? Invoke(MethodInfo? targetMethod, object?[]? args)
+    {
+        string method = targetMethod!.Name;
+        if (method == "GetDatabase")
+        {
+            if (State.GetDatabaseException is not null)
+            {
+                throw State.GetDatabaseException;
+            }
+
+            throw new NotSupportedException("Fake client requires a configured GetDatabaseException.");
+        }
+
+        if (method == "Dispose")
+        {
+            State.DisposeCount++;
+            return null;
+        }
+
+        throw new NotSupportedException($"Unexpected client call: {targetMethod}");
+    }
+
+    public static IMongoClient Create(FakeMongoClientState state)
+    {
+        var client = DispatchProxy.Create<IMongoClient, FakeMongoClientProxy>();
+        ((FakeMongoClientProxy)(object)client).State = state;
+        return client;
+    }
+}
+
 internal sealed class ListCursor<T>(IReadOnlyList<T> values) : IAsyncCursor<T>
 {
     private bool _moved;

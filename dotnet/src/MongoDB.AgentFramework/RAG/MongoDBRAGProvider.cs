@@ -93,9 +93,41 @@ public sealed class MongoDBRAGProvider : IAsyncDisposable
         MongoDBRAGProviderOptions options,
         ILogger<MongoDBRAGProvider>? logger = null)
         : this(
-            MongoClientFactory.FromConnectionString(connectionString),
+            connectionString,
             databaseName,
             collectionName,
+            embeddingGenerator,
+            vectorDimensions,
+            options,
+            logger,
+            clientFactory: null)
+    {
+    }
+
+    /// <summary>
+    /// Test-only seam mirroring <see cref="MongoClientFactory.FromConnectionString"/>'s existing
+    /// <c>clientFactory</c> override. It exists solely so tests can substitute the underlying
+    /// <see cref="IMongoClient"/> and prove that a validation/construction failure occurring after the owned
+    /// client is created still disposes it; it is internal because it is not part of the public surface.
+    /// </summary>
+    internal MongoDBRAGProvider(
+        string connectionString,
+        string databaseName,
+        string collectionName,
+        IEmbeddingGenerator<string, Embedding<float>> embeddingGenerator,
+        int vectorDimensions,
+        MongoDBRAGProviderOptions options,
+        ILogger<MongoDBRAGProvider>? logger,
+        Func<string, IMongoClient>? clientFactory)
+        : this(
+            Connect(
+                connectionString,
+                databaseName,
+                collectionName,
+                embeddingGenerator,
+                vectorDimensions,
+                options,
+                clientFactory),
             embeddingGenerator,
             vectorDimensions,
             options,
@@ -104,23 +136,52 @@ public sealed class MongoDBRAGProvider : IAsyncDisposable
     }
 
     private MongoDBRAGProvider(
-        OwnedResource<IMongoClient> client,
+        (OwnedResource<IMongoClient> Client, IMongoCollection<BsonDocument> Collection) connected,
+        IEmbeddingGenerator<string, Embedding<float>> embeddingGenerator,
+        int vectorDimensions,
+        MongoDBRAGProviderOptions options,
+        ILogger<MongoDBRAGProvider>? logger)
+        : this(connected.Collection, embeddingGenerator, vectorDimensions, options, logger)
+    {
+        _client = connected.Client;
+    }
+
+    /// <summary>
+    /// Validates every argument that does not require a MongoDB client first, so a validation failure never
+    /// leaves an owned client that nothing will ever dispose. Only after that validation succeeds does this
+    /// create the client and resolve the database/collection; if that later step throws, the client is disposed
+    /// here before rethrowing, since no <see cref="MongoDBRAGProvider"/> instance will ever exist to do it.
+    /// </summary>
+    private static (OwnedResource<IMongoClient> Client, IMongoCollection<BsonDocument> Collection) Connect(
+        string connectionString,
         string databaseName,
         string collectionName,
         IEmbeddingGenerator<string, Embedding<float>> embeddingGenerator,
         int vectorDimensions,
         MongoDBRAGProviderOptions options,
-        ILogger<MongoDBRAGProvider>? logger)
-        : this(
-            client.Value.GetDatabase(
-                MongoDBRAGProviderOptions.RequireText(databaseName, nameof(databaseName))),
-            collectionName,
-            embeddingGenerator,
-            vectorDimensions,
-            options,
-            logger)
+        Func<string, IMongoClient>? clientFactory)
     {
-        _client = client;
+        ArgumentNullException.ThrowIfNull(options);
+        EmbeddingValidator.ValidateDimensions(vectorDimensions);
+        ArgumentNullException.ThrowIfNull(embeddingGenerator);
+        string validDatabaseName = MongoDBRAGProviderOptions.RequireText(databaseName, nameof(databaseName));
+        string validCollectionName = MongoDBRAGProviderOptions.RequireText(collectionName, nameof(collectionName));
+
+        OwnedResource<IMongoClient> client = MongoClientFactory.FromConnectionString(
+            connectionString,
+            clientFactory);
+        try
+        {
+            IMongoCollection<BsonDocument> collection = client.Value
+                .GetDatabase(validDatabaseName)
+                .GetCollection<BsonDocument>(validCollectionName);
+            return (client, collection);
+        }
+        catch
+        {
+            client.DisposeAsync().AsTask().GetAwaiter().GetResult();
+            throw;
+        }
     }
 
     /// <summary>Gets whether the provider owns its MongoDB client.</summary>

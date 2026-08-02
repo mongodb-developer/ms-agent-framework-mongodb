@@ -55,6 +55,19 @@ placed directly in `CitationAnnotation.RawRepresentation` (the closest standard 
 `TextSearchResult.RawRepresentation` requirement) as well as in `AdditionalProperties[ResultKey]`, so score, metadata,
 ID, and raw BSON all remain reachable without inventing a narrower, lossy representation.
 
+## Connection-string constructor exception safety
+
+The connection-string constructor validates every argument that does not require a MongoDB client (`options`,
+`vectorDimensions`, `embeddingGenerator`, `databaseName`, `collectionName`) **before** creating one, so a validation
+failure never creates a client with nothing left to dispose it. Only after that validation succeeds does the private
+`Connect` helper create the owned client and resolve the database/collection; if that later step throws (for
+example, the driver rejecting a database/collection name), `Connect` disposes the just-created client itself before
+rethrowing — no `MongoDBRAGProvider` instance is ever returned to the caller in that case, so the constructor is the
+only place that can prevent the leak. An internal-only constructor overload accepting a `Func<string, IMongoClient>?
+clientFactory` (mirroring `MongoClientFactory.FromConnectionString`'s existing override parameter) lets
+`MongoDBRAGProviderLifecycleTests` substitute a client whose `GetDatabase` call fails, proving the disposal without
+needing a live MongoDB deployment.
+
 ## ANN/ENN pipeline
 
 `Internal.RAGPipelineBuilder` (internal, exercised through `InternalsVisibleTo`) builds the shared pipeline for both
@@ -171,7 +184,9 @@ Tests live under `dotnet/tests/MongoDB.AgentFramework.Tests/RAG/` and were writt
   mutual exclusivity, stage ordering, and asserts the pipeline has exactly two stages with **no** trailing
   `$project` stage, so the complete document survives to `MapResult`.
 - `MongoDBRAGProviderLifecycleTests` — constructor ownership (injected vs. connection-string), vector-dimension
-  validation, invalid-options rejection, and null-argument rejection across all four constructors.
+  validation, invalid-options rejection, null-argument rejection across all four constructors, argument validation
+  running before a client is created (proven with an internal `clientFactory` test seam that must never be
+  invoked), and disposal of the owned client when a later step (resolving the database/collection) fails.
 - `MongoDBRAGProviderSearchTests` — ANN/ENN filter-in-stage placement, `numCandidates`/`limit`/`exact` wiring,
   capability gating before any embedding/network call, empty-query rejection, embedding dimension/finiteness
   validation, missing-ID/missing-text mapping errors, missing-optional-field-produces-null mapping, missing/

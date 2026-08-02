@@ -36,6 +36,53 @@ public sealed class MongoDBRAGProviderLifecycleTests
     }
 
     [Fact]
+    public void ConnectionStringConstructorDisposesOwnedClientWhenLaterValidationFails()
+    {
+        var clientState = new FakeMongoClientState
+        {
+            GetDatabaseException = new InvalidOperationException("boom"),
+        };
+
+        Assert.Throws<InvalidOperationException>(() => new MongoDBRAGProvider(
+            "mongodb://localhost:27017",
+            "database",
+            "chunks",
+            new RecordingEmbeddingGenerator(),
+            3,
+            new MongoDBRAGProviderOptions { SearchMode = MongoDBSearchMode.VectorAnn },
+            logger: null,
+            clientFactory: _ => FakeMongoClientProxy.Create(clientState)));
+
+        // The client was created by the factory before GetDatabase failed; since no MongoDBRAGProvider instance
+        // is ever returned to the caller, the constructor itself must dispose it or it would otherwise leak.
+        Assert.Equal(1, clientState.DisposeCount);
+    }
+
+    [Fact]
+    public void ConnectionStringConstructorValidatesArgumentsBeforeCreatingAClient()
+    {
+        bool clientFactoryInvoked = false;
+
+        Assert.Throws<MongoDBConfigurationException>(() => new MongoDBRAGProvider(
+            "mongodb://localhost:27017",
+            "database",
+            "chunks",
+            new RecordingEmbeddingGenerator(),
+            vectorDimensions: 0,
+            new MongoDBRAGProviderOptions { SearchMode = MongoDBSearchMode.VectorAnn },
+            logger: null,
+            clientFactory: _ =>
+            {
+                clientFactoryInvoked = true;
+                return FakeMongoClientProxy.Create(new FakeMongoClientState());
+            }));
+
+        // Argument validation that does not require a client runs first, so a validation failure never creates
+        // (and therefore never needs to dispose) a client at all.
+        Assert.False(clientFactoryInvoked);
+    }
+
+    [Fact]
     public void NonPositiveVectorDimensionsAreRejected()
     {
         Assert.Throws<MongoDBConfigurationException>(() => new MongoDBRAGProvider(
