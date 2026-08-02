@@ -17,8 +17,9 @@ record rationale without weakening those requirements.
 `python/src/agent_framework_mongodb/rag/provider.py` owns deterministic direct
 search. Construction validates immutable mappings, bounds, mode options, and
 ownership but performs no I/O. `search()` rejects empty queries, resolves
-per-call options without replacing the application filter, validates the named
-index before embedding by default, requests exactly one query embedding,
+per-call options without replacing the application filter, completely translates
+the effective filter, validates all effective filter paths against the named
+index before embedding, requests exactly one query embedding,
 validates count/dimensions/finite values, runs an aggregation, and maps
 `MongoDBRAGResult`.
 
@@ -41,9 +42,11 @@ another conversation session. `after_run` is intentionally a no-op.
 
 When `MongoDBRAGParentOptions` is present, child results provide a bounded,
 de-duplicated parent-ID set. A second read-only aggregation against the
-allowlisted same-database collection reapplies the complete mandatory filter,
-limits parent count, retains the best child score, and bounds each text and the
-aggregate context budget. Chunk and parent writes remain ingestion concerns.
+allowlisted same-database collection reads all those IDs and reapplies the
+complete mandatory filter. Mapping retains each parent's best child score,
+sorts by score and original child relevance order, then limits parent count and
+bounds text/context. Unordered `$in` results therefore cannot discard a more
+relevant parent. Chunk and parent writes remain ingestion concerns.
 
 ## Index lifecycle and ownership
 
@@ -52,6 +55,10 @@ aggregate context budget. Chunk and parent writes remain ingestion concerns.
 path, dimensions, similarity, required filter paths, status, and queryability.
 `ensure_vector_search_index()` is the only create/update facade and optionally
 polls with a monotonic deadline. Search and framework hooks never call ensure.
+Missing, building/non-queryable, ready, and failed states are distinct. A
+`FAILED` index raises `MongoDBIndexFailedError` immediately with explicit
+repair/recreate remediation; readiness polling does not wait to timeout on a
+permanent failure.
 
 Injected clients and collections remain caller-owned. A URI-created PyMongo
 `AsyncMongoClient` is provider-owned and is closed once through `close()` or the
@@ -74,11 +81,37 @@ The adapter's warning contains only low-cardinality feature/operation/outcome
 fields. Query text, filters, embeddings, documents, source URLs, connection
 details, tenant values, and driver messages are not logged.
 
+## ENN capability gate
+
+ENN is gated before query embedding and retrieval. The provider records
+diagnostic facts from the public `buildInfo` and `hello` commands and the
+installed PyMongo version. It then asks MongoDB to explain a controlled,
+read-only `$vectorSearch` pipeline containing `exact: true` against the already
+validated index. Successful planning is the support signal. A public-command
+parse, invalid-option, or unsupported-stage response raises
+`MongoDBCapabilityError` with remediation to use ANN or enable exact search.
+Authentication/authorization errors and task cancellation propagate unchanged.
+
+No server-version threshold is hard-coded: server and deployment strings are
+diagnostic facts, not inferred support claims. Results, including unsupported
+results and their driver cause, are cached for 300 seconds by default.
+`capability_cache_ttl` changes the bound, and
+`validate_capabilities(refresh=True)` explicitly refreshes it. The explain probe
+uses a generated finite vector of the configured dimensions; it does not invoke
+the embedding generator, retrieve documents, or include query/filter values.
+
+## Effective-filter validation
+
+Provider and per-call filters are conjoined first. Complete translation and all
+required index filter-path checks occur before embedding. An unsupported AST or
+an effective path absent from the inspected Vector Search index fails closed.
+
 ## Verification
 
 `python/tests/unit/test_rag_vector.py` covers ANN/ENN pipeline structure,
-security-filter placement, index-before-embedding validation, explicit
-provisioning, mapping, citation/source attribution, parent authorization,
+security-filter placement, effective-filter index validation, ENN public-command
+capability caching, explicit provisioning, index state transitions, mapping,
+citation/source attribution, deterministic parent authorization/ordering,
 read-only hooks, redacted fail-open behavior, and cancellation.
 `python/tests/integration_rag_vector/test_rag_vector_integration.py` uses a
 unique `af_rag_vector_test_` collection, explicitly provisions the index, and

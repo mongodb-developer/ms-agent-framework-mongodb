@@ -94,6 +94,9 @@ operators, and pipelines are not accepted as filter input. The package exports
 `MongoDBRAGSearchOptions`, `MongoDBRAGParentOptions`, `MongoDBRAGResult`, and
 `MongoDBSearchMode`. Vector ANN and ENN are implemented. Full-text and hybrid
 RRF remain separate feature slices and fail clearly rather than downgrading.
+ENN verifies exact-search planning through public MongoDB commands before
+embedding and caches the observed capability for a bounded interval; it does
+not infer support from an unverified server-version threshold.
 
 Membership values and field-path collections must be explicit lists or tuples;
 scalar strings and bytes are rejected rather than split into characters.

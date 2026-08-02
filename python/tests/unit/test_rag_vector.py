@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 import pytest
@@ -10,7 +11,14 @@ from pymongo.errors import OperationFailure
 
 from agent_framework_mongodb import (
     EqualFilter,
+    MongoDBAuthorizationError,
+    MongoDBCapabilityError,
+    MongoDBFilter,
+    MongoDBFilterTranslationError,
+    MongoDBIndexFailedError,
     MongoDBIndexMismatchError,
+    MongoDBIndexMissingError,
+    MongoDBIndexNotReadyError,
     MongoDBRAGContextProvider,
     MongoDBRAGParentOptions,
     MongoDBRAGProvider,
@@ -53,18 +61,42 @@ class FakeCollection:
     def __init__(self) -> None:
         self.pipeline: list[dict[str, Any]] | None = None
         self.documents: list[dict[str, Any]] = []
-        self.search_indexes: list[dict[str, Any]] = []
+        self.search_indexes: list[dict[str, Any]] = [
+            {
+                "name": "knowledge_vector",
+                "type": "vectorSearch",
+                "status": "READY",
+                "queryable": True,
+                "latestDefinition": {
+                    "fields": [
+                        {
+                            "type": "vector",
+                            "path": "embedding",
+                            "numDimensions": 3,
+                            "similarity": "cosine",
+                        },
+                        {"type": "filter", "path": "tenant_id"},
+                        {"type": "filter", "path": "metadata.kind"},
+                    ]
+                },
+            }
+        ]
         self.read_error: Exception | None = None
         self.created_search_model: Any | None = None
         self.updated_search_definition: tuple[str, dict[str, Any]] | None = None
+        self.database = CapabilityDatabase()
+        self.aggregate_calls = 0
+        self.index_reads = 0
 
     async def aggregate(self, pipeline: list[dict[str, Any]]) -> FakeCursor:
+        self.aggregate_calls += 1
         if self.read_error is not None:
             raise self.read_error
         self.pipeline = pipeline
         return FakeCursor(self.documents)
 
     async def list_search_indexes(self, *, name: str) -> FakeCursor:
+        self.index_reads += 1
         return FakeCursor([index for index in self.search_indexes if index.get("name") == name])
 
     async def create_search_index(self, model: Any) -> str:
@@ -73,6 +105,25 @@ class FakeCollection:
 
     async def update_search_index(self, name: str, definition: dict[str, Any]) -> None:
         self.updated_search_definition = (name, definition)
+
+
+class CapabilityDatabase:
+    def __init__(self) -> None:
+        self.command_calls: list[dict[str, Any] | str] = []
+        self.command_error: BaseException | None = None
+        self.explain_error: BaseException | None = None
+
+    async def command(self, command: dict[str, Any] | str) -> dict[str, Any]:
+        self.command_calls.append(command)
+        if isinstance(command, dict) and "explain" in command and self.explain_error is not None:
+            raise self.explain_error
+        if self.command_error is not None:
+            raise self.command_error
+        if command == "buildInfo":
+            return {"version": "test-server"}
+        if command == "hello":
+            return {"msg": "isdbgrid"}
+        return {"ok": 1}
 
 
 async def test_ann_search_embeds_and_executes_a_filtered_read_only_pipeline() -> None:
@@ -98,7 +149,6 @@ async def test_ann_search_embeds_and_executes_a_filtered_read_only_pipeline() ->
         ),
         embedding_generator=embeddings,
         collection=collection,  # type: ignore[arg-type]
-        validate_index_before_search=False,
     )
 
     results = await provider.search("How is retrieval isolated?")
@@ -165,6 +215,77 @@ async def test_search_rejects_an_incompatible_index_before_embedding() -> None:
     assert embeddings.calls == []
 
 
+async def test_search_validates_per_call_filter_paths_before_embedding() -> None:
+    collection = FakeCollection()
+    collection.search_indexes = [
+        {
+            "name": "knowledge_vector",
+            "type": "vectorSearch",
+            "status": "READY",
+            "queryable": True,
+            "latestDefinition": {
+                "fields": [
+                    {
+                        "type": "vector",
+                        "path": "embedding",
+                        "numDimensions": 3,
+                        "similarity": "cosine",
+                    },
+                    {"type": "filter", "path": "tenant_id"},
+                ]
+            },
+        }
+    ]
+    embeddings = FakeEmbeddingGenerator()
+    provider = MongoDBRAGProvider(
+        MongoDBRAGProviderOptions(
+            mode=MongoDBSearchMode.VECTOR_ANN,
+            vector_dimensions=3,
+            vector_index_name="knowledge_vector",
+            filter=EqualFilter("tenant_id", "tenant-a"),
+        ),
+        embedding_generator=embeddings,
+        collection=collection,  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(MongoDBIndexMismatchError, match="filter paths"):
+        await provider.search(
+            "query",
+            options=MongoDBRAGSearchOptions(filter=EqualFilter("metadata.kind", "reference")),
+        )
+
+    assert embeddings.calls == []
+    assert collection.aggregate_calls == 0
+
+
+async def test_search_rejects_incomplete_filter_translation_before_io() -> None:
+    @dataclass(frozen=True, slots=True)
+    class UnsupportedFilter(MongoDBFilter):
+        pass
+
+    collection = FakeCollection()
+    embeddings = FakeEmbeddingGenerator()
+    provider = MongoDBRAGProvider(
+        MongoDBRAGProviderOptions(
+            mode=MongoDBSearchMode.VECTOR_ANN,
+            vector_dimensions=3,
+            vector_index_name="knowledge_vector",
+        ),
+        embedding_generator=embeddings,
+        collection=collection,  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(MongoDBFilterTranslationError, match="unsupported"):
+        await provider.search(
+            "query",
+            options=MongoDBRAGSearchOptions(filter=UnsupportedFilter()),
+        )
+
+    assert collection.index_reads == 0
+    assert embeddings.calls == []
+    assert collection.aggregate_calls == 0
+
+
 async def test_enn_search_uses_exact_without_candidates_and_conjoins_call_filter() -> None:
     collection = FakeCollection()
     collection.documents = [{"_id": "doc-1", "content": "Exact result", "_ragScore": 0.8}]
@@ -177,7 +298,6 @@ async def test_enn_search_uses_exact_without_candidates_and_conjoins_call_filter
         ),
         embedding_generator=FakeEmbeddingGenerator(),
         collection=collection,  # type: ignore[arg-type]
-        validate_index_before_search=False,
     )
 
     await provider.search(
@@ -206,6 +326,103 @@ async def test_enn_search_uses_exact_without_candidates_and_conjoins_call_filter
     assert "numCandidates" not in vector
 
 
+async def test_enn_capability_failure_precedes_embedding_and_retrieval() -> None:
+    collection = FakeCollection()
+    collection.database.explain_error = OperationFailure(
+        "exact vector mode is unavailable",
+        code=40324,
+        details={"codeName": "Location40324"},
+    )
+    embeddings = FakeEmbeddingGenerator()
+    provider = MongoDBRAGProvider(
+        MongoDBRAGProviderOptions(
+            mode=MongoDBSearchMode.VECTOR_ENN,
+            vector_dimensions=3,
+            vector_index_name="knowledge_vector",
+        ),
+        embedding_generator=embeddings,
+        collection=collection,  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(MongoDBCapabilityError, match="exact.*unavailable.*remediation"):
+        await provider.search("exact query")
+
+    assert embeddings.calls == []
+    assert collection.aggregate_calls == 0
+
+
+async def test_enn_capability_facts_are_cached_across_searches() -> None:
+    collection = FakeCollection()
+    collection.documents = [{"_id": "doc-1", "content": "Exact", "_ragScore": 1.0}]
+    provider = MongoDBRAGProvider(
+        MongoDBRAGProviderOptions(
+            mode=MongoDBSearchMode.VECTOR_ENN,
+            vector_dimensions=3,
+            vector_index_name="knowledge_vector",
+        ),
+        embedding_generator=FakeEmbeddingGenerator(),
+        collection=collection,  # type: ignore[arg-type]
+    )
+
+    await provider.search("first")
+    await provider.search("second")
+
+    assert collection.database.command_calls == [
+        "buildInfo",
+        "hello",
+        {
+            "explain": {
+                "aggregate": "knowledge",
+                "pipeline": [
+                    {
+                        "$vectorSearch": {
+                            "index": "knowledge_vector",
+                            "path": "embedding",
+                            "queryVector": [1.0, 0.0, 0.0],
+                            "exact": True,
+                            "limit": 1,
+                        }
+                    }
+                ],
+                "cursor": {},
+            },
+            "verbosity": "queryPlanner",
+        },
+    ]
+    assert collection.aggregate_calls == 2
+
+
+@pytest.mark.parametrize(
+    ("command_error", "expected_error"),
+    [
+        (OperationFailure("forbidden", code=13), MongoDBAuthorizationError),
+        (asyncio.CancelledError(), asyncio.CancelledError),
+    ],
+)
+async def test_enn_capability_auth_and_cancellation_propagate(
+    command_error: BaseException,
+    expected_error: type[BaseException],
+) -> None:
+    collection = FakeCollection()
+    collection.database.command_error = command_error
+    embeddings = FakeEmbeddingGenerator()
+    provider = MongoDBRAGProvider(
+        MongoDBRAGProviderOptions(
+            mode=MongoDBSearchMode.VECTOR_ENN,
+            vector_dimensions=3,
+            vector_index_name="knowledge_vector",
+        ),
+        embedding_generator=embeddings,
+        collection=collection,  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(expected_error):
+        await provider.search("exact")
+
+    assert embeddings.calls == []
+    assert collection.aggregate_calls == 0
+
+
 async def test_before_run_injects_source_attributed_citation_context() -> None:
     collection = FakeCollection()
     collection.documents = [
@@ -224,7 +441,6 @@ async def test_before_run_injects_source_attributed_citation_context() -> None:
         ),
         embedding_generator=FakeEmbeddingGenerator(),
         collection=collection,  # type: ignore[arg-type]
-        validate_index_before_search=False,
     )
     rag = MongoDBRAGContextProvider(direct)
     context = SessionContext(
@@ -281,7 +497,6 @@ async def test_adapter_fails_open_only_for_transient_retrieval_and_redacts_logs(
         ),
         embedding_generator=FakeEmbeddingGenerator(),
         collection=collection,  # type: ignore[arg-type]
-        validate_index_before_search=False,
     )
     rag = MongoDBRAGContextProvider(direct)
     context = SessionContext(input_messages=[Message("user", ["secret query"])])
@@ -315,7 +530,6 @@ async def test_embedding_cancellation_propagates_through_direct_and_adapter() ->
         ),
         embedding_generator=CancellingEmbeddingGenerator(),
         collection=FakeCollection(),  # type: ignore[arg-type]
-        validate_index_before_search=False,
     )
     rag = MongoDBRAGContextProvider(direct)
 
@@ -330,6 +544,7 @@ async def test_embedding_cancellation_propagates_through_direct_and_adapter() ->
 
 async def test_index_provisioning_is_explicit_and_uses_required_filter_fields() -> None:
     collection = FakeCollection()
+    collection.search_indexes = []
     provider = MongoDBRAGProvider(
         MongoDBRAGProviderOptions(
             mode=MongoDBSearchMode.VECTOR_ANN,
@@ -339,10 +554,10 @@ async def test_index_provisioning_is_explicit_and_uses_required_filter_fields() 
         ),
         embedding_generator=FakeEmbeddingGenerator(),
         collection=collection,  # type: ignore[arg-type]
-        validate_index_before_search=False,
     )
 
-    await provider.search("query")
+    with pytest.raises(MongoDBIndexMissingError):
+        await provider.search("query")
     assert collection.created_search_model is None
 
     await provider.ensure_vector_search_index()
@@ -359,6 +574,148 @@ async def test_index_provisioning_is_explicit_and_uses_required_filter_fields() 
         },
         {"type": "filter", "path": "tenant_id"},
     ]
+
+
+@pytest.mark.parametrize(
+    ("index", "expected_error"),
+    [
+        (None, MongoDBIndexMissingError),
+        (
+            {
+                "name": "knowledge_vector",
+                "type": "vectorSearch",
+                "status": "BUILDING",
+                "queryable": False,
+            },
+            MongoDBIndexNotReadyError,
+        ),
+        (
+            {
+                "name": "knowledge_vector",
+                "type": "vectorSearch",
+                "status": "FAILED",
+                "queryable": False,
+            },
+            MongoDBIndexFailedError,
+        ),
+    ],
+)
+async def test_index_facade_distinguishes_missing_building_and_failed(
+    index: dict[str, Any] | None,
+    expected_error: type[Exception],
+) -> None:
+    collection = FakeCollection()
+    if index is not None:
+        if index["status"] != "FAILED":
+            index["latestDefinition"] = {
+                "fields": [
+                    {
+                        "type": "vector",
+                        "path": "embedding",
+                        "numDimensions": 3,
+                        "similarity": "cosine",
+                    }
+                ]
+            }
+        collection.search_indexes = [index]
+    else:
+        collection.search_indexes = []
+    provider = MongoDBRAGProvider(
+        MongoDBRAGProviderOptions(
+            mode=MongoDBSearchMode.VECTOR_ANN,
+            vector_dimensions=3,
+            vector_index_name="knowledge_vector",
+        ),
+        embedding_generator=FakeEmbeddingGenerator(),
+        collection=collection,  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(expected_error):
+        await provider.validate_vector_search_index()
+
+
+async def test_ready_index_validates_successfully() -> None:
+    collection = FakeCollection()
+    collection.search_indexes = [
+        {
+            "name": "knowledge_vector",
+            "type": "vectorSearch",
+            "status": "READY",
+            "queryable": True,
+            "latestDefinition": {
+                "fields": [
+                    {
+                        "type": "vector",
+                        "path": "embedding",
+                        "numDimensions": 3,
+                        "similarity": "cosine",
+                    }
+                ]
+            },
+        }
+    ]
+    provider = MongoDBRAGProvider(
+        MongoDBRAGProviderOptions(
+            mode=MongoDBSearchMode.VECTOR_ANN,
+            vector_dimensions=3,
+            vector_index_name="knowledge_vector",
+        ),
+        embedding_generator=FakeEmbeddingGenerator(),
+        collection=collection,  # type: ignore[arg-type]
+    )
+
+    await provider.validate_vector_search_index()
+
+
+async def test_index_readiness_polling_stops_immediately_on_failed_state() -> None:
+    class TransitioningCollection(FakeCollection):
+        def __init__(self) -> None:
+            super().__init__()
+            self.index_reads = 0
+
+        async def list_search_indexes(self, *, name: str) -> FakeCursor:
+            self.index_reads += 1
+            status = "BUILDING" if self.index_reads == 1 else "FAILED"
+            return FakeCursor(
+                [
+                    {
+                        "name": name,
+                        "type": "vectorSearch",
+                        "status": status,
+                        "queryable": False,
+                        "latestDefinition": {
+                            "fields": [
+                                {
+                                    "type": "vector",
+                                    "path": "embedding",
+                                    "numDimensions": 3,
+                                    "similarity": "cosine",
+                                }
+                            ]
+                        },
+                    }
+                ]
+            )
+
+    collection = TransitioningCollection()
+    provider = MongoDBRAGProvider(
+        MongoDBRAGProviderOptions(
+            mode=MongoDBSearchMode.VECTOR_ANN,
+            vector_dimensions=3,
+            vector_index_name="knowledge_vector",
+        ),
+        embedding_generator=FakeEmbeddingGenerator(),
+        collection=collection,  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(MongoDBIndexFailedError, match="FAILED.*remediation"):
+        await provider.ensure_vector_search_index(
+            wait_until_ready=True,
+            timeout=10,
+            poll_interval=0.001,
+        )
+
+    assert collection.index_reads == 2
 
 
 async def test_parent_hydration_reapplies_authorization_and_keeps_best_child_score() -> None:
@@ -407,7 +764,6 @@ async def test_parent_hydration_reapplies_authorization_and_keeps_best_child_sco
         ),
         embedding_generator=FakeEmbeddingGenerator(),
         collection=collection,  # type: ignore[arg-type]
-        validate_index_before_search=False,
     )
 
     results = await provider.search("query")
@@ -424,15 +780,62 @@ async def test_parent_hydration_reapplies_authorization_and_keeps_best_child_sco
                     {"tenant_id": {"$eq": "tenant-a"}},
                 ]
             }
-        },
-        {"$limit": 2},
+        }
+    ]
+
+
+async def test_parent_hydration_ranks_before_limiting_unordered_documents() -> None:
+    class UnorderedParentCollection(FakeCollection):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        async def aggregate(self, pipeline: list[dict[str, Any]]) -> FakeCursor:
+            del pipeline
+            self.calls += 1
+            if self.calls == 1:
+                return FakeCursor(
+                    [
+                        {
+                            "_id": f"child-{rank}",
+                            "parent_id": f"parent-{rank}",
+                            "content": "child",
+                            "_ragScore": score,
+                        }
+                        for rank, score in ((1, 0.9), (2, 0.8), (3, 0.7))
+                    ]
+                )
+            return FakeCursor(
+                [
+                    {"_id": "parent-3", "content": "third"},
+                    {"_id": "parent-2", "content": "second"},
+                    {"_id": "parent-1", "content": "first"},
+                ]
+            )
+
+    provider = MongoDBRAGProvider(
+        MongoDBRAGProviderOptions(
+            mode=MongoDBSearchMode.VECTOR_ANN,
+            vector_dimensions=3,
+            vector_index_name="knowledge_vector",
+            parent=MongoDBRAGParentOptions(max_parents=2, max_lookup_fan_out=3),
+        ),
+        embedding_generator=FakeEmbeddingGenerator(),
+        collection=UnorderedParentCollection(),  # type: ignore[arg-type]
+    )
+
+    results = await provider.search("query")
+
+    assert [(result.id, result.score) for result in results] == [
+        ("parent-1", 0.9),
+        ("parent-2", 0.8),
     ]
 
 
 async def test_provider_closes_only_a_client_it_created(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class FakeDatabase:
+    class ClientDatabase:
         def __init__(self, collection: FakeCollection) -> None:
             self.collection = collection
 
@@ -445,9 +848,9 @@ async def test_provider_closes_only_a_client_it_created(
             self.collection = FakeCollection()
             self.close_calls = 0
 
-        def __getitem__(self, name: str) -> FakeDatabase:
+        def __getitem__(self, name: str) -> ClientDatabase:
             del name
-            return FakeDatabase(self.collection)
+            return ClientDatabase(self.collection)
 
         async def close(self) -> None:
             self.close_calls += 1

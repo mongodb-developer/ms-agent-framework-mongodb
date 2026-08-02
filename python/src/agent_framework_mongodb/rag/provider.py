@@ -4,15 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Mapping, Sequence
 from types import TracebackType
 from typing import Any, ClassVar, cast
 
 from agent_framework import ContextProvider, Message, SupportsGetEmbeddings
 from pymongo import AsyncMongoClient
+from pymongo import version as pymongo_version
 from pymongo.asynchronous.collection import AsyncCollection
 from pymongo.errors import ConnectionFailure, OperationFailure, PyMongoError
 
+from .._shared.capabilities import CapabilityResult
 from .._shared.client import MongoClientHandle
 from .._shared.embeddings import normalize_embeddings
 from .._shared.indexes import VectorIndexDefinition, VectorIndexManager
@@ -73,7 +76,7 @@ class MongoDBRAGProvider:
         collection_name: str = DEFAULT_COLLECTION_NAME,
         mongo_client: AsyncMongoClient[MongoDocument] | None = None,
         collection: AsyncCollection[MongoDocument] | None = None,
-        validate_index_before_search: bool = True,
+        capability_cache_ttl: float = 300.0,
         retrieval_timeout: float | None = None,
     ) -> None:
         """Initialize without contacting MongoDB or provisioning an index."""
@@ -83,10 +86,11 @@ class MongoDBRAGProvider:
         self.collection_name = _non_empty(collection_name, "collection_name")
         if collection is not None and mongo_client is not None:
             raise MongoDBConfigurationError("Provide either collection or mongo_client, not both.")
-        self.validate_index_before_search = _require_boolean(
-            validate_index_before_search,
-            "validate_index_before_search",
+        self.capability_cache_ttl = _positive_float(
+            capability_cache_ttl,
+            "capability_cache_ttl",
         )
+        self._capability_cache: tuple[float, CapabilityResult, BaseException | None] | None = None
         if retrieval_timeout is not None and (
             isinstance(retrieval_timeout, bool) or retrieval_timeout <= 0
         ):
@@ -97,6 +101,9 @@ class MongoDBRAGProvider:
         self.collection: AsyncCollection[MongoDocument] | None
         if collection is not None:
             self.collection = collection
+            actual_collection_name = getattr(collection, "name", None)
+            if isinstance(actual_collection_name, str) and actual_collection_name:
+                self.collection_name = actual_collection_name
         elif embedding_generator is None and mongo_client is None:
             # Preserve the contract-only construction supported by the preceding slice.
             self.collection = None
@@ -170,8 +177,14 @@ class MongoDBRAGProvider:
                 "configure an embedding generator and MongoDB collection."
             )
         effective = self.options.normalize_search_options(options)
-        if self.validate_index_before_search:
-            await self.validate_vector_search_index()
+        compiled_filter = (
+            compile_filter(effective.filter, self.options.mode)
+            if effective.filter is not None
+            else None
+        )
+        await self._validate_effective_vector_search_index(effective.filter)
+        if self.options.mode is MongoDBSearchMode.VECTOR_ENN:
+            await self.validate_capabilities()
         vector = await self._embed(query)
         vector_stage: MongoDocument = {
             "index": self.options.vector_index_name,
@@ -183,8 +196,8 @@ class MongoDBRAGProvider:
             vector_stage["exact"] = True
         else:
             vector_stage["numCandidates"] = effective.num_candidates
-        if effective.filter is not None:
-            vector_stage["filter"] = compile_filter(effective.filter, self.options.mode)
+        if compiled_filter is not None:
+            vector_stage["filter"] = compiled_filter
         pipeline: list[MongoDocument] = [
             {"$vectorSearch": vector_stage},
             {"$set": {"_ragScore": {"$meta": "vectorSearchScore"}}},
@@ -199,6 +212,100 @@ class MongoDBRAGProvider:
         if self.options.parent is not None:
             return await self._hydrate_parents(documents, effective)
         return [self._map_result(document) for document in documents]
+
+    async def validate_capabilities(self, *, refresh: bool = False) -> CapabilityResult:
+        """Validate exact Vector Search with public deployment commands and cache the result."""
+        if self.options.mode is not MongoDBSearchMode.VECTOR_ENN:
+            return CapabilityResult(name=self.options.mode.value, supported=True)
+        if self.collection is None:
+            raise MongoDBCapabilityError("MongoDB collection is not configured.")
+        now = time.monotonic()
+        cached = self._capability_cache
+        if not refresh and cached is not None and cached[0] > now:
+            return _require_capability(cached[1], cached[2])
+
+        database = cast(Any, self.collection).database
+        detected: dict[str, str] = {"driver": pymongo_version}
+        try:
+            build_info = await database.command("buildInfo")
+            hello = await database.command("hello")
+            if isinstance(build_info, Mapping):
+                build_info_mapping = cast(Mapping[str, object], build_info)
+                server_version = build_info_mapping.get("version")
+                if isinstance(server_version, str):
+                    detected["server"] = server_version
+            if isinstance(hello, Mapping):
+                hello_mapping = cast(Mapping[str, object], hello)
+                topology = hello_mapping.get("msg")
+                if isinstance(topology, str):
+                    detected["deployment"] = f"hello.msg={topology}"
+                elif isinstance(hello_mapping.get("setName"), str):
+                    detected["deployment"] = "hello.setName-present"
+                elif hello_mapping.get("serviceId") is not None:
+                    detected["deployment"] = "hello.serviceId-present"
+                else:
+                    detected["deployment"] = "hello.response-received"
+            probe_vector = [1.0, *([0.0] * (cast(int, self.options.vector_dimensions) - 1))]
+            await database.command(
+                {
+                    "explain": {
+                        "aggregate": self.collection_name,
+                        "pipeline": [
+                            {
+                                "$vectorSearch": {
+                                    "index": self.options.vector_index_name,
+                                    "path": self.options.vector_field,
+                                    "queryVector": probe_vector,
+                                    "exact": True,
+                                    "limit": 1,
+                                }
+                            }
+                        ],
+                        "cursor": {},
+                    },
+                    "verbosity": "queryPlanner",
+                }
+            )
+        except asyncio.CancelledError:
+            raise
+        except OperationFailure as exc:
+            translated = _translate_mongo_error(exc)
+            if isinstance(
+                translated,
+                (
+                    MongoDBAuthorizationError,
+                    MongoDBIndexMismatchError,
+                    MongoDBIndexMissingError,
+                    MongoDBIndexNotReadyError,
+                    MongoDBTransientRetrievalError,
+                ),
+            ):
+                raise translated from exc
+            result = CapabilityResult(
+                name="vector_enn",
+                supported=False,
+                remediation=(
+                    "Use vector ANN or enable exact Vector Search on the target deployment; "
+                    "verify the deployment and driver with MongoDB support documentation."
+                ),
+                detected_values=detected,
+            )
+            self._capability_cache = (
+                now + self.capability_cache_ttl,
+                result,
+                exc,
+            )
+            return _require_capability(result, exc)
+        except PyMongoError as exc:
+            raise _translate_mongo_error(exc) from exc
+
+        result = CapabilityResult(
+            name="vector_enn",
+            supported=True,
+            detected_values=detected,
+        )
+        self._capability_cache = (now + self.capability_cache_ttl, result, None)
+        return result
 
     async def _hydrate_parents(
         self,
@@ -223,6 +330,7 @@ class MongoDBRAGProvider:
                 scores[parent_id] = max(scores[parent_id], float(score))
         if not parent_ids:
             return []
+        relevance_order = {parent_id: rank for rank, parent_id in enumerate(parent_ids)}
         identifier_filter: MongoDocument = {parent.parent_document_id_field: {"$in": parent_ids}}
         match: MongoDocument = identifier_filter
         if effective.filter is not None:
@@ -232,23 +340,19 @@ class MongoDBRAGProvider:
                     compile_filter(effective.filter, self.options.mode),
                 ]
             }
-        pipeline: list[MongoDocument] = [
-            {"$match": match},
-            {"$limit": parent.max_parents},
-        ]
+        pipeline: list[MongoDocument] = [{"$match": match}]
         target = self.collection
         if parent.collection_name is not None:
             target = cast(Any, self.collection).database[parent.collection_name]
         try:
             cursor = await cast(Any, target).aggregate(pipeline)
-            documents = await cursor.to_list(length=parent.max_parents)
+            documents = await cursor.to_list(length=len(parent_ids))
         except asyncio.CancelledError:
             raise
         except PyMongoError as exc:
             raise _translate_mongo_error(exc) from exc
 
-        remaining_characters = parent.max_context_tokens * 4
-        results: list[MongoDBRAGResult] = []
+        hydrated: list[tuple[float, int, Mapping[str, Any], object, str]] = []
         for document in documents:
             identifier = _path(document, parent.parent_document_id_field)
             text = _path(document, parent.parent_text_field)
@@ -256,6 +360,20 @@ class MongoDBRAGProvider:
                 continue
             if not isinstance(text, str) or not text.strip():
                 raise MongoDBMappingError("Hydrated parent is missing configured parent text.")
+            hydrated.append(
+                (
+                    scores[identifier],
+                    relevance_order[identifier],
+                    document,
+                    identifier,
+                    text,
+                )
+            )
+        hydrated.sort(key=lambda item: (-item[0], item[1]))
+
+        remaining_characters = parent.max_context_tokens * 4
+        results: list[MongoDBRAGResult] = []
+        for score, _, document, identifier, text in hydrated[: parent.max_parents]:
             maximum = min(parent.max_parent_text_length, remaining_characters)
             if maximum <= 0:
                 break
@@ -270,7 +388,7 @@ class MongoDBRAGProvider:
                 MongoDBRAGResult(
                     id=identifier,
                     text=bounded_text,
-                    score=scores[identifier],
+                    score=score,
                     metadata=metadata,
                     raw_document=document,
                     source_name=(
@@ -285,7 +403,6 @@ class MongoDBRAGProvider:
                     ),
                 )
             )
-        results.sort(key=lambda item: item.score, reverse=True)
         return results
 
     def _map_result(self, document: Mapping[str, Any]) -> MongoDBRAGResult:
@@ -328,6 +445,12 @@ class MongoDBRAGProvider:
         """Validate the named vector index without mutating it."""
         await self._index_manager().validate(require_ready=require_ready)
 
+    async def _validate_effective_vector_search_index(
+        self,
+        effective_filter: MongoDBFilter | None,
+    ) -> None:
+        await self._index_manager_for_filter(effective_filter).validate(require_ready=True)
+
     async def ensure_vector_search_index(
         self,
         *,
@@ -343,6 +466,12 @@ class MongoDBRAGProvider:
         )
 
     def _index_manager(self) -> VectorIndexManager:
+        return self._index_manager_for_filter(self.options.filter)
+
+    def _index_manager_for_filter(
+        self,
+        expression: MongoDBFilter | None,
+    ) -> VectorIndexManager:
         if self.collection is None:
             raise MongoDBCapabilityError("MongoDB collection is not configured.")
         expected = VectorIndexDefinition(
@@ -350,7 +479,7 @@ class MongoDBRAGProvider:
             path=self.options.vector_field,
             dimensions=cast(int, self.options.vector_dimensions),
             similarity=self.options.similarity,
-            filter_paths=tuple(sorted(_filter_paths(self.options.filter))),
+            filter_paths=tuple(sorted(_filter_paths(expression))),
         )
         return VectorIndexManager(cast(Any, self.collection), expected)
 
@@ -565,13 +694,27 @@ def _filter_paths(expression: MongoDBFilter | None) -> set[str]:
     return set()
 
 
-def _require_boolean(value: object, name: str) -> bool:
-    if not isinstance(value, bool):
-        raise MongoDBConfigurationError(f"{name} must be a boolean.")
-    return value
-
-
 def _bounded_recent_count(value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 100:
         raise MongoDBConfigurationError("recent_message_count must be from 1 through 100.")
     return value
+
+
+def _require_capability(
+    result: CapabilityResult,
+    cause: BaseException | None,
+) -> CapabilityResult:
+    if result.supported:
+        return result
+    error = MongoDBCapabilityError(
+        f"MongoDB exact vector mode is unavailable; remediation: {result.remediation}"
+    )
+    if cause is not None:
+        raise error from cause
+    raise error
+
+
+def _positive_float(value: object, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        raise MongoDBConfigurationError(f"{name} must be a positive number.")
+    return float(value)

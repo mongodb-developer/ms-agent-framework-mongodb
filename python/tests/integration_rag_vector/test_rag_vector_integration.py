@@ -12,6 +12,7 @@ from pymongo import AsyncMongoClient
 from agent_framework_mongodb import (
     EqualFilter,
     MongoDBCapabilityError,
+    MongoDBIndexFailedError,
     MongoDBIndexNotReadyError,
     MongoDBRAGProvider,
     MongoDBRAGProviderOptions,
@@ -101,9 +102,18 @@ async def test_vector_rag_isolates_tenants_for_ann_and_enn(
                 timeout=180,
                 poll_interval=2,
             )
+            if mode is MongoDBSearchMode.VECTOR_ENN:
+                await provider.validate_capabilities(refresh=True)
             results = await provider.search("vector")
-        except (MongoDBCapabilityError, MongoDBIndexNotReadyError) as exc:
-            pytest.skip(f"{mode.value} capability unavailable: {type(exc).__name__}: {exc}")
+        except (
+            MongoDBCapabilityError,
+            MongoDBIndexFailedError,
+            MongoDBIndexNotReadyError,
+        ) as exc:
+            pytest.skip(
+                f"{mode.value} capability/index unavailable after public-command "
+                f"validation: {type(exc).__name__}: {exc}"
+            )
         assert [result.id for result in results] == ["authorized"]
         assert results[0].source_name == "Authorized guide"
     finally:

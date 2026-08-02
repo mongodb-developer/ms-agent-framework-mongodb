@@ -14,6 +14,7 @@ from pymongo.operations import SearchIndexModel
 from ..errors import (
     MongoDBAuthorizationError,
     MongoDBCapabilityError,
+    MongoDBIndexFailedError,
     MongoDBIndexMismatchError,
     MongoDBIndexMissingError,
     MongoDBIndexNotReadyError,
@@ -85,10 +86,16 @@ class VectorIndexManager:
             raise MongoDBIndexMissingError(
                 f"Vector Search index '{self.expected.name}' does not exist; create it explicitly."
             )
+        raw_status = inspected.get("status")
+        status = raw_status.upper() if isinstance(raw_status, str) else raw_status
+        if status == "FAILED":
+            raise MongoDBIndexFailedError(
+                f"Vector Search index '{self.expected.name}' is FAILED; remediation: "
+                "inspect the deployment index error, then explicitly update, drop, or recreate "
+                "the index definition."
+            )
         self._validate_definition(inspected)
-        if require_ready and (
-            inspected.get("status") != "READY" or inspected.get("queryable") is not True
-        ):
+        if require_ready and (status != "READY" or inspected.get("queryable") is not True):
             raise MongoDBIndexNotReadyError(
                 f"Vector Search index '{self.expected.name}' is not READY and queryable."
             )
