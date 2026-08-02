@@ -251,4 +251,15 @@ public sealed class MongoDBRAGProviderOptions
             throw new MongoDBConfigurationException($"{name} must not be negative.");
         }
     }
+
+    /// <summary>Requires a non-empty, non-whitespace string, used to validate constructor arguments.</summary>
+    internal static string RequireText(string value, string name)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            throw new MongoDBConfigurationException($"{name} must not be empty.");
+        }
+
+        return value;
+    }
 }

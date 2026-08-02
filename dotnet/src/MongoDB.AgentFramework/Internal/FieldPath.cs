@@ -51,6 +51,22 @@ internal static class FieldPath
 
     public static BsonValue Resolve(BsonDocument document, string path)
     {
+        if (!TryResolve(document, path, out BsonValue? value))
+        {
+            throw new MongoDBMappingException(
+                $"Required field '{path}' is missing from the result.");
+        }
+
+        return value!;
+    }
+
+    /// <summary>
+    /// Resolves a validated field path without throwing when a segment is missing or an intermediate value is not
+    /// a document, so optional fields (source name/URL, metadata) can resolve to <see langword="null"/>/empty
+    /// values instead of failing the whole mapping.
+    /// </summary>
+    public static bool TryResolve(BsonDocument document, string path, out BsonValue? value)
+    {
         ArgumentNullException.ThrowIfNull(document);
         Validate(path);
 
@@ -60,13 +76,14 @@ internal static class FieldPath
             if (!current.IsBsonDocument ||
                 !current.AsBsonDocument.TryGetValue(segment, out BsonValue? next))
             {
-                throw new MongoDBMappingException(
-                    $"Required field '{path}' is missing from the result.");
+                value = null;
+                return false;
             }
 
             current = next;
         }
 
-        return current;
+        value = current;
+        return true;
     }
 }
