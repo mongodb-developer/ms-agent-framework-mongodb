@@ -13,7 +13,7 @@ their proposed status does not override the specifications.
 `agent_framework_mongodb.history.MongoDBHistoryProvider` derives from the public
 `agent_framework.HistoryProvider`. `before_run` and `after_run` delegate loading,
 source attribution, and input/context/output selection to that base provider.
-`MongoDBHistoryProviderOptions` is frozen: tenant/application/agent authorization,
+`MongoDBHistoryProviderOptions` is frozen: tenant/application/agent/user authorization,
 the one permitted session, limits, retention, timeouts, and framework filter choices
 cannot change after construction. A session ID alone is not accepted as authorization.
 Service-managed AI history is rejected before replay to prevent duplicate ownership.
@@ -25,20 +25,36 @@ does not contact MongoDB or provision indexes.
 
 ## Stored schema, ordering, and replay
 
-Every authoritative message document has `_kind: "message"`, `schema_version: 1`,
-`framework_version: 1`, all configured scope fields, `session_id`, monotonic
-`sequence`, required internal `stable_message_id`, optional framework `message_id`,
-role, UTC `created_at`, optional `expires_at`, and the public `Message.to_json()`
-payload parsed as structured BSON-safe data under
-`message`. Replay uses `Message.from_dict()`. Raw service representations excluded
-by Agent Framework public serialization are intentionally not persisted.
+Every authoritative message document has `_kind: "message"`, `schema_version: 2`,
+`framework_version: 1`, all tenant/application/agent/user scope fields (including
+explicit `null` values), `scope_discriminator`, `session_id`, monotonic `sequence`,
+required internal `stable_message_id`, optional framework `message_id`, role, UTC
+`created_at`, optional `expires_at`, and the public `Message.to_json()` payload
+parsed as structured BSON-safe data under `message`. The discriminator hashes a
+canonical versioned representation of every scope dimension. Every MongoDB
+read/write/delete filter requires both it and the complete raw scope, so an absent
+dimension never behaves as a wildcard into a more-specific partition.
 
-An internal `_kind: "sequence"` document identifies the same complete scope.
-`find_one_and_update($inc, upsert=True, return_document=AFTER)` atomically assigns
-sequence ranges. Stable scoped document IDs and the message uniqueness index make
-retries idempotent; duplicate stored data is accepted only when its payload and
-versions agree. Messages without framework IDs retain `message_id: null` in their
-exact payload while a separate provider identity supports same-attempt retries.
+Replay uses `Message.from_dict()`. Raw service representations excluded by Agent
+Framework public serialization are intentionally not persisted. Schema version 1
+documents require migration because they lack the complete discriminator.
+
+Internal `_kind: "sequence"` and `_kind: "reservation"` documents identify the same
+complete scope. `find_one_and_update($inc, upsert=True, return_document=AFTER)`
+atomically assigns a range. Before inserting any message, the provider durably
+records that range under a retry-attempt token. A partial failure therefore retries
+the original message IDs and sequence slots rather than allocating a split range.
+Concurrent attempts receive separate tokens and ranges.
+
+Agent Framework provider state stores a versioned envelope of failed and in-flight
+attempts. Successful attempts are removed, so a later identical anonymous turn gets
+new identities; failed attempts retain their token and generated IDs. On restored
+sessions, orphaned in-flight attempts become retryable failed attempts. Malformed,
+unknown-version, and legacy `mongodb_history_pending_ids` state fails with migration
+guidance rather than ambiguously collapsing a legitimate turn. Stable scoped
+document IDs and the message uniqueness index make retries idempotent; duplicate
+stored data is accepted only when its payload, versions, and reserved sequence agree.
+Messages without framework IDs retain `message_id: null` in their exact payload.
 Latest-N reads filter the complete scope in MongoDB, sort descending, limit, then
 reverse the bounded result. Optional `max_age` adds a server-side `created_at`
 predicate. Tool calls and results remain separate ordered messages.
@@ -55,14 +71,19 @@ or driver text.
 `ensure_indexes()` is the only provisioning path. It creates regular MongoDB indexes,
 not Search indexes:
 
-1. unique tenant/application/agent/session/message identity;
-2. unique tenant/application/agent/session/sequence ordering;
-3. optional `expires_at` TTL with `expireAfterSeconds: 0`.
+1. unique `scope_discriminator`/session/message identity;
+2. unique `scope_discriminator`/session/sequence ordering;
+3. optional single-field `expires_at` TTL with `expireAfterSeconds: 0`.
 
-`validate_indexes()` is read-only. `clear_messages()` requires the configured
+All definitions require a partial filter for message documents with a string scope
+discriminator. `validate_indexes()` checks exact key order, uniqueness, partial
+filter semantics, and TTL configuration and provides recreate guidance for every
+mismatch.
+
+`clear_messages()` requires the configured
 authorization and exact session, deletes only that partition, resets its allocator,
-and returns the acknowledged message-document count. Applications must not clear a
-session concurrently with writes.
+removes retry reservations, and returns the acknowledged message-document count.
+Applications must not clear a session concurrently with writes.
 
 Runtime privileges require find, insert, update (allocator), and scoped delete.
 Provisioning additionally requires index-management privileges. Production

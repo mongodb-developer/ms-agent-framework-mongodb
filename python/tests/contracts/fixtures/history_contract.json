@@ -1,10 +1,11 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "framework_version": 1,
   "scope": {
     "tenant_id": "tenant-a",
     "application_id": "application-a",
     "agent_id": "agent-a",
+    "user_id": null,
     "session_id": "session-a"
   },
   "max_messages": 2,

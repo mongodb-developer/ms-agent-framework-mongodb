@@ -84,6 +84,7 @@ class MongoDBHistoryProviderOptions:
     tenant_id: str | None = None
     application_id: str | None = None
     agent_id: str | None = None
+    user_id: str | None = None
     max_messages: int = 100
     max_age: timedelta | None = None
     retention: timedelta | None = None
@@ -97,7 +98,7 @@ class MongoDBHistoryProviderOptions:
     store_outputs: bool = True
 
     def __post_init__(self) -> None:
-        for name in ("tenant_id", "application_id", "agent_id"):
+        for name in ("tenant_id", "application_id", "agent_id", "user_id"):
             object.__setattr__(self, name, _scope_value(getattr(self, name), name))
         object.__setattr__(
             self,
@@ -109,9 +110,9 @@ class MongoDBHistoryProviderOptions:
             "source_id",
             _required_scope_value(self.source_id, "source_id"),
         )
-        if not any((self.tenant_id, self.application_id, self.agent_id)):
+        if not any((self.tenant_id, self.application_id, self.agent_id, self.user_id)):
             raise MongoDBConfigurationError(
-                "At least one tenant_id, application_id, or agent_id "
+                "At least one tenant_id, application_id, agent_id, or user_id "
                 "authorization scope is required."
             )
         if type(self.max_messages) is not int:
@@ -140,7 +141,7 @@ class MongoDBHistoryProviderOptions:
 class MongoDBHistoryProvider(HistoryProvider):
     """Persist and replay an authorized exact Agent Framework transcript."""
 
-    SCHEMA_VERSION: ClassVar[int] = 1
+    SCHEMA_VERSION: ClassVar[int] = 2
     FRAMEWORK_SERIALIZATION_VERSION: ClassVar[int] = 1
     DEFAULT_DATABASE_NAME: ClassVar[str] = "agent_framework"
     DEFAULT_COLLECTION_NAME: ClassVar[str] = "chat_history"
@@ -170,7 +171,8 @@ class MongoDBHistoryProvider(HistoryProvider):
         self.options = options
         self.database_name = cast(str, _scope_value(database_name, "database_name"))
         self.collection_name = cast(str, _scope_value(collection_name, "collection_name"))
-        self._direct_message_ids: dict[int, tuple[Message, str]] = {}
+        self._direct_retry_state: dict[str, Any] = {}
+        self._active_retry_attempts: set[str] = set()
         self._client_handle: MongoClientHandle | None
         if collection is not None:
             self._client_handle = None
@@ -199,13 +201,15 @@ class MongoDBHistoryProvider(HistoryProvider):
             raise MongoDBConfigurationError(
                 "The requested session_id does not match this provider's authorized session."
             )
+        dimensions = {
+            name: getattr(self.options, name)
+            for name in ("tenant_id", "application_id", "agent_id", "user_id")
+        }
         scope: MongoDocument = {
+            "scope_discriminator": _canonical_hash({"version": 1, "dimensions": dimensions}),
+            **dimensions,
             "session_id": self.options.session_id,
         }
-        for name in ("tenant_id", "application_id", "agent_id"):
-            value = getattr(self.options, name)
-            if value is not None:
-                scope[name] = value
         return scope
 
     @staticmethod
@@ -317,63 +321,143 @@ class MongoDBHistoryProvider(HistoryProvider):
         messages: Sequence[Message],
         state: dict[str, Any] | None,
     ) -> None:
-        pending: list[tuple[str, str, Message, MongoDocument]] = []
-        for ordinal, message in enumerate(messages):
-            payload = _serialize_message(message)
-            stable_message_id = _stable_message_id(
-                message,
-                scope,
-                messages,
-                ordinal,
-                state,
-                self._direct_message_ids,
-            )
-            document_id = _document_id(scope, stable_message_id)
-            existing = await self.collection.find_one({"_id": document_id})
-            candidate_identity: MongoDocument = {
-                "schema_version": self.SCHEMA_VERSION,
-                "framework_version": self.FRAMEWORK_SERIALIZATION_VERSION,
-                "stable_message_id": stable_message_id,
-                "message_id": message.message_id,
-                "message": payload,
-            }
-            if existing is not None:
-                _validate_duplicate(existing, candidate_identity)
-                continue
-            pending.append((document_id, stable_message_id, message, payload))
-        if not pending:
-            return
-        first_sequence = await self._allocate_sequence(scope, len(pending))
-        for offset, (document_id, stable_message_id, message, payload) in enumerate(pending):
-            now = datetime.now(timezone.utc)
-            document: MongoDocument = {
-                "_id": document_id,
-                "_kind": "message",
-                "schema_version": self.SCHEMA_VERSION,
-                "framework_version": self.FRAMEWORK_SERIALIZATION_VERSION,
-                **scope,
-                "sequence": first_sequence + offset,
-                "stable_message_id": stable_message_id,
-                "message_id": message.message_id,
-                "role": message.role,
-                "created_at": now,
-                "message": payload,
-            }
-            if self.options.retention is not None:
-                document["expires_at"] = now + self.options.retention
-            try:
-                await self.collection.insert_one(document)
-            except DuplicateKeyError:
-                existing = await self.collection.find_one(
-                    {
-                        "_kind": "message",
-                        **scope,
-                        "stable_message_id": stable_message_id,
-                    }
+        retry_state = state if state is not None else self._direct_retry_state
+        batch_fingerprint = _history_batch_fingerprint(messages, scope)
+        retry_attempt = _begin_history_retry_attempt(
+            retry_state,
+            batch_fingerprint,
+            self._active_retry_attempts,
+            token_hint=(
+                f"explicit:{batch_fingerprint}"
+                if all(message.message_id for message in messages)
+                else None
+            ),
+        )
+        _attempt_id, attempt = retry_attempt
+        try:
+            candidates: list[MongoDocument] = []
+            existing_by_id: dict[str, MongoDocument] = {}
+            retry_ids = cast(dict[str, Any], attempt["ids"])
+            for ordinal, message in enumerate(messages):
+                payload = _serialize_message(message)
+                stable_message_id = _stable_message_id(
+                    message,
+                    scope,
+                    ordinal,
+                    retry_ids,
                 )
-                if existing is None:
-                    raise
-                _validate_duplicate(existing, document)
+                document_id = _document_id(scope, stable_message_id)
+                candidate: MongoDocument = {
+                    "_id": document_id,
+                    "_kind": "message",
+                    "schema_version": self.SCHEMA_VERSION,
+                    "framework_version": self.FRAMEWORK_SERIALIZATION_VERSION,
+                    **scope,
+                    "stable_message_id": stable_message_id,
+                    "message_id": message.message_id,
+                    "role": message.role,
+                    "message": payload,
+                }
+                candidates.append(candidate)
+                existing = await self.collection.find_one(
+                    {"_id": document_id, "_kind": "message", **scope}
+                )
+                if existing is not None:
+                    _validate_duplicate(existing, candidate)
+                    existing_by_id[document_id] = existing
+
+            token = cast(str, attempt["token"])
+            if len(existing_by_id) == len(candidates):
+                await self._delete_reservation(scope, token)
+            else:
+                first_sequence = await self._reserve_sequence(
+                    scope,
+                    token=token,
+                    count=len(candidates),
+                )
+                now = datetime.now(timezone.utc)
+                for ordinal, candidate in enumerate(candidates):
+                    candidate["sequence"] = first_sequence + ordinal
+                    candidate["created_at"] = now
+                    if self.options.retention is not None:
+                        candidate["expires_at"] = now + self.options.retention
+                    existing = existing_by_id.get(cast(str, candidate["_id"]))
+                    if existing is not None:
+                        _validate_duplicate(existing, candidate, include_sequence=True)
+                        continue
+                    try:
+                        await self.collection.insert_one(candidate)
+                    except DuplicateKeyError:
+                        existing = await self.collection.find_one(
+                            {
+                                "_kind": "message",
+                                **scope,
+                                "stable_message_id": candidate["stable_message_id"],
+                            }
+                        )
+                        if existing is None:
+                            raise
+                        _validate_duplicate(existing, candidate, include_sequence=True)
+                await self._delete_reservation(scope, token)
+        except (asyncio.CancelledError, Exception):
+            _finish_history_retry_attempt(
+                retry_state,
+                batch_fingerprint,
+                retry_attempt,
+                self._active_retry_attempts,
+                succeeded=False,
+            )
+            raise
+        _finish_history_retry_attempt(
+            retry_state,
+            batch_fingerprint,
+            retry_attempt,
+            self._active_retry_attempts,
+            succeeded=True,
+        )
+
+    async def _reserve_sequence(
+        self,
+        scope: MongoDocument,
+        *,
+        token: str,
+        count: int,
+    ) -> int:
+        reservation_id = _reservation_id(scope, token)
+        reservation_filter = {
+            "_id": reservation_id,
+            "_kind": "reservation",
+            **scope,
+        }
+        existing = await self.collection.find_one(reservation_filter)
+        if existing is not None:
+            return _validate_reservation(existing, count)
+        first_sequence = await self._allocate_sequence(scope, count)
+        reservation: MongoDocument = {
+            **reservation_filter,
+            "schema_version": self.SCHEMA_VERSION,
+            "framework_version": self.FRAMEWORK_SERIALIZATION_VERSION,
+            "token": token,
+            "count": count,
+            "first_sequence": first_sequence,
+        }
+        try:
+            await self.collection.insert_one(reservation)
+        except DuplicateKeyError:
+            existing = await self.collection.find_one(reservation_filter)
+            if existing is None:
+                raise
+            return _validate_reservation(existing, count)
+        return first_sequence
+
+    async def _delete_reservation(self, scope: MongoDocument, token: str) -> None:
+        await self.collection.delete_one(
+            {
+                "_id": _reservation_id(scope, token),
+                "_kind": "reservation",
+                **scope,
+            }
+        )
 
     async def _allocate_sequence(self, scope: MongoDocument, count: int) -> int:
         counter_id = _counter_id(scope)
@@ -417,6 +501,11 @@ class MongoDBHistoryProvider(HistoryProvider):
                 self.options.persistence_timeout,
                 operation="persistence",
             )
+            await _with_timeout(
+                self.collection.delete_many({"_kind": "reservation", **scope}),
+                self.options.persistence_timeout,
+                operation="persistence",
+            )
         except asyncio.CancelledError:
             raise
         except MongoDBTimeoutError:
@@ -431,12 +520,13 @@ class MongoDBHistoryProvider(HistoryProvider):
     async def ensure_indexes(self) -> tuple[str, ...]:
         """Explicitly create regular uniqueness, ordering, and optional TTL indexes."""
         scope_keys = [
-            ("tenant_id", ASCENDING),
-            ("application_id", ASCENDING),
-            ("agent_id", ASCENDING),
+            ("scope_discriminator", ASCENDING),
             ("session_id", ASCENDING),
         ]
-        partial = {"_kind": "message"}
+        partial = {
+            "_kind": "message",
+            "scope_discriminator": {"$type": "string"},
+        }
         definitions: list[tuple[list[tuple[str, int]], MongoDocument]] = [
             (
                 [*scope_keys, ("stable_message_id", ASCENDING)],
@@ -485,21 +575,29 @@ class MongoDBHistoryProvider(HistoryProvider):
         except PyMongoError as exc:
             raise _translate_mongo_error(exc, "retrieval") from exc
         by_name = {str(index.get("name")): index for index in indexes}
+        partial = {
+            "_kind": "message",
+            "scope_discriminator": {"$type": "string"},
+        }
         required = {
-            "history_scoped_message_unique": (
-                ("tenant_id", 1),
-                ("application_id", 1),
-                ("agent_id", 1),
-                ("session_id", 1),
-                ("stable_message_id", 1),
-            ),
-            "history_scoped_sequence": (
-                ("tenant_id", 1),
-                ("application_id", 1),
-                ("agent_id", 1),
-                ("session_id", 1),
-                ("sequence", 1),
-            ),
+            "history_scoped_message_unique": {
+                "keys": (
+                    ("scope_discriminator", 1),
+                    ("session_id", 1),
+                    ("stable_message_id", 1),
+                ),
+                "unique": True,
+                "partial": partial,
+            },
+            "history_scoped_sequence": {
+                "keys": (
+                    ("scope_discriminator", 1),
+                    ("session_id", 1),
+                    ("sequence", 1),
+                ),
+                "unique": True,
+                "partial": partial,
+            },
         }
         for name, expected in required.items():
             index = by_name.get(name)
@@ -507,9 +605,20 @@ class MongoDBHistoryProvider(HistoryProvider):
                 raise MongoDBIndexMissingError(
                     f"Regular index '{name}' does not exist; create it explicitly."
                 )
-            if _index_keys(index) != expected:
+            if _index_keys(index) != expected["keys"]:
                 raise MongoDBIndexMismatchError(
-                    f"Regular index '{name}' does not match the required History definition."
+                    f"Regular index '{name}' has incompatible keys or key order; "
+                    "recreate it with ensure_indexes()."
+                )
+            if index.get("unique") is not expected["unique"]:
+                raise MongoDBIndexMismatchError(
+                    f"Regular index '{name}' has an incompatible unique flag; "
+                    "recreate it with ensure_indexes()."
+                )
+            if index.get("partialFilterExpression") != expected["partial"]:
+                raise MongoDBIndexMismatchError(
+                    f"Regular index '{name}' has an incompatible "
+                    "partialFilterExpression; recreate it with ensure_indexes()."
                 )
         if self.options.retention is not None:
             ttl = by_name.get("history_expiration_ttl")
@@ -517,9 +626,25 @@ class MongoDBHistoryProvider(HistoryProvider):
                 raise MongoDBIndexMissingError(
                     "Regular index 'history_expiration_ttl' does not exist; create it explicitly."
                 )
-            if _index_keys(ttl) != (("expires_at", 1),) or ttl.get("expireAfterSeconds") != 0:
+            if _index_keys(ttl) != (("expires_at", 1),):
                 raise MongoDBIndexMismatchError(
-                    "Regular index 'history_expiration_ttl' does not match the required definition."
+                    "Regular index 'history_expiration_ttl' has incompatible keys or key order; "
+                    "recreate it with ensure_indexes()."
+                )
+            if ttl.get("unique", False) is not False:
+                raise MongoDBIndexMismatchError(
+                    "Regular index 'history_expiration_ttl' must not be unique; "
+                    "recreate it with ensure_indexes()."
+                )
+            if ttl.get("partialFilterExpression") != partial:
+                raise MongoDBIndexMismatchError(
+                    "Regular index 'history_expiration_ttl' has an incompatible "
+                    "partialFilterExpression; recreate it with ensure_indexes()."
+                )
+            if ttl.get("expireAfterSeconds") != 0:
+                raise MongoDBIndexMismatchError(
+                    "Regular index 'history_expiration_ttl' has an incompatible "
+                    "expireAfterSeconds value; recreate it with ensure_indexes()."
                 )
 
     async def close(self) -> None:
@@ -596,40 +721,172 @@ def _message_from_document(document: Mapping[str, Any]) -> Message:
 def _stable_message_id(
     message: Message,
     scope: Mapping[str, Any],
-    batch: Sequence[Message],
     ordinal: int,
-    state: dict[str, Any] | None,
-    direct_message_ids: dict[int, tuple[Message, str]],
+    retry_ids: dict[str, Any],
 ) -> str:
     if message.message_id:
         return message.message_id
-    batch_key = _canonical_hash(
+    key = _canonical_hash(
         {
+            "ordinal": ordinal,
             "scope": dict(scope),
-            "messages": [_serialize_message(item) for item in batch],
+            "message": _serialize_message(message),
         }
     )
-    ids: dict[str, Any] | None = None
-    if state is not None:
-        raw_ids = state.setdefault("mongodb_history_pending_ids", {})
-        if not isinstance(raw_ids, dict):
-            raise MongoDBConfigurationError("History provider pending ID state is invalid.")
-        ids = cast(dict[str, Any], raw_ids)
-    key = f"{batch_key}:{ordinal}"
-    direct_entry = direct_message_ids.get(id(message))
-    existing = (
-        ids.get(key)
-        if ids is not None
-        else direct_entry[1]
-        if direct_entry is not None and direct_entry[0] is message
-        else None
-    )
+    existing = retry_ids.get(key)
     message_id = existing if isinstance(existing, str) else str(uuid.uuid4())
-    if ids is not None:
-        ids[key] = message_id
-    else:
-        direct_message_ids[id(message)] = (message, message_id)
+    retry_ids[key] = message_id
     return message_id
+
+
+def _history_batch_fingerprint(
+    messages: Sequence[Message],
+    scope: Mapping[str, Any],
+) -> str:
+    return _canonical_hash(
+        {
+            "scope": dict(scope),
+            "messages": [_serialize_message(message) for message in messages],
+        }
+    )
+
+
+def _begin_history_retry_attempt(
+    state: dict[str, Any],
+    batch_fingerprint: str,
+    active_attempts: set[str],
+    *,
+    token_hint: str | None,
+) -> tuple[str, dict[str, Any]]:
+    legacy = state.get("mongodb_history_pending_ids")
+    if legacy:
+        raise _invalid_history_retry_state(
+            "legacy mongodb_history_pending_ids cannot distinguish completed turns; "
+            "clear it after migration review"
+        )
+    if legacy is not None:
+        state.pop("mongodb_history_pending_ids", None)
+    batches = _normalize_history_retry_state(state, active_attempts)
+    batch = batches.setdefault(
+        batch_fingerprint,
+        {"failed": [], "in_flight": {}},
+    )
+    failed = cast(list[Any], batch["failed"])
+    in_flight = cast(dict[str, Any], batch["in_flight"])
+    attempt: dict[str, Any]
+    if failed:
+        attempt = cast(dict[str, Any], failed.pop(0))
+    else:
+        attempt = {"token": token_hint or str(uuid.uuid4()), "ids": {}}
+    attempt_id = str(uuid.uuid4())
+    in_flight[attempt_id] = attempt
+    active_attempts.add(attempt_id)
+    return attempt_id, attempt
+
+
+def _normalize_history_retry_state(
+    state: dict[str, Any],
+    active_attempts: set[str],
+) -> dict[str, dict[str, Any]]:
+    value = state.get("mongodb_history_pending_batches")
+    if value is None:
+        envelope: dict[str, Any] = {"version": 1, "batches": {}}
+        state["mongodb_history_pending_batches"] = envelope
+    elif not isinstance(value, dict):
+        raise _invalid_history_retry_state("state envelope must be a mapping")
+    else:
+        envelope = cast(dict[str, Any], value)
+    if set(envelope) != {"version", "batches"} or envelope.get("version") != 1:
+        raise _invalid_history_retry_state("state envelope version or fields are unsupported")
+    batches_value = envelope.get("batches")
+    if not isinstance(batches_value, dict):
+        raise _invalid_history_retry_state("batches must be a mapping")
+    raw_batches = cast(dict[object, object], batches_value)
+    batches = cast(dict[str, dict[str, Any]], batches_value)
+    for fingerprint, batch_value in raw_batches.items():
+        if not isinstance(fingerprint, str) or not fingerprint or not isinstance(batch_value, dict):
+            raise _invalid_history_retry_state("batch fingerprints and values are invalid")
+        batch = cast(dict[str, Any], batch_value)
+        if set(batch) != {"failed", "in_flight"}:
+            raise _invalid_history_retry_state("batch fields are unsupported")
+        failed_value = batch.get("failed")
+        in_flight_value = batch.get("in_flight")
+        if not isinstance(failed_value, list) or not isinstance(in_flight_value, dict):
+            raise _invalid_history_retry_state("attempt containers are invalid")
+        failed = cast(list[Any], failed_value)  # type: ignore[redundant-cast]
+        in_flight = cast(dict[str, Any], in_flight_value)
+        if not all(_is_history_retry_attempt(attempt) for attempt in failed):
+            raise _invalid_history_retry_state("failed attempts are invalid")
+        if not all(
+            isinstance(attempt_id, str) and bool(attempt_id) and _is_history_retry_attempt(attempt)
+            for attempt_id, attempt in cast(dict[object, object], in_flight_value).items()
+        ):
+            raise _invalid_history_retry_state("in-flight attempts are invalid")
+        for attempt_id, attempt in list(in_flight.items()):
+            if attempt_id not in active_attempts:
+                failed.append(attempt)
+                in_flight.pop(attempt_id)
+    return batches
+
+
+def _is_history_retry_attempt(value: object) -> bool:
+    if not isinstance(value, dict):
+        return False
+    raw_value = cast(dict[object, object], value)
+    if set(raw_value) != {"token", "ids"}:
+        return False
+    attempt = cast(dict[str, object], value)
+    token = attempt.get("token")
+    ids = attempt.get("ids")
+    return (
+        isinstance(token, str)
+        and bool(token)
+        and isinstance(ids, dict)
+        and all(
+            isinstance(key, str) and bool(key) and isinstance(message_id, str) and bool(message_id)
+            for key, message_id in cast(dict[object, object], ids).items()
+        )
+    )
+
+
+def _finish_history_retry_attempt(
+    state: dict[str, Any],
+    batch_fingerprint: str,
+    retry_attempt: tuple[str, dict[str, Any]],
+    active_attempts: set[str],
+    *,
+    succeeded: bool,
+) -> None:
+    attempt_id, attempt = retry_attempt
+    active_attempts.discard(attempt_id)
+    envelope_value = state.get("mongodb_history_pending_batches")
+    if not isinstance(envelope_value, dict):
+        return
+    envelope = cast(dict[str, Any], envelope_value)
+    batches_value = envelope.get("batches")
+    if not isinstance(batches_value, dict):
+        return
+    batches = cast(dict[str, Any], batches_value)
+    batch_value = batches.get(batch_fingerprint)
+    if not isinstance(batch_value, dict):
+        return
+    batch = cast(dict[str, Any], batch_value)
+    failed = cast(list[Any], batch.get("failed"))
+    in_flight = cast(dict[str, Any], batch.get("in_flight"))
+    in_flight.pop(attempt_id, None)
+    if not succeeded:
+        failed.append(attempt)
+    if not failed and not in_flight:
+        batches.pop(batch_fingerprint, None)
+    if not batches:
+        state.pop("mongodb_history_pending_batches", None)
+
+
+def _invalid_history_retry_state(detail: str) -> MongoDBConfigurationError:
+    return MongoDBConfigurationError(
+        "History provider retry state is invalid and requires migration: "
+        f"{detail}. Clear the affected retry state or restore a supported state version."
+    )
 
 
 def _document_id(scope: Mapping[str, Any], message_id: str) -> str:
@@ -640,6 +897,25 @@ def _counter_id(scope: Mapping[str, Any]) -> str:
     return f"history-sequence:{_canonical_hash(dict(scope))}"
 
 
+def _reservation_id(scope: Mapping[str, Any], token: str) -> str:
+    return f"history-reservation:{_canonical_hash({'scope': dict(scope), 'token': token})}"
+
+
+def _validate_reservation(document: Mapping[str, Any], expected_count: int) -> int:
+    if (
+        document.get("schema_version") != MongoDBHistoryProvider.SCHEMA_VERSION
+        or document.get("framework_version")
+        != MongoDBHistoryProvider.FRAMEWORK_SERIALIZATION_VERSION
+        or document.get("count") != expected_count
+        or not isinstance(document.get("first_sequence"), int)
+    ):
+        raise MongoDBPersistenceError(
+            "Stored History sequence reservation is incompatible; "
+            "clear the authorized session reservation after migration review."
+        )
+    return cast(int, document["first_sequence"])
+
+
 def _canonical_hash(value: object) -> str:
     return hashlib.sha256(
         json.dumps(
@@ -648,7 +924,12 @@ def _canonical_hash(value: object) -> str:
     ).hexdigest()
 
 
-def _validate_duplicate(existing: Mapping[str, Any], candidate: Mapping[str, Any]) -> None:
+def _validate_duplicate(
+    existing: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+    *,
+    include_sequence: bool = False,
+) -> None:
     for field in (
         "schema_version",
         "framework_version",
@@ -660,6 +941,11 @@ def _validate_duplicate(existing: Mapping[str, Any], candidate: Mapping[str, Any
             raise MongoDBPersistenceError(
                 "A duplicate History message identity contains incompatible stored data."
             )
+    if include_sequence and existing.get("sequence") != candidate.get("sequence"):
+        raise MongoDBPersistenceError(
+            "A duplicate History message identity has an incompatible sequence; "
+            "retry with the original sequence reservation."
+        )
 
 
 def _index_keys(index: Mapping[str, Any]) -> tuple[tuple[str, int], ...]:
