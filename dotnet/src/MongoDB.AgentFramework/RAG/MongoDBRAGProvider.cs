@@ -147,10 +147,13 @@ public sealed class MongoDBRAGProvider : IAsyncDisposable
     }
 
     /// <summary>
-    /// Validates every argument that does not require a MongoDB client first, so a validation failure never
-    /// leaves an owned client that nothing will ever dispose. Only after that validation succeeds does this
-    /// create the client and resolve the database/collection; if that later step throws, the client is disposed
-    /// here before rethrowing, since no <see cref="MongoDBRAGProvider"/> instance will ever exist to do it.
+    /// Validates every argument that does not require a MongoDB client first — including calling
+    /// <see cref="MongoDBRAGProviderOptions.Validate"/> directly, since the chained collection constructor only
+    /// validates <paramref name="options"/> indirectly through <c>Copy()</c>, which would otherwise run after a
+    /// client already exists — so a validation failure never leaves an owned client that nothing will ever
+    /// dispose. Only after that validation succeeds does this create the client and resolve the
+    /// database/collection; if that later step throws, the client is disposed here before rethrowing, since no
+    /// <see cref="MongoDBRAGProvider"/> instance will ever exist to do it.
     /// </summary>
     private static (OwnedResource<IMongoClient> Client, IMongoCollection<BsonDocument> Collection) Connect(
         string connectionString,
@@ -162,6 +165,7 @@ public sealed class MongoDBRAGProvider : IAsyncDisposable
         Func<string, IMongoClient>? clientFactory)
     {
         ArgumentNullException.ThrowIfNull(options);
+        options.Validate();
         EmbeddingValidator.ValidateDimensions(vectorDimensions);
         ArgumentNullException.ThrowIfNull(embeddingGenerator);
         string validDatabaseName = MongoDBRAGProviderOptions.RequireText(databaseName, nameof(databaseName));

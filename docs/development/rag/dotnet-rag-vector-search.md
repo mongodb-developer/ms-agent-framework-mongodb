@@ -57,16 +57,23 @@ ID, and raw BSON all remain reachable without inventing a narrower, lossy repres
 
 ## Connection-string constructor exception safety
 
-The connection-string constructor validates every argument that does not require a MongoDB client (`options`,
-`vectorDimensions`, `embeddingGenerator`, `databaseName`, `collectionName`) **before** creating one, so a validation
-failure never creates a client with nothing left to dispose it. Only after that validation succeeds does the private
+The connection-string constructor validates every argument that does not require a MongoDB client (`options` —
+including calling `MongoDBRAGProviderOptions.Validate()` directly, not only implicitly through the chained
+collection constructor's `Copy()` — `vectorDimensions`, `embeddingGenerator`, `databaseName`, `collectionName`)
+**before** creating one, so a validation failure never creates a client with nothing left to dispose it. Calling
+`Validate()` directly matters because the chained collection constructor only validates `options` indirectly
+through `Copy()` (which calls `Validate()` internally), and that call happens after `Connect` has already handed
+off an owned, live client — an invalid-but-non-null `options` (for example, an out-of-range `TopK`) would otherwise
+still reach the client factory before failing. Only after all of this validation succeeds does the private
 `Connect` helper create the owned client and resolve the database/collection; if that later step throws (for
 example, the driver rejecting a database/collection name), `Connect` disposes the just-created client itself before
 rethrowing — no `MongoDBRAGProvider` instance is ever returned to the caller in that case, so the constructor is the
 only place that can prevent the leak. An internal-only constructor overload accepting a `Func<string, IMongoClient>?
 clientFactory` (mirroring `MongoClientFactory.FromConnectionString`'s existing override parameter) lets
-`MongoDBRAGProviderLifecycleTests` substitute a client whose `GetDatabase` call fails, proving the disposal without
-needing a live MongoDB deployment.
+`MongoDBRAGProviderLifecycleTests` substitute a client whose `GetDatabase` call fails, or assert the factory is
+never invoked at all for an argument/options validation failure, proving both without needing a live MongoDB
+deployment. `Validate()` is read-only, so calling it once in `Connect` and again inside `Copy()` is redundant but
+harmless — it does not change what gets validated or how many times `options` itself is mutated (never).
 
 ## ANN/ENN pipeline
 
@@ -184,9 +191,10 @@ Tests live under `dotnet/tests/MongoDB.AgentFramework.Tests/RAG/` and were writt
   mutual exclusivity, stage ordering, and asserts the pipeline has exactly two stages with **no** trailing
   `$project` stage, so the complete document survives to `MapResult`.
 - `MongoDBRAGProviderLifecycleTests` — constructor ownership (injected vs. connection-string), vector-dimension
-  validation, invalid-options rejection, null-argument rejection across all four constructors, argument validation
-  running before a client is created (proven with an internal `clientFactory` test seam that must never be
-  invoked), and disposal of the owned client when a later step (resolving the database/collection) fails.
+  validation, invalid-options rejection, null-argument rejection across all four constructors, argument and
+  **options** validation running before a client is created (proven with an internal `clientFactory` test seam
+  that must never be invoked, including for an invalid-but-non-null `options` such as an out-of-range `TopK`), and
+  disposal of the owned client when a later step (resolving the database/collection) fails.
 - `MongoDBRAGProviderSearchTests` — ANN/ENN filter-in-stage placement, `numCandidates`/`limit`/`exact` wiring,
   capability gating before any embedding/network call, empty-query rejection, embedding dimension/finiteness
   validation, missing-ID/missing-text mapping errors (each fixture now includes a valid `_ragScore` so the test

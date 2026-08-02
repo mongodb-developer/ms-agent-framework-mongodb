@@ -83,6 +83,33 @@ public sealed class MongoDBRAGProviderLifecycleTests
     }
 
     [Fact]
+    public void ConnectionStringConstructorValidatesOptionsBeforeCreatingAClient()
+    {
+        bool clientFactoryInvoked = false;
+
+        // TopK is a "no client required" options failure that MongoDBRAGProviderOptions.Copy() (called from the
+        // chained collection constructor) would eventually catch via its own internal Validate() call -- but only
+        // after Connect has already created and handed off an owned client. Options.Validate() must run in Connect
+        // itself before the client is created, exactly like every other client-independent argument, or this
+        // failure mode creates a client with nothing left to dispose it.
+        Assert.Throws<MongoDBConfigurationException>(() => new MongoDBRAGProvider(
+            "mongodb://localhost:27017",
+            "database",
+            "chunks",
+            new RecordingEmbeddingGenerator(),
+            3,
+            new MongoDBRAGProviderOptions { SearchMode = MongoDBSearchMode.VectorAnn, TopK = -1 },
+            logger: null,
+            clientFactory: _ =>
+            {
+                clientFactoryInvoked = true;
+                return FakeMongoClientProxy.Create(new FakeMongoClientState());
+            }));
+
+        Assert.False(clientFactoryInvoked);
+    }
+
+    [Fact]
     public void NonPositiveVectorDimensionsAreRejected()
     {
         Assert.Throws<MongoDBConfigurationException>(() => new MongoDBRAGProvider(
