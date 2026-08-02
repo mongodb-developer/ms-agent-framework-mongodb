@@ -47,7 +47,19 @@ class Collection:
         )
 
     async def insert_one(self, document: dict[str, Any]) -> object:
+        if any(existing["_id"] == document["_id"] for existing in self.documents):
+            from pymongo.errors import DuplicateKeyError
+
+            raise DuplicateKeyError("duplicate")
         self.documents.append(document)
+        return object()
+
+    async def delete_one(self, query: dict[str, Any]) -> object:
+        self.documents = [
+            document
+            for document in self.documents
+            if not all(document.get(key) == value for key, value in query.items())
+        ]
         return object()
 
     def find(self, query: dict[str, Any]) -> Cursor:
@@ -72,6 +84,7 @@ async def test_language_neutral_history_order_and_retry_contract() -> None:
             tenant_id=scope["tenant_id"],
             application_id=scope["application_id"],
             agent_id=scope["agent_id"],
+            user_id=scope["user_id"],
             session_id=scope["session_id"],
             max_messages=fixture["max_messages"],
         ),
