@@ -140,6 +140,7 @@ class MongoDBMemoryContextProvider(ContextProvider):
             raise MongoDBConfigurationError("retention must be a positive duration.")
         self.retention = retention
         self._direct_retry_state: dict[str, Any] = {}
+        self._active_retry_attempts: set[str] = set()
 
         self.embedding_generator = embedding_generator
         self._client_handle: MongoClientHandle | None
@@ -308,7 +309,11 @@ class MongoDBMemoryContextProvider(ContextProvider):
         retry_state = state if state is not None else self._direct_retry_state
         batch_fingerprint = _batch_fingerprint(eligible, scope=scope)
         retry_attempt = (
-            _begin_retry_attempt(retry_state, batch_fingerprint)
+            _begin_retry_attempt(
+                retry_state,
+                batch_fingerprint,
+                self._active_retry_attempts,
+            )
             if any(not message.message_id for message in eligible)
             else None
         )
@@ -342,6 +347,7 @@ class MongoDBMemoryContextProvider(ContextProvider):
                 retry_state,
                 batch_fingerprint,
                 retry_attempt,
+                self._active_retry_attempts,
                 succeeded=True,
             )
             return len(result.inserted_ids)
@@ -350,6 +356,7 @@ class MongoDBMemoryContextProvider(ContextProvider):
                 retry_state,
                 batch_fingerprint,
                 retry_attempt,
+                self._active_retry_attempts,
                 succeeded=False,
             )
             raise
@@ -366,6 +373,7 @@ class MongoDBMemoryContextProvider(ContextProvider):
                     retry_state,
                     batch_fingerprint,
                     retry_attempt,
+                    self._active_retry_attempts,
                     succeeded=True,
                 )
                 return int(details.get("nInserted", 0))
@@ -373,6 +381,7 @@ class MongoDBMemoryContextProvider(ContextProvider):
                 retry_state,
                 batch_fingerprint,
                 retry_attempt,
+                self._active_retry_attempts,
                 succeeded=False,
             )
             raise MongoDBPersistenceError("MongoDB Memory persistence failed.") from exc
@@ -381,6 +390,7 @@ class MongoDBMemoryContextProvider(ContextProvider):
                 retry_state,
                 batch_fingerprint,
                 retry_attempt,
+                self._active_retry_attempts,
                 succeeded=False,
             )
             raise MongoDBPersistenceError("MongoDB Memory persistence failed.") from exc
@@ -789,11 +799,9 @@ def _batch_fingerprint(
 def _begin_retry_attempt(
     state: dict[str, Any],
     batch_fingerprint: str,
+    active_attempts: set[str],
 ) -> tuple[str, dict[str, Any]]:
-    retry_batches_value = state.setdefault("memory_pending_batches", {})
-    if not isinstance(retry_batches_value, dict):
-        raise MongoDBConfigurationError("Memory provider retry state is invalid.")
-    retry_batches = cast(dict[str, Any], retry_batches_value)
+    retry_batches = _normalize_retry_batches(state, active_attempts)
     batch_value = retry_batches.setdefault(
         batch_fingerprint,
         {"failed": [], "in_flight": {}},
@@ -815,18 +823,88 @@ def _begin_retry_attempt(
         retry_ids = cast(dict[str, Any], failed_ids)
     attempt_id = str(uuid.uuid4())
     in_flight[attempt_id] = retry_ids
+    active_attempts.add(attempt_id)
     return attempt_id, retry_ids
+
+
+def _normalize_retry_batches(
+    state: dict[str, Any],
+    active_attempts: set[str],
+) -> dict[str, Any]:
+    retry_batches_value = state.setdefault("memory_pending_batches", {})
+    if not isinstance(retry_batches_value, dict):
+        raise _invalid_retry_state("memory_pending_batches must be a mapping")
+    raw_retry_batches = cast(dict[object, object], retry_batches_value)
+    retry_batches = cast(dict[str, Any], retry_batches_value)
+    for batch_fingerprint, batch_value in list(raw_retry_batches.items()):
+        if not isinstance(batch_fingerprint, str) or not isinstance(batch_value, dict):
+            raise _invalid_retry_state("batch fingerprints and batch values must be mappings")
+        batch = cast(dict[str, Any], batch_value)
+        failed: list[Any]
+        in_flight: dict[str, Any]
+        if set(batch) == {"failed", "in_flight"}:
+            failed_value = batch["failed"]
+            in_flight_value = batch["in_flight"]
+            if not isinstance(failed_value, list) or not isinstance(in_flight_value, dict):
+                raise _invalid_retry_state("current batch fields have invalid types")
+            failed = cast(list[Any], failed_value)  # type: ignore[redundant-cast]
+            in_flight = cast(dict[str, Any], in_flight_value)
+            if not all(_is_retry_id_map(value) for value in failed):
+                raise _invalid_retry_state("failed attempts contain invalid IDs")
+            raw_in_flight = cast(dict[object, object], in_flight_value)
+            if not all(
+                isinstance(attempt_id, str) and _is_retry_id_map(value)
+                for attempt_id, value in raw_in_flight.items()
+            ):
+                raise _invalid_retry_state("in-flight attempts contain invalid IDs")
+        elif batch and _is_retry_id_map(batch):
+            failed = [dict(batch)]
+            in_flight = {}
+            retry_batches[batch_fingerprint] = {
+                "failed": failed,
+                "in_flight": in_flight,
+            }
+        else:
+            raise _invalid_retry_state("batch shape is unknown")
+        for attempt_id, retry_ids in list(in_flight.items()):
+            if attempt_id not in active_attempts:
+                failed.append(retry_ids)
+                in_flight.pop(attempt_id)
+    return retry_batches
+
+
+def _is_retry_id_map(value: object) -> bool:
+    if not isinstance(value, dict) or not value:
+        return False
+    retry_ids = cast(Mapping[object, object], value)
+    return all(
+        isinstance(fingerprint, str)
+        and bool(fingerprint)
+        and isinstance(memory_id, str)
+        and bool(memory_id)
+        for fingerprint, memory_id in retry_ids.items()
+    )
+
+
+def _invalid_retry_state(detail: str) -> MongoDBConfigurationError:
+    return MongoDBConfigurationError(
+        "Memory provider pending batch state is invalid and cannot be migrated: "
+        f"{detail}. Clear memory_pending_batches or restore a supported state version."
+    )
 
 
 def _finish_retry_attempt(
     state: dict[str, Any],
     batch_fingerprint: str,
     retry_attempt: tuple[str, dict[str, Any]] | None,
+    active_attempts: set[str],
     *,
     succeeded: bool,
 ) -> None:
     if retry_attempt is None:
         return
+    attempt_id, retry_ids = retry_attempt
+    active_attempts.discard(attempt_id)
     retry_batches_value = state.get("memory_pending_batches")
     if not isinstance(retry_batches_value, dict):
         return
@@ -841,7 +919,6 @@ def _finish_retry_attempt(
         return
     failed = cast(list[Any], failed_value)  # type: ignore[redundant-cast]
     in_flight = cast(dict[str, Any], in_flight_value)
-    attempt_id, retry_ids = retry_attempt
     in_flight.pop(attempt_id, None)
     if not succeeded:
         failed.append(retry_ids)

@@ -310,6 +310,80 @@ async def test_cancelled_store_preserves_fallback_ids_for_retry() -> None:
     assert state == {}
 
 
+async def test_restored_session_retries_orphaned_in_flight_ids() -> None:
+    collection = BlockingInsertCollection()
+    memory = provider(collection)
+    session = AgentSession(session_id="session-1")
+    session.state[memory.source_id] = {}
+    provider_state = cast(dict[str, Any], session.state[memory.source_id])
+    messages = [Message("user", ["persisted in-flight content"])]
+
+    pending = asyncio.create_task(
+        memory.store(messages, session_id=session.session_id, state=provider_state)
+    )
+    await asyncio.wait_for(collection.insert_entered.wait(), timeout=1)
+    orphaned_id = collection.insert_attempts[0][0]["_id"]
+    restored = AgentSession.from_dict(session.to_dict())
+    restored_state = cast(dict[str, Any], restored.state[memory.source_id])
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+
+    collection.release_insert.set()
+    restored_memory = provider(collection)
+    await restored_memory.store(
+        messages,
+        session_id=restored.session_id,
+        state=restored_state,
+    )
+
+    assert collection.insert_attempts[1][0]["_id"] == orphaned_id
+    assert restored_state == {}
+
+
+async def test_prior_pending_state_shape_migrates_and_reuses_ids() -> None:
+    collection = FakeCollection()
+    memory = provider(collection)
+    state: dict[str, Any] = {}
+    messages = [Message("user", ["legacy pending content"])]
+    collection.fail_writes = True
+
+    with pytest.raises(MongoDBPersistenceError):
+        await memory.store(messages, session_id="session-1", state=state)
+    failed_id = collection.insert_attempts[0][0]["_id"]
+    batches = cast(dict[str, Any], state["memory_pending_batches"])
+    batch_fingerprint, current_batch = next(iter(batches.items()))
+    failed_ids = cast(dict[str, str], current_batch["failed"][0])
+    legacy_state = {"memory_pending_batches": {batch_fingerprint: failed_ids}}
+
+    collection.fail_writes = False
+    await memory.store(messages, session_id="session-1", state=legacy_state)
+
+    assert collection.insert_attempts[1][0]["_id"] == failed_id
+    assert legacy_state == {}
+
+
+async def test_malformed_pending_state_fails_with_migration_guidance() -> None:
+    collection = FakeCollection()
+    memory = provider(collection)
+    state: dict[str, Any] = {}
+    messages = [Message("user", ["malformed state content"])]
+    collection.fail_writes = True
+    with pytest.raises(MongoDBPersistenceError):
+        await memory.store(messages, session_id="session-1", state=state)
+    batches = cast(dict[str, Any], state["memory_pending_batches"])
+    batch_fingerprint = next(iter(batches))
+    malformed_state: dict[str, Any] = {
+        "memory_pending_batches": {batch_fingerprint: {"unknown": []}}
+    }
+
+    with pytest.raises(
+        MongoDBConfigurationError,
+        match="cannot be migrated",
+    ):
+        await memory.store(messages, session_id="session-1", state=malformed_state)
+
+
 async def test_direct_failures_surface_stable_errors_with_driver_causes() -> None:
     collection = FakeCollection()
     collection.fail_reads = True

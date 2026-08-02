@@ -45,6 +45,30 @@ separate in-flight attempt slots, while failed slots retain their IDs for the
 next retry. Cancellation moves an in-flight slot to failed state before it
 propagates.
 
+The provider state is JSON-native so `AgentSession.to_dict()` can persist it:
+
+```json
+{
+  "memory_pending_batches": {
+    "<batch fingerprint>": {
+      "failed": [{"<message fingerprint>": "<memory UUID>"}],
+      "in_flight": {
+        "<attempt UUID>": {"<message fingerprint>": "<memory UUID>"}
+      }
+    }
+  }
+}
+```
+
+Attempt UUIDs that are not active in the current provider instance are treated
+as orphaned after session restoration and moved to `failed` before the next
+attempt claims their IDs. The immediately preceding state shape, where each
+batch fingerprint mapped directly to its message-fingerprint/UUID mapping, is
+migrated to one failed slot on read. Unknown or malformed shapes raise
+`MongoDBConfigurationError` with guidance to clear
+`memory_pending_batches` or restore a supported state version; they are never
+silently discarded.
+
 `search()` embeds one non-empty query and builds structured BSON for either ANN
 (`numCandidates`) or ENN (`exact: true`). The scope filter is inside
 `$vectorSearch`, before limiting. It returns Agent Framework `Message` values
