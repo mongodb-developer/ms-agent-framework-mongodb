@@ -1,0 +1,19 @@
+{
+  "schema_version": 2,
+  "framework_version": 1,
+  "scope": {
+    "tenant_id": "tenant-a",
+    "application_id": "application-a",
+    "agent_id": "agent-a",
+    "user_id": null,
+    "session_id": "session-a"
+  },
+  "max_messages": 2,
+  "messages": [
+    {"role": "user", "message_id": "message-1", "text": "first"},
+    {"role": "assistant", "message_id": "message-2", "text": "second"},
+    {"role": "tool", "message_id": "message-3", "text": "third"}
+  ],
+  "expected_latest_chronological_ids": ["message-2", "message-3"],
+  "retry_expected_document_count": 3
+}

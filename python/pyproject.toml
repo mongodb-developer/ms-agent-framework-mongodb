@@ -35,6 +35,7 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
     "integration_memory: requires a credentialed MongoDB deployment with Vector Search",
+    "integration_history: requires a credentialed MongoDB deployment",
 ]
 
 [tool.ruff]

@@ -18,6 +18,7 @@ from .errors import (
     MongoDBTransientPersistenceError,
     MongoDBTransientRetrievalError,
 )
+from .history import MongoDBHistoryProvider, MongoDBHistoryProviderOptions
 from .memory import MemoryMetadata, MemoryMetadataPage, MongoDBMemoryContextProvider
 
 __all__ = [
@@ -32,6 +33,8 @@ __all__ = [
     "MongoDBIndexNotReadyError",
     "MongoDBIntegrationError",
     "MongoDBMappingError",
+    "MongoDBHistoryProvider",
+    "MongoDBHistoryProviderOptions",
     "MongoDBMemoryContextProvider",
     "MongoDBPersistenceError",
     "MongoDBRetrievalError",
