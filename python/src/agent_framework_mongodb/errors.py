@@ -25,6 +25,10 @@ class MongoDBMappingError(MongoDBIntegrationError):
     """Raised when a MongoDB document cannot be mapped safely."""
 
 
+class MongoDBFilterTranslationError(MongoDBIntegrationError):
+    """Raised when a mandatory filter cannot be translated completely."""
+
+
 class MongoDBAuthorizationError(MongoDBIntegrationError):
     """Raised when MongoDB authentication or authorization fails."""
 

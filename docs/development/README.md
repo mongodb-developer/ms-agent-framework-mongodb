@@ -16,3 +16,7 @@ This documentation explains the implemented system at the code level. The
 ## Chat History
 
 - [Python Chat History implementation](history/python-history.md)
+
+## RAG
+
+- [Python RAG contracts and typed filters](rag/python-contracts.md)
