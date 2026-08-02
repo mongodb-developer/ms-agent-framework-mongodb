@@ -9,17 +9,17 @@ using MongoDB.Driver;
 namespace MongoDB.AgentFramework;
 
 /// <summary>
-/// Executes direct MongoDB RAG retrieval (<see cref="MongoDBSearchMode.VectorAnn"/> and
-/// <see cref="MongoDBSearchMode.VectorEnn"/> in this release) through the public
-/// <see cref="SearchAsync(string, CancellationToken)"/> seam. Authorization and multitenancy are expressed entirely
-/// through the immutable <see cref="MongoDBRAGProviderOptions.MandatoryFilter"/>, translated into every active
-/// retrieval branch; there is no separate scope/state concept as in <see cref="MongoDBMemoryProvider"/> because RAG
-/// retrieval is read-only and stateless per call.
+/// Executes direct MongoDB RAG retrieval (<see cref="MongoDBSearchMode.VectorAnn"/>,
+/// <see cref="MongoDBSearchMode.VectorEnn"/>, and <see cref="MongoDBSearchMode.FullText"/> in this release) through
+/// the public <see cref="SearchAsync(string, CancellationToken)"/> seam. Authorization and multitenancy are
+/// expressed entirely through the immutable <see cref="MongoDBRAGProviderOptions.MandatoryFilter"/>, translated
+/// into every active retrieval branch; there is no separate scope/state concept as in
+/// <see cref="MongoDBMemoryProvider"/> because RAG retrieval is read-only and stateless per call.
 /// </summary>
 public sealed class MongoDBRAGProvider : IAsyncDisposable
 {
     private readonly IMongoCollection<BsonDocument> _collection;
-    private readonly IEmbeddingGenerator<string, Embedding<float>> _embeddingGenerator;
+    private readonly IEmbeddingGenerator<string, Embedding<float>>? _embeddingGenerator;
     private readonly MongoDBRAGProviderOptions _options;
     private readonly int _vectorDimensions;
     private readonly OwnedResource<IMongoClient>? _client;
@@ -147,6 +147,121 @@ public sealed class MongoDBRAGProvider : IAsyncDisposable
     }
 
     /// <summary>
+    /// Creates a <see cref="MongoDBSearchMode.FullText"/>-only provider over an injected database, which remains
+    /// caller-owned. This overload accepts no embedding generator or vector dimensions: unlike the vector-family
+    /// constructors, it never embeds a query, so a caller that only needs <see cref="MongoDBSearchMode.FullText"/>
+    /// retrieval is not required to supply an <see cref="IEmbeddingGenerator{TInput,TEmbedding}"/> it would never
+    /// use. <paramref name="options"/> must configure <see cref="MongoDBSearchMode.FullText"/>.
+    /// </summary>
+    /// <exception cref="MongoDBConfigurationException">
+    /// <paramref name="options"/> configures a mode other than <see cref="MongoDBSearchMode.FullText"/>.
+    /// </exception>
+    public MongoDBRAGProvider(
+        IMongoDatabase database,
+        string collectionName,
+        MongoDBRAGProviderOptions options,
+        ILogger<MongoDBRAGProvider>? logger = null)
+        : this(
+            (database ?? throw new ArgumentNullException(nameof(database)))
+                .GetCollection<BsonDocument>(
+                    MongoDBRAGProviderOptions.RequireText(collectionName, nameof(collectionName))),
+            options,
+            logger)
+    {
+    }
+
+    /// <summary>
+    /// Creates a <see cref="MongoDBSearchMode.FullText"/>-only provider over an injected collection, which remains
+    /// caller-owned. See the database-constructor overload's remarks for why this family accepts no embedding
+    /// generator or vector dimensions.
+    /// </summary>
+    /// <exception cref="MongoDBConfigurationException">
+    /// <paramref name="options"/> configures a mode other than <see cref="MongoDBSearchMode.FullText"/>.
+    /// </exception>
+    public MongoDBRAGProvider(
+        IMongoCollection<BsonDocument> collection,
+        MongoDBRAGProviderOptions options,
+        ILogger<MongoDBRAGProvider>? logger = null)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        _options = options.Copy();
+        RequireFullTextOnlyConstructionMode(_options.SearchMode);
+
+        _collection = collection ?? throw new ArgumentNullException(nameof(collection));
+        _embeddingGenerator = null;
+        _vectorDimensions = 0;
+        _logger = logger ?? NullLogger<MongoDBRAGProvider>.Instance;
+    }
+
+    /// <summary>
+    /// Creates a <see cref="MongoDBSearchMode.FullText"/>-only provider over an injected client, which remains
+    /// caller-owned. See the database-constructor overload's remarks for why this family accepts no embedding
+    /// generator or vector dimensions.
+    /// </summary>
+    /// <exception cref="MongoDBConfigurationException">
+    /// <paramref name="options"/> configures a mode other than <see cref="MongoDBSearchMode.FullText"/>.
+    /// </exception>
+    public MongoDBRAGProvider(
+        IMongoClient client,
+        string databaseName,
+        string collectionName,
+        MongoDBRAGProviderOptions options,
+        ILogger<MongoDBRAGProvider>? logger = null)
+        : this(
+            (client ?? throw new ArgumentNullException(nameof(client))).GetDatabase(
+                MongoDBRAGProviderOptions.RequireText(databaseName, nameof(databaseName))),
+            collectionName,
+            options,
+            logger)
+    {
+    }
+
+    /// <summary>
+    /// Creates a <see cref="MongoDBSearchMode.FullText"/>-only provider-owned client from a connection string. See
+    /// the database-constructor overload's remarks for why this family accepts no embedding generator or vector
+    /// dimensions.
+    /// </summary>
+    /// <exception cref="MongoDBConfigurationException">
+    /// <paramref name="options"/> configures a mode other than <see cref="MongoDBSearchMode.FullText"/>.
+    /// </exception>
+    public MongoDBRAGProvider(
+        string connectionString,
+        string databaseName,
+        string collectionName,
+        MongoDBRAGProviderOptions options,
+        ILogger<MongoDBRAGProvider>? logger = null)
+        : this(connectionString, databaseName, collectionName, options, logger, clientFactory: null)
+    {
+    }
+
+    /// <summary>
+    /// Test-only <see cref="MongoDBSearchMode.FullText"/>-only seam mirroring the vector-family internal
+    /// connection-string constructor's <c>clientFactory</c> override; see its remarks for why it exists.
+    /// </summary>
+    internal MongoDBRAGProvider(
+        string connectionString,
+        string databaseName,
+        string collectionName,
+        MongoDBRAGProviderOptions options,
+        ILogger<MongoDBRAGProvider>? logger,
+        Func<string, IMongoClient>? clientFactory)
+        : this(
+            ConnectFullTextOnly(connectionString, databaseName, collectionName, options, clientFactory),
+            options,
+            logger)
+    {
+    }
+
+    private MongoDBRAGProvider(
+        (OwnedResource<IMongoClient> Client, IMongoCollection<BsonDocument> Collection) connected,
+        MongoDBRAGProviderOptions options,
+        ILogger<MongoDBRAGProvider>? logger)
+        : this(connected.Collection, options, logger)
+    {
+        _client = connected.Client;
+    }
+
+    /// <summary>
     /// Validates every argument that does not require a MongoDB client first — including calling
     /// <see cref="MongoDBRAGProviderOptions.Validate"/> directly, since the chained collection constructor only
     /// validates <paramref name="options"/> indirectly through <c>Copy()</c>, which would otherwise run after a
@@ -168,6 +283,34 @@ public sealed class MongoDBRAGProvider : IAsyncDisposable
         options.Validate();
         EmbeddingValidator.ValidateDimensions(vectorDimensions);
         ArgumentNullException.ThrowIfNull(embeddingGenerator);
+        return ConnectClient(connectionString, databaseName, collectionName, clientFactory);
+    }
+
+    /// <summary>
+    /// The <see cref="MongoDBSearchMode.FullText"/>-only analogue of <see cref="Connect"/>: it validates
+    /// <paramref name="options"/> and requires <see cref="MongoDBSearchMode.FullText"/> — since this family accepts
+    /// no embedding generator to validate — before creating a client, with the same client-disposal-on-later-
+    /// failure guarantee.
+    /// </summary>
+    private static (OwnedResource<IMongoClient> Client, IMongoCollection<BsonDocument> Collection) ConnectFullTextOnly(
+        string connectionString,
+        string databaseName,
+        string collectionName,
+        MongoDBRAGProviderOptions options,
+        Func<string, IMongoClient>? clientFactory)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        options.Validate();
+        RequireFullTextOnlyConstructionMode(options.SearchMode);
+        return ConnectClient(connectionString, databaseName, collectionName, clientFactory);
+    }
+
+    private static (OwnedResource<IMongoClient> Client, IMongoCollection<BsonDocument> Collection) ConnectClient(
+        string connectionString,
+        string databaseName,
+        string collectionName,
+        Func<string, IMongoClient>? clientFactory)
+    {
         string validDatabaseName = MongoDBRAGProviderOptions.RequireText(databaseName, nameof(databaseName));
         string validCollectionName = MongoDBRAGProviderOptions.RequireText(collectionName, nameof(collectionName));
 
@@ -188,6 +331,23 @@ public sealed class MongoDBRAGProvider : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Guards the <see cref="MongoDBSearchMode.FullText"/>-only constructor family: since it accepts no embedding
+    /// generator or vector dimensions, any other configured mode would be silently unusable at search time, so
+    /// this fails fast and actionably at construction instead.
+    /// </summary>
+    private static void RequireFullTextOnlyConstructionMode(MongoDBSearchMode mode)
+    {
+        if (mode != MongoDBSearchMode.FullText)
+        {
+            throw new MongoDBConfigurationException(
+                $"This constructor overload does not accept an embedding generator, so it only supports " +
+                $"'{MongoDBSearchMode.FullText}'; configured mode was '{mode}'. Use a constructor overload that " +
+                "accepts an embedding generator and vector dimensions for modes that require vector search.");
+        }
+    }
+
+
     /// <summary>Gets whether the provider owns its MongoDB client.</summary>
     public bool OwnsClient => _client?.OwnsValue is true;
 
@@ -195,10 +355,15 @@ public sealed class MongoDBRAGProvider : IAsyncDisposable
     /// Searches with the configured retrieval strategy. The configured
     /// <see cref="MongoDBRAGProviderOptions.MandatoryFilter"/> is always translated and placed inside the active
     /// retrieval stage; this is the sole supported authorization mechanism. Only
-    /// <see cref="MongoDBSearchMode.VectorAnn"/> and <see cref="MongoDBSearchMode.VectorEnn"/> are implemented in
-    /// this release.
+    /// <see cref="MongoDBSearchMode.VectorAnn"/>, <see cref="MongoDBSearchMode.VectorEnn"/>, and
+    /// <see cref="MongoDBSearchMode.FullText"/> are implemented in this release.
     /// </summary>
-    /// <param name="query">The natural-language query, embedded through the caller-provided generator.</param>
+    /// <param name="query">
+    /// The natural-language query. Embedded through the caller-provided generator for
+    /// <see cref="MongoDBSearchMode.VectorAnn"/>/<see cref="MongoDBSearchMode.VectorEnn"/>; used as-is as the
+    /// <c>$search</c> text query for <see cref="MongoDBSearchMode.FullText"/>, which never invokes an embedding
+    /// generator.
+    /// </param>
     /// <param name="cancellationToken">A token used to cancel the search.</param>
     /// <exception cref="MongoDBConfigurationException"><paramref name="query"/> is empty.</exception>
     /// <exception cref="MongoDBCapabilityException">
@@ -221,23 +386,12 @@ public sealed class MongoDBRAGProvider : IAsyncDisposable
         string query,
         CancellationToken cancellationToken)
     {
-        MongoDBRAGProviderOptions.RequireText(query, nameof(query));
-        RequireVectorMode();
+        string validQuery = MongoDBRAGProviderOptions.RequireText(query, nameof(query));
+        RequireSupportedMode();
 
-        float[] vector = (await EmbedAsync([query], cancellationToken).ConfigureAwait(false))[0];
-        bool exact = _options.SearchMode == MongoDBSearchMode.VectorEnn;
-        int? numCandidates = exact
-            ? null
-            : _options.NumCandidates ?? DefaultNumCandidates(_options.TopK);
-        BsonDocument? filter = RAGFilterTranslator.TranslateVectorFilter(_options.MandatoryFilter);
-        BsonDocument[] stages = RAGPipelineBuilder.BuildVectorSearchPipeline(
-            _options.VectorIndexName,
-            _options.VectorFieldName,
-            vector,
-            _options.TopK,
-            exact,
-            numCandidates,
-            filter);
+        BsonDocument[] stages = _options.SearchMode == MongoDBSearchMode.FullText
+            ? BuildFullTextSearchStages(validQuery)
+            : await BuildVectorSearchStagesAsync(validQuery, cancellationToken).ConfigureAwait(false);
 
         try
         {
@@ -262,13 +416,44 @@ public sealed class MongoDBRAGProvider : IAsyncDisposable
         }
     }
 
-    private void RequireVectorMode()
+    private async Task<BsonDocument[]> BuildVectorSearchStagesAsync(string query, CancellationToken cancellationToken)
     {
-        if (_options.SearchMode is not (MongoDBSearchMode.VectorAnn or MongoDBSearchMode.VectorEnn))
+        float[] vector = (await EmbedAsync([query], cancellationToken).ConfigureAwait(false))[0];
+        bool exact = _options.SearchMode == MongoDBSearchMode.VectorEnn;
+        int? numCandidates = exact
+            ? null
+            : _options.NumCandidates ?? DefaultNumCandidates(_options.TopK);
+        BsonDocument? filter = RAGFilterTranslator.TranslateVectorFilter(_options.MandatoryFilter);
+        return RAGPipelineBuilder.BuildVectorSearchPipeline(
+            _options.VectorIndexName,
+            _options.VectorFieldName,
+            vector,
+            _options.TopK,
+            exact,
+            numCandidates,
+            filter);
+    }
+
+    private BsonDocument[] BuildFullTextSearchStages(string query)
+    {
+        BsonArray? filter = RAGFilterTranslator.TranslateSearchFilter(_options.MandatoryFilter);
+        return RAGPipelineBuilder.BuildFullTextSearchPipeline(
+            _options.SearchIndexName,
+            _options.SearchTextFieldNames,
+            query,
+            _options.TopK,
+            filter);
+    }
+
+    private void RequireSupportedMode()
+    {
+        if (_options.SearchMode is not
+            (MongoDBSearchMode.VectorAnn or MongoDBSearchMode.VectorEnn or MongoDBSearchMode.FullText))
         {
             throw new MongoDBCapabilityException(
                 $"Search mode '{_options.SearchMode}' is not yet implemented in this release; " +
-                $"supported modes: {MongoDBSearchMode.VectorAnn}, {MongoDBSearchMode.VectorEnn}.");
+                $"supported modes: {MongoDBSearchMode.VectorAnn}, {MongoDBSearchMode.VectorEnn}, " +
+                $"{MongoDBSearchMode.FullText}.");
         }
     }
 
@@ -279,6 +464,17 @@ public sealed class MongoDBRAGProvider : IAsyncDisposable
         IEnumerable<string> values,
         CancellationToken cancellationToken)
     {
+        if (_embeddingGenerator is null)
+        {
+            // Structurally unreachable: only the FullText-only constructor family leaves this null, and that
+            // family also rejects any mode other than FullText, which SearchCoreAsync never routes through this
+            // vector embedding path. Guarded defensively so a future mode-gating regression fails loudly with an
+            // actionable message instead of a NullReferenceException.
+            throw new MongoDBConfigurationException(
+                "An embedding generator is required for this search mode, but none was configured. Use a " +
+                "constructor overload that accepts an embedding generator and vector dimensions.");
+        }
+
         string[] inputs = values.ToArray();
         try
         {

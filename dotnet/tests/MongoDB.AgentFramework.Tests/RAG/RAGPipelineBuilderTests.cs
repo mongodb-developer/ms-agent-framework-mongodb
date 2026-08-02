@@ -118,4 +118,79 @@ public sealed class RAGPipelineBuilderTests
         BsonDocument setStage = stages[1]["$set"].AsBsonDocument;
         Assert.True(setStage.Contains(FieldPath.ReservedScoreAlias));
     }
+
+    [Fact]
+    public void FullText_stage_places_index_compound_must_and_a_single_scalar_text_path()
+    {
+        BsonDocument[] stages = RAGPipelineBuilder.BuildFullTextSearchPipeline(
+            indexName: "search_index",
+            textFieldNames: ["text"],
+            queryText: "blue widgets",
+            limit: 5,
+            filter: null);
+
+        BsonDocument search = stages[0]["$search"].AsBsonDocument;
+        Assert.Equal("search_index", search["index"].AsString);
+        BsonDocument compound = search["compound"].AsBsonDocument;
+        BsonDocument textClause = compound["must"].AsBsonArray[0].AsBsonDocument["text"].AsBsonDocument;
+        Assert.Equal("blue widgets", textClause["query"].AsString);
+        // A single configured field renders as a scalar path, not a single-element array, matching the $search
+        // "text" operator's own scalar/array duality for its "path" property.
+        Assert.Equal("text", textClause["path"].AsString);
+        Assert.False(compound.Contains("filter"));
+    }
+
+    [Fact]
+    public void FullText_stage_renders_multiple_text_field_names_as_a_path_array()
+    {
+        BsonDocument[] stages = RAGPipelineBuilder.BuildFullTextSearchPipeline(
+            indexName: "search_index",
+            textFieldNames: ["title", "body"],
+            queryText: "blue widgets",
+            limit: 5,
+            filter: null);
+
+        BsonDocument textClause = stages[0]["$search"]["compound"]["must"].AsBsonArray[0]
+            .AsBsonDocument["text"].AsBsonDocument;
+        Assert.Equal(new BsonArray(["title", "body"]), textClause["path"].AsBsonArray);
+    }
+
+    [Fact]
+    public void FullText_stage_places_the_translated_filter_inside_compound_filter()
+    {
+        var filter = new BsonArray { BsonDocument.Parse("""{"equals":{"path":"tenant_id","value":"tenant-a"}}""") };
+
+        BsonDocument[] stages = RAGPipelineBuilder.BuildFullTextSearchPipeline(
+            indexName: "search_index",
+            textFieldNames: ["text"],
+            queryText: "blue widgets",
+            limit: 5,
+            filter: filter);
+
+        BsonDocument compound = stages[0]["$search"]["compound"].AsBsonDocument;
+        Assert.Equal(filter, compound["filter"].AsBsonArray);
+    }
+
+    [Fact]
+    public void FullText_pipeline_is_search_then_limit_then_the_shared_score_alias_from_searchScore()
+    {
+        BsonDocument[] stages = RAGPipelineBuilder.BuildFullTextSearchPipeline(
+            indexName: "search_index",
+            textFieldNames: ["text"],
+            queryText: "blue widgets",
+            limit: 7,
+            filter: null);
+
+        // $search MUST be the first stage per rag.md's full-text pipeline pseudocode; $limit narrows to topK before
+        // the score alias is captured; no stage narrows the document itself (no $project), matching the vector
+        // pipeline's raw-document preservation guarantee.
+        Assert.Equal(3, stages.Length);
+        Assert.True(stages[0].Contains("$search"));
+        Assert.Equal(new BsonDocument("$limit", 7), stages[1]);
+        Assert.Equal(
+            BsonDocument.Parse("""{"$set":{"_ragScore":{"$meta":"searchScore"}}}"""),
+            stages[2]);
+        Assert.Equal(FieldPath.ReservedScoreAlias, stages[2]["$set"].AsBsonDocument.GetElement(0).Name);
+        Assert.DoesNotContain(stages, stage => stage.Contains("$project"));
+    }
 }

@@ -167,7 +167,7 @@ public sealed class MongoDBRAGContextProviderTests
     [Fact]
     public async Task CapabilityErrorsPropagateRatherThanFailingOpen()
     {
-        var options = new MongoDBRAGProviderOptions { SearchMode = MongoDBSearchMode.FullText };
+        var options = new MongoDBRAGProviderOptions { SearchMode = MongoDBSearchMode.HybridRrf };
         MongoDBRAGProvider provider = CreateProvider(new RAGCollectionState(), options: options);
         var contextProvider = new MongoDBRAGContextProvider(provider);
 

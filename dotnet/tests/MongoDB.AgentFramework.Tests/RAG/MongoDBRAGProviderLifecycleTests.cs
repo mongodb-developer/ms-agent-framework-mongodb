@@ -162,4 +162,118 @@ public sealed class MongoDBRAGProviderLifecycleTests
             3,
             options: null!));
     }
+
+    [Fact]
+    public async Task FullTextOnlyCollectionConstructorDoesNotRequireAnEmbeddingGenerator()
+    {
+        MongoDBRAGProvider provider = new(
+            RAGCollectionProxy.Create(new RAGCollectionState()),
+            new MongoDBRAGProviderOptions { SearchMode = MongoDBSearchMode.FullText });
+
+        await provider.DisposeAsync();
+
+        Assert.False(provider.OwnsClient);
+    }
+
+    [Theory]
+    [InlineData(MongoDBSearchMode.VectorAnn)]
+    [InlineData(MongoDBSearchMode.VectorEnn)]
+    [InlineData(MongoDBSearchMode.HybridRrf)]
+    public void FullTextOnlyConstructorsRejectModesThatRequireVectorConfiguration(MongoDBSearchMode mode)
+    {
+        Assert.Throws<MongoDBConfigurationException>(() => new MongoDBRAGProvider(
+            RAGCollectionProxy.Create(new RAGCollectionState()),
+            new MongoDBRAGProviderOptions { SearchMode = mode }));
+    }
+
+    [Fact]
+    public void FullTextOnlyCollectionConstructorRejectsNullCollection()
+    {
+        Assert.Throws<ArgumentNullException>(() => new MongoDBRAGProvider(
+            collection: null!,
+            new MongoDBRAGProviderOptions { SearchMode = MongoDBSearchMode.FullText }));
+    }
+
+    [Fact]
+    public void FullTextOnlyCollectionConstructorRejectsNullOptions()
+    {
+        Assert.Throws<ArgumentNullException>(() => new MongoDBRAGProvider(
+            RAGCollectionProxy.Create(new RAGCollectionState()),
+            options: null!));
+    }
+
+    [Fact]
+    public async Task FullTextOnlyConnectionStringConstructorOwnsAndDisposesClientIdempotently()
+    {
+        MongoDBRAGProvider provider = new(
+            "mongodb://localhost:27017",
+            "database",
+            "chunks",
+            new MongoDBRAGProviderOptions { SearchMode = MongoDBSearchMode.FullText });
+
+        Assert.True(provider.OwnsClient);
+        await provider.DisposeAsync();
+        await provider.DisposeAsync();
+    }
+
+    [Fact]
+    public void FullTextOnlyConnectionStringConstructorDisposesOwnedClientWhenLaterValidationFails()
+    {
+        var clientState = new FakeMongoClientState
+        {
+            GetDatabaseException = new InvalidOperationException("boom"),
+        };
+
+        Assert.Throws<InvalidOperationException>(() => new MongoDBRAGProvider(
+            "mongodb://localhost:27017",
+            "database",
+            "chunks",
+            new MongoDBRAGProviderOptions { SearchMode = MongoDBSearchMode.FullText },
+            logger: null,
+            clientFactory: _ => FakeMongoClientProxy.Create(clientState)));
+
+        Assert.Equal(1, clientState.DisposeCount);
+    }
+
+    [Fact]
+    public void FullTextOnlyConnectionStringConstructorValidatesArgumentsBeforeCreatingAClient()
+    {
+        bool clientFactoryInvoked = false;
+
+        Assert.Throws<MongoDBConfigurationException>(() => new MongoDBRAGProvider(
+            "mongodb://localhost:27017",
+            databaseName: string.Empty,
+            "chunks",
+            new MongoDBRAGProviderOptions { SearchMode = MongoDBSearchMode.FullText },
+            logger: null,
+            clientFactory: _ =>
+            {
+                clientFactoryInvoked = true;
+                return FakeMongoClientProxy.Create(new FakeMongoClientState());
+            }));
+
+        Assert.False(clientFactoryInvoked);
+    }
+
+    [Fact]
+    public void FullTextOnlyConnectionStringConstructorValidatesOptionsBeforeCreatingAClient()
+    {
+        bool clientFactoryInvoked = false;
+
+        // A VectorAnn mode requires configuration this constructor never supplies (no embedding generator), so it
+        // must fail before a client is created, exactly like every other client-independent argument.
+        Assert.Throws<MongoDBConfigurationException>(() => new MongoDBRAGProvider(
+            "mongodb://localhost:27017",
+            "database",
+            "chunks",
+            new MongoDBRAGProviderOptions { SearchMode = MongoDBSearchMode.VectorAnn },
+            logger: null,
+            clientFactory: _ =>
+            {
+                clientFactoryInvoked = true;
+                return FakeMongoClientProxy.Create(new FakeMongoClientState());
+            }));
+
+        Assert.False(clientFactoryInvoked);
+    }
 }

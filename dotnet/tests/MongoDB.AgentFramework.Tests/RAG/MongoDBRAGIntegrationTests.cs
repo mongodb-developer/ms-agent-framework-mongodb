@@ -4,12 +4,13 @@ using MongoDB.Driver;
 namespace MongoDB.AgentFramework.Tests.RAG;
 
 /// <summary>
-/// Exercises live ANN and ENN retrieval against a pre-provisioned MongoDB Atlas deployment. Index provisioning is
-/// out of scope for this slice (see <c>docs/development/rag/dotnet-rag-vector-search.md</c>), so unlike the Memory
-/// integration test this fixture cannot create its own Vector Search index per run. Instead it targets a fixed,
-/// operator-provisioned collection and index (documented via <see cref="MongoIntegrationFactAttribute"/>) and only
-/// ever writes/deletes documents whose IDs carry a unique, test-owned prefix, so concurrent runs and the shared
-/// index definition are unaffected.
+/// Exercises live ANN, ENN, and FullText retrieval against a pre-provisioned MongoDB Atlas deployment. Index
+/// provisioning is out of scope for this slice (see <c>docs/development/rag/dotnet-rag-vector-search.md</c> and
+/// <c>docs/development/rag/dotnet-rag-full-text-search.md</c>), so unlike the Memory integration test this fixture
+/// cannot create its own Vector Search or Search index per run. Instead it targets a fixed, operator-provisioned
+/// collection and indexes (documented via <see cref="MongoIntegrationFactAttribute"/>) and only ever writes/deletes
+/// documents whose IDs carry a unique, test-owned prefix, so concurrent runs and the shared index definitions are
+/// unaffected.
 /// </summary>
 public sealed class MongoDBRAGIntegrationTests
 {
@@ -119,6 +120,71 @@ public sealed class MongoDBRAGIntegrationTests
                     "'agent_framework_rag_vector') over its 'embedding' field, since index " +
                     "provisioning is out of scope for this slice.";
             }
+        }
+    }
+
+    [MongoIntegrationFact]
+    [Trait("Category", "integration-rag-search")]
+    public async Task FullTextSearchIsolatesTenantsOnAPreProvisionedIndex()
+    {
+        string? uri = Environment.GetEnvironmentVariable("MONGODB_URI");
+        string? databaseName = Environment.GetEnvironmentVariable("MONGODB_DATABASE");
+        string collectionName = Environment.GetEnvironmentVariable("MONGODB_RAG_COLLECTION") ??
+            "af_rag_dotnet_integration";
+        string searchIndexName = Environment.GetEnvironmentVariable("MONGODB_RAG_SEARCH_INDEX") ??
+            "agent_framework_rag_search";
+        Assert.False(string.IsNullOrWhiteSpace(uri));
+        Assert.False(string.IsNullOrWhiteSpace(databaseName));
+
+        using var client = new MongoClient(uri!);
+        IMongoCollection<BsonDocument> collection = client
+            .GetDatabase(databaseName!)
+            .GetCollection<BsonDocument>(collectionName);
+        string prefix = $"af_rag_dotnet_test_{Guid.NewGuid():N}_";
+        string tenantAId = $"{prefix}a";
+        string tenantBId = $"{prefix}b";
+        var options = new MongoDBRAGProviderOptions
+        {
+            SearchMode = MongoDBSearchMode.FullText,
+            SearchIndexName = searchIndexName,
+            SearchTextFieldNames = ["text"],
+            TopK = 10,
+            MandatoryFilter = MongoDBRAGFilter.Equal("tenant_id", "tenant-a"),
+        };
+        await using MongoDBRAGProvider provider = new(client, databaseName!, collectionName, options);
+        try
+        {
+            await collection.InsertManyAsync(
+            [
+                new BsonDocument
+                {
+                    { "_id", tenantAId },
+                    { "text", "Widgets ship in blue for tenant A." },
+                    { "tenant_id", "tenant-a" },
+                },
+                new BsonDocument
+                {
+                    { "_id", tenantBId },
+                    { "text", "Widgets also ship in blue for tenant B." },
+                    { "tenant_id", "tenant-b" },
+                },
+            ]);
+
+            IReadOnlyList<MongoDBRAGResult> results = await provider.SearchAsync("blue widgets");
+            Assert.Contains(results, result => result.Id == tenantAId);
+            Assert.DoesNotContain(results, result => result.Id == tenantBId);
+
+            // RawDocument must preserve the complete original document against a real MongoDB deployment, and the
+            // internal reserved score alias must never leak into it, matching the Vector Search contract.
+            MongoDBRAGResult tenantAResult = Assert.Single(results, result => result.Id == tenantAId);
+            Assert.Equal("tenant-a", tenantAResult.RawDocument["tenant_id"].AsString);
+            Assert.False(tenantAResult.RawDocument.Contains("_ragScore"));
+        }
+        finally
+        {
+            Assert.StartsWith("af_rag_dotnet_test_", prefix);
+            await collection.DeleteManyAsync(
+                Builders<BsonDocument>.Filter.In("_id", new[] { tenantAId, tenantBId }));
         }
     }
 }
