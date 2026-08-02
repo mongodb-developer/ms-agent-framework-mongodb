@@ -117,7 +117,7 @@ Optional variables are `MONGODB_HISTORY_COLLECTION`,
 sample's authorized session should be removed. See the
 [.NET Chat History developer guide](../docs/development/history/dotnet-history.md).
 
-## RAG contracts, typed filters, and Vector Search (ANN/ENN)
+## RAG contracts, typed filters, Vector Search (ANN/ENN), and FullText
 
 `MongoDBSearchMode` (`VectorAnn`, `VectorEnn`, `FullText`, `HybridRrf`), the bounded typed `MongoDBRAGFilter` AST,
 the immutable `MongoDBRAGResult`, and `MongoDBRAGProviderOptions` are available under
@@ -126,17 +126,19 @@ the immutable `MongoDBRAGResult`, and `MongoDBRAGProviderOptions` are available 
 completely translatable into a `$vectorSearch` match filter or a `$search` compound filter through the internal
 `RAGFilterTranslator`.
 
-`MongoDBRAGProvider` executes live `VectorAnn`/`VectorEnn` retrieval through `SearchAsync`, and
+`MongoDBRAGProvider` executes live `VectorAnn`/`VectorEnn`/`FullText` retrieval through `SearchAsync`, and
 `MongoDBRAGContextProvider` composes it as a before-invoke `AIContextProvider` that supplies retrieved chunks as
-attributed `ChatRole.Tool` context messages. `FullText` and `HybridRrf` are not yet implemented; selecting them
-throws `MongoDBCapabilityException`.
+attributed `ChatRole.Tool` context messages. `HybridRrf` is not yet implemented; selecting it throws
+`MongoDBCapabilityException`. `FullText` never requires or invokes an embedding generator: a dedicated constructor
+overload family (`MongoDBRAGProvider(database, collectionName, options, ...)`, and the matching collection/client/
+connection-string overloads) accepts no `embeddingGenerator`/`vectorDimensions` parameters at all.
 
 ```csharp
 MongoDBRAGFilter filter = MongoDBRAGFilter.And(
     MongoDBRAGFilter.Equal("tenant_id", "tenant-a"),
     MongoDBRAGFilter.In("category", ["news", "docs"]));
 
-var options = new MongoDBRAGProviderOptions
+var vectorOptions = new MongoDBRAGProviderOptions
 {
     SearchMode = MongoDBSearchMode.VectorAnn,
     VectorIndexName = "knowledge_vector_index",
@@ -150,24 +152,39 @@ await using var rag = new MongoDBRAGProvider(
     "knowledge_chunks",
     embeddingGenerator,
     vectorDimensions: 1536,
-    options);
+    vectorOptions);
 
 IReadOnlyList<MongoDBRAGResult> results = await rag.SearchAsync("What color do widgets ship in?");
 
 var contextProvider = new MongoDBRAGContextProvider(rag);
+
+// FullText: no embedding generator required.
+var fullTextOptions = new MongoDBRAGProviderOptions
+{
+    SearchMode = MongoDBSearchMode.FullText,
+    SearchIndexName = "knowledge_search_index",
+    SearchTextFieldNames = ["text"],
+    TopK = 5,
+    MandatoryFilter = filter,
+};
+
+await using var fullTextRag = new MongoDBRAGProvider(database, "knowledge_chunks", fullTextOptions);
+IReadOnlyList<MongoDBRAGResult> fullTextResults = await fullTextRag.SearchAsync("What color do widgets ship in?");
 ```
 
-This slice does not provision Vector Search indexes; the target index must already exist. Injected
+This slice does not provision Vector Search or Search indexes; the target index must already exist. Injected
 clients/databases/collections/embedding generators remain caller-owned; only a client created by the
 connection-string constructor is disposed by the provider.
 
 Run the sample after setting `MONGODB_URI`, `MONGODB_DATABASE`, and a pre-provisioned Vector Search index
-(`MONGODB_RAG_VECTOR_INDEX`, optionally `MONGODB_RAG_COLLECTION`):
+(`MONGODB_RAG_VECTOR_INDEX`, optionally `MONGODB_RAG_COLLECTION`). Additionally set `MONGODB_RAG_SEARCH_INDEX` to a
+pre-provisioned Search index to also see the FullText demonstration (skipped otherwise):
 
 ```powershell
 dotnet run --project samples\RAGQuickstart\RAGQuickstart.csproj
 ```
 
-See the [.NET RAG contracts developer guide](../docs/development/rag/dotnet-rag.md) and the
-[.NET Vector RAG developer guide](../docs/development/rag/dotnet-rag-vector-search.md) for the full public surface,
-pipeline shape, and deferred work.
+See the [.NET RAG contracts developer guide](../docs/development/rag/dotnet-rag.md), the
+[.NET Vector RAG developer guide](../docs/development/rag/dotnet-rag-vector-search.md), and the
+[.NET FullText RAG developer guide](../docs/development/rag/dotnet-rag-full-text-search.md) for the full public
+surface, pipeline shape, and deferred work.

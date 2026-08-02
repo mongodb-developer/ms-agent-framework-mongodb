@@ -8,10 +8,12 @@ using MongoDB.AgentFramework;
 using MongoDB.Bson;
 using MongoDB.Driver;
 
-// This slice does not implement Vector Search index provisioning (see
-// docs/development/rag/dotnet-rag-vector-search.md), so the target collection and index must already exist.
-// Set MONGODB_RAG_VECTOR_INDEX to a Vector Search index (3-dimension, cosine) defined over the "embedding"
-// field of the target collection before running this sample.
+// This slice does not implement Vector Search or Search index provisioning (see
+// docs/development/rag/dotnet-rag-vector-search.md and docs/development/rag/dotnet-rag-full-text-search.md), so
+// the target collection and indexes must already exist. Set MONGODB_RAG_VECTOR_INDEX to a Vector Search index
+// (3-dimension, cosine) defined over the "embedding" field of the target collection before running this sample.
+// Set MONGODB_RAG_SEARCH_INDEX to a Search index defined over the "text" field to also see the FullText demo;
+// that section is skipped when the variable is unset since this sample cannot provision the index itself.
 string uri = Environment.GetEnvironmentVariable("MONGODB_URI")
     ?? throw new InvalidOperationException("Set MONGODB_URI.");
 string databaseName = Environment.GetEnvironmentVariable("MONGODB_DATABASE")
@@ -20,6 +22,7 @@ string collectionName = Environment.GetEnvironmentVariable("MONGODB_RAG_COLLECTI
     ?? "agent_framework_rag_chunks";
 string vectorIndexName = Environment.GetEnvironmentVariable("MONGODB_RAG_VECTOR_INDEX")
     ?? "agent_framework_rag_vector";
+string? searchIndexName = Environment.GetEnvironmentVariable("MONGODB_RAG_SEARCH_INDEX");
 
 using var client = new MongoClient(uri);
 IMongoCollection<BsonDocument> collection = client
@@ -71,6 +74,37 @@ foreach (ChatMessage message in context.Messages ?? [])
     {
         Console.WriteLine($"  [{message.Role}] {message.Text}");
     }
+}
+
+if (searchIndexName is not null)
+{
+    Console.WriteLine();
+    Console.WriteLine("FullText SearchAsync results (no embedding generator invoked):");
+    var fullTextOptions = new MongoDBRAGProviderOptions
+    {
+        SearchMode = MongoDBSearchMode.FullText,
+        SearchIndexName = searchIndexName,
+        SearchTextFieldNames = ["text"],
+        TopK = 3,
+        MandatoryFilter = MongoDBRAGFilter.Equal("tenant_id", "quickstart"),
+    };
+    await using var fullTextProvider = new MongoDBRAGProvider(
+        client,
+        databaseName,
+        collectionName,
+        fullTextOptions);
+    IReadOnlyList<MongoDBRAGResult> fullTextResults = await fullTextProvider.SearchAsync(
+        "What color do widgets ship in?");
+    foreach (MongoDBRAGResult result in fullTextResults)
+    {
+        Console.WriteLine($"  [{result.Score:F3}] {result.Text} (source: {result.SourceName ?? "n/a"})");
+    }
+}
+else
+{
+    Console.WriteLine();
+    Console.WriteLine("Skipping FullText demo: set MONGODB_RAG_SEARCH_INDEX to a Search index over " +
+        "the \"text\" field to see it.");
 }
 
 static async Task SeedKnowledgeAsync(IMongoCollection<BsonDocument> collection)
