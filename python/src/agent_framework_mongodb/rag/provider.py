@@ -210,7 +210,7 @@ class MongoDBRAGProvider:
         except PyMongoError as exc:
             raise _translate_mongo_error(exc) from exc
         if self.options.parent is not None:
-            return await self._hydrate_parents(documents, effective)
+            return await self._hydrate_parents(documents)
         return [self._map_result(document) for document in documents]
 
     async def validate_capabilities(self, *, refresh: bool = False) -> CapabilityResult:
@@ -281,6 +281,8 @@ class MongoDBRAGProvider:
                 ),
             ):
                 raise translated from exc
+            if not _is_recognized_unsupported_exact(exc):
+                raise translated from exc
             result = CapabilityResult(
                 name="vector_enn",
                 supported=False,
@@ -310,7 +312,6 @@ class MongoDBRAGProvider:
     async def _hydrate_parents(
         self,
         children: Sequence[Mapping[str, Any]],
-        effective: MongoDBRAGSearchOptions,
     ) -> list[MongoDBRAGResult]:
         parent = self.options.parent
         assert parent is not None
@@ -333,11 +334,11 @@ class MongoDBRAGProvider:
         relevance_order = {parent_id: rank for rank, parent_id in enumerate(parent_ids)}
         identifier_filter: MongoDocument = {parent.parent_document_id_field: {"$in": parent_ids}}
         match: MongoDocument = identifier_filter
-        if effective.filter is not None:
+        if self.options.filter is not None:
             match = {
                 "$and": [
                     identifier_filter,
-                    compile_filter(effective.filter, self.options.mode),
+                    compile_filter(self.options.filter, self.options.mode),
                 ]
             }
         pipeline: list[MongoDocument] = [{"$match": match}]
@@ -661,7 +662,19 @@ def _translate_mongo_error(error: PyMongoError) -> MongoDBIntegrationError:
             "TypeMismatch",
         }:
             return MongoDBConfigurationError("MongoDB rejected the configured RAG operation.")
-        if error.code in {6, 7, 89, 91, 189, 262, 9001, 10107, 11600, 11602}:
+        if error.code in {
+            6,
+            7,
+            89,
+            91,
+            189,
+            262,
+            9001,
+            10107,
+            11600,
+            11601,
+            11602,
+        } or code_name in {"Interrupted", "InterruptedAtShutdown"}:
             return MongoDBTransientRetrievalError("MongoDB RAG retrieval failed transiently.")
     if isinstance(error, ConnectionFailure):
         return MongoDBTransientRetrievalError("MongoDB RAG retrieval failed transiently.")
@@ -692,6 +705,36 @@ def _filter_paths(expression: MongoDBFilter | None) -> set[str]:
         field = getattr(expression, "field", None)
         return {field} if isinstance(field, str) else set()
     return set()
+
+
+def _is_recognized_unsupported_exact(error: OperationFailure) -> bool:
+    details: Mapping[str, object]
+    if isinstance(error.details, Mapping):
+        details = cast(Mapping[str, object], error.details)
+    else:
+        details = cast(Mapping[str, object], {})
+    raw_code_name = details.get("codeName")
+    code_name = raw_code_name if isinstance(raw_code_name, str) else None
+    if error.code in {59, 303, 40324} or code_name in {
+        "CommandNotFound",
+        "Location303",
+        "Location40324",
+    }:
+        return True
+    message = str(details.get("errmsg", error)).lower()
+    exact_syntax = "exact" in message and any(
+        marker in message
+        for marker in (
+            "not allowed",
+            "not supported",
+            "unknown",
+            "unrecognized",
+            "unsupported",
+        )
+    )
+    return exact_syntax and (
+        error.code in {2, 9, 72} or code_name in {"BadValue", "FailedToParse", "InvalidOptions"}
+    )
 
 
 def _bounded_recent_count(value: object) -> int:

@@ -43,7 +43,9 @@ another conversation session. `after_run` is intentionally a no-op.
 When `MongoDBRAGParentOptions` is present, child results provide a bounded,
 de-duplicated parent-ID set. A second read-only aggregation against the
 allowlisted same-database collection reads all those IDs and reapplies the
-complete mandatory filter. Mapping retains each parent's best child score,
+complete provider-owned mandatory authorization filter. Per-call relevance
+filters remain child-search constraints because parent documents need not carry
+child-only metadata. Mapping retains each parent's best child score,
 sorts by score and original child relevance order, then limits parent count and
 bounds text/context. Unordered `$in` results therefore cannot discard a more
 relevant parent. Chunk and parent writes remain ingestion concerns.
@@ -58,7 +60,9 @@ polls with a monotonic deadline. Search and framework hooks never call ensure.
 Missing, building/non-queryable, ready, and failed states are distinct. A
 `FAILED` index raises `MongoDBIndexFailedError` immediately with explicit
 repair/recreate remediation; readiness polling does not wait to timeout on a
-permanent failure.
+permanent failure. Non-waiting ensure also validates any inspected definition
+and state: `BUILDING` is allowed without claiming readiness, while `FAILED` is
+rejected immediately through the public facade.
 
 Injected clients and collections remain caller-owned. A URI-created PyMongo
 `AsyncMongoClient` is provider-owned and is closed once through `close()` or the
@@ -88,13 +92,18 @@ diagnostic facts from the public `buildInfo` and `hello` commands and the
 installed PyMongo version. It then asks MongoDB to explain a controlled,
 read-only `$vectorSearch` pipeline containing `exact: true` against the already
 validated index. Successful planning is the support signal. A public-command
-parse, invalid-option, or unsupported-stage response raises
+positively recognized parse, invalid-option, or unsupported-stage response raises
 `MongoDBCapabilityError` with remediation to use ANN or enable exact search.
 Authentication/authorization errors and task cancellation propagate unchanged.
+Interruptions (including code `11601`), transient/network failures, and unknown
+`OperationFailure` responses remain retrieval errors and are never cached as
+unsupported capability evidence.
 
 No server-version threshold is hard-coded: server and deployment strings are
 diagnostic facts, not inferred support claims. Results, including unsupported
-results and their driver cause, are cached for 300 seconds by default.
+results recognized from those controlled syntax/capability responses and their
+driver cause, are cached for 300 seconds by default. Operational failures never
+poison the cache.
 `capability_cache_ttl` changes the bound, and
 `validate_capabilities(refresh=True)` explicitly refreshes it. The explain probe
 uses a generated finite vector of the configured dimensions; it does not invoke

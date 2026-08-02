@@ -86,6 +86,23 @@ class VectorIndexManager:
             raise MongoDBIndexMissingError(
                 f"Vector Search index '{self.expected.name}' does not exist; create it explicitly."
             )
+        self._validate_inspected(inspected, require_ready=require_ready)
+        return inspected
+
+    def _validate_inspected(
+        self,
+        inspected: Mapping[str, Any],
+        *,
+        require_ready: bool,
+    ) -> None:
+        status = self._raise_if_failed(inspected)
+        self._validate_definition(inspected)
+        if require_ready and (status != "READY" or inspected.get("queryable") is not True):
+            raise MongoDBIndexNotReadyError(
+                f"Vector Search index '{self.expected.name}' is not READY and queryable."
+            )
+
+    def _raise_if_failed(self, inspected: Mapping[str, Any]) -> object:
         raw_status = inspected.get("status")
         status = raw_status.upper() if isinstance(raw_status, str) else raw_status
         if status == "FAILED":
@@ -94,12 +111,7 @@ class VectorIndexManager:
                 "inspect the deployment index error, then explicitly update, drop, or recreate "
                 "the index definition."
             )
-        self._validate_definition(inspected)
-        if require_ready and (status != "READY" or inspected.get("queryable") is not True):
-            raise MongoDBIndexNotReadyError(
-                f"Vector Search index '{self.expected.name}' is not READY and queryable."
-            )
-        return inspected
+        return status
 
     async def ensure(
         self,
@@ -120,6 +132,7 @@ class VectorIndexManager:
                     )
                 )
             else:
+                self._raise_if_failed(inspected)
                 try:
                     self._validate_definition(inspected)
                 except MongoDBIndexMismatchError:
@@ -129,7 +142,14 @@ class VectorIndexManager:
         except PyMongoError as exc:
             raise _translate_index_error(exc) from exc
         if not wait_until_ready:
-            return await self.inspect()
+            final = await self.inspect()
+            if final is None:
+                raise MongoDBIndexMissingError(
+                    f"Vector Search index '{self.expected.name}' was not inspectable after "
+                    "the ensure command was accepted; inspect it again before use."
+                )
+            self._validate_inspected(final, require_ready=False)
+            return final
         return await self.wait_until_ready(timeout=timeout, poll_interval=poll_interval)
 
     async def wait_until_ready(
