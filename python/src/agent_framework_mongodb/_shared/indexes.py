@@ -14,6 +14,7 @@ from pymongo.operations import SearchIndexModel
 from ..errors import (
     MongoDBAuthorizationError,
     MongoDBCapabilityError,
+    MongoDBConfigurationError,
     MongoDBIndexFailedError,
     MongoDBIndexMismatchError,
     MongoDBIndexMissingError,
@@ -250,7 +251,11 @@ class SearchIndexDefinition:
             _set_search_mapping(
                 fields,
                 path,
-                {"type": "string", "analyzer": self.analyzer},
+                {
+                    "type": "string",
+                    "analyzer": self.analyzer,
+                    "searchAnalyzer": self.analyzer,
+                },
             )
         for path, field_type in self.filter_fields:
             _set_search_mapping(fields, path, {"type": field_type})
@@ -397,11 +402,22 @@ class SearchIndexManager:
                 raise MongoDBIndexMismatchError(
                     f"MongoDB Search index '{self.expected.name}' is missing text path '{path}'."
                 )
-            if not any(
-                mapping.get("analyzer") == self.expected.analyzer for mapping in string_mappings
-            ):
+            matching_analyzer = tuple(
+                mapping
+                for mapping in string_mappings
+                if mapping.get("analyzer") == self.expected.analyzer
+            )
+            if not matching_analyzer:
                 raise MongoDBIndexMismatchError(
                     f"MongoDB Search index '{self.expected.name}' has the wrong analyzer "
+                    f"for text path '{path}'."
+                )
+            if not any(
+                mapping.get("searchAnalyzer", mapping.get("analyzer")) == self.expected.analyzer
+                for mapping in matching_analyzer
+            ):
+                raise MongoDBIndexMismatchError(
+                    f"MongoDB Search index '{self.expected.name}' has the wrong search analyzer "
                     f"for text path '{path}'."
                 )
         for path, expected_type in self.expected.filter_fields:
@@ -416,32 +432,63 @@ class SearchIndexManager:
 def _set_search_mapping(
     fields: dict[str, object],
     path: str,
-    mapping: dict[str, str],
+    mapping: dict[str, object],
 ) -> None:
     segments = path.split(".")
     current = fields
     for segment in segments[:-1]:
-        existing = current.setdefault(segment, {"type": "document", "fields": {}})
-        if not isinstance(existing, Mapping):
-            raise ValueError(f"Search index path '{path}' conflicts with another configured path.")
-        existing_mapping = cast(Mapping[str, object], existing)
-        nested = existing_mapping.get("fields")
+        existing = current.get(segment)
+        document_mapping: dict[str, object] | None
+        if existing is None:
+            document_mapping = {"type": "document", "fields": {}}
+            current[segment] = document_mapping
+        else:
+            mappings = _construction_mappings(existing, path)
+            document_mapping = next(
+                (candidate for candidate in mappings if candidate.get("type") == "document"),
+                None,
+            )
+            if document_mapping is None:
+                document_mapping = {"type": "document", "fields": {}}
+                mappings.append(document_mapping)
+                current[segment] = _canonical_mapping_value(mappings)
+        nested = document_mapping.get("fields")
         if not isinstance(nested, dict):
-            raise ValueError(f"Search index path '{path}' conflicts with another configured path.")
+            raise MongoDBConfigurationError(
+                f"Search index path '{path}' conflicts with a non-document mapping."
+            )
         current = cast(dict[str, object], nested)
     existing_leaf = current.get(segments[-1])
     if existing_leaf is None:
         current[segments[-1]] = mapping
-    elif isinstance(existing_leaf, list):
-        mappings = cast(list[object], existing_leaf)
+    else:
+        mappings = _construction_mappings(existing_leaf, path)
         if mapping not in mappings:
             mappings.append(mapping)
-    elif isinstance(existing_leaf, Mapping):
-        existing_mapping = cast(Mapping[str, object], existing_leaf)
-        if existing_mapping != mapping:
-            current[segments[-1]] = [existing_leaf, mapping]
-    else:
-        raise ValueError(f"Search index path '{path}' has an invalid configured mapping.")
+        current[segments[-1]] = _canonical_mapping_value(mappings)
+
+
+def _construction_mappings(value: object, path: str) -> list[dict[str, object]]:
+    raw_mappings: list[object] = cast(list[object], value) if isinstance(value, list) else [value]
+    if not all(isinstance(item, dict) for item in raw_mappings):
+        raise MongoDBConfigurationError(
+            f"Search index path '{path}' has an invalid scalar/document mapping conflict."
+        )
+    return [cast(dict[str, object], item) for item in raw_mappings]
+
+
+def _canonical_mapping_value(mappings: list[dict[str, object]]) -> object:
+    order = {
+        "string": 0,
+        "token": 1,
+        "boolean": 2,
+        "date": 3,
+        "number": 4,
+        "document": 5,
+        "embeddedDocuments": 6,
+    }
+    mappings.sort(key=lambda item: order.get(str(item.get("type")), len(order)))
+    return mappings[0] if len(mappings) == 1 else mappings
 
 
 def _search_mappings_for_path(

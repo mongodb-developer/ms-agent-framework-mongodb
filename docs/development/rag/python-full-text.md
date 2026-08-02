@@ -114,22 +114,28 @@ bounded monotonic polling, cancellation, and stable error categories as the
 Vector Search manager.
 
 `validate_search_index()` is read-only. It compares the index name/type,
-READY/queryable state, every configured text path, and the configured analyzer.
+READY/queryable state, every configured text path, and both its index-time
+`analyzer` and query-time `searchAnalyzer`. When MongoDB omits
+`searchAnalyzer`, validation applies MongoDB's documented default that it is
+equal to `analyzer`; an explicitly different value is an index mismatch.
 It also validates effective filter paths and their inferred Search mapping:
 strings use `token`, booleans use `boolean`, numbers use `number`, and
 timezone-aware datetimes use `date`. Mixed BSON types for one path and null
 Search equality values fail before I/O.
 
 `ensure_search_index()` is the only full-text create/update facade. It creates
-a Search index with dynamic mappings plus explicit text/analyzer and filter
+a Search index with dynamic mappings plus explicit text `analyzer`,
+`searchAnalyzer`, and filter
 mappings. When one path is both searched and filtered, its MongoDB index field
 is an array containing both the `string` analyzer mapping and the typed filter
 mapping. Validation examines every mapping regardless of array order and
 ignores server-added properties while still requiring every expected
-type/analyzer. Dotted paths become nested `document` mappings. Ensure is never
-called by construction, direct search, or Agent Framework hooks. Use a
-provisioner identity for ensure; runtime identities need only index inspection,
-read/aggregate, and Search query privileges.
+type/analyzer. A path that is both text and a parent of another text path uses a
+canonical `string` plus `document` multi-mapping array regardless of option
+order. Invalid scalar/document conflicts raise `MongoDBConfigurationError`.
+Ensure is never called by construction, direct search, or Agent Framework
+hooks. Use a provisioner identity for ensure; runtime identities need only
+index inspection, read/aggregate, and Search query privileges.
 
 ## Parent hydration, resilience, and ownership
 

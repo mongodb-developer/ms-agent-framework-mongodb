@@ -112,6 +112,7 @@ class FakeCollection:
                             "content": {
                                 "type": "string",
                                 "analyzer": "lucene.standard",
+                                "searchAnalyzer": "lucene.standard",
                             },
                             "tenant_id": {"type": "token"},
                             "published_year": {"type": "number"},
@@ -337,6 +338,7 @@ async def test_search_index_facade_is_read_only_until_explicit_ensure() -> None:
                     "content": {
                         "type": "string",
                         "analyzer": "lucene.standard",
+                        "searchAnalyzer": "lucene.standard",
                     },
                     "tenant_id": {"type": "token"},
                 },
@@ -358,8 +360,52 @@ async def test_search_index_ensure_emits_multiple_mappings_for_shared_text_filte
     assert collection.created_search_model is not None
     fields = collection.created_search_model.document["definition"]["mappings"]["fields"]
     assert fields["content"] == [
-        {"type": "string", "analyzer": "lucene.standard"},
+        {
+            "type": "string",
+            "analyzer": "lucene.standard",
+            "searchAnalyzer": "lucene.standard",
+        },
         {"type": "token"},
+    ]
+
+
+@pytest.mark.parametrize(
+    "text_fields",
+    [
+        ("content", "content.title"),
+        ("content.title", "content"),
+    ],
+)
+async def test_search_index_ensure_is_order_independent_for_overlapping_text_paths(
+    text_fields: tuple[str, str],
+) -> None:
+    collection = FakeCollection()
+    collection.search_indexes = []
+    provider = MongoDBRAGProvider(
+        full_text_options(text_fields=text_fields),
+        collection=collection,  # type: ignore[arg-type]
+    )
+
+    await provider.ensure_search_index()
+
+    assert collection.created_search_model is not None
+    fields = collection.created_search_model.document["definition"]["mappings"]["fields"]
+    assert fields["content"] == [
+        {
+            "type": "string",
+            "analyzer": "lucene.standard",
+            "searchAnalyzer": "lucene.standard",
+        },
+        {
+            "type": "document",
+            "fields": {
+                "title": {
+                    "type": "string",
+                    "analyzer": "lucene.standard",
+                    "searchAnalyzer": "lucene.standard",
+                }
+            },
+        },
     ]
 
 
@@ -380,6 +426,37 @@ async def test_search_index_validation_accepts_shared_mappings_in_any_order_with
     )
 
     await provider.validate_search_index()
+
+
+@pytest.mark.parametrize("search_analyzer", [None, "lucene.standard"])
+async def test_search_index_validation_accepts_default_or_explicit_equivalent_search_analyzer(
+    search_analyzer: str | None,
+) -> None:
+    collection = FakeCollection()
+    mapping = collection.search_indexes[0]["latestDefinition"]["mappings"]["fields"]["content"]
+    if search_analyzer is None:
+        mapping.pop("searchAnalyzer")
+    else:
+        mapping["searchAnalyzer"] = search_analyzer
+    provider = MongoDBRAGProvider(
+        full_text_options(),
+        collection=collection,  # type: ignore[arg-type]
+    )
+
+    await provider.validate_search_index()
+
+
+async def test_search_index_validation_rejects_search_analyzer_mismatch() -> None:
+    collection = FakeCollection()
+    mapping = collection.search_indexes[0]["latestDefinition"]["mappings"]["fields"]["content"]
+    mapping["searchAnalyzer"] = "lucene.english"
+    provider = MongoDBRAGProvider(
+        full_text_options(),
+        collection=collection,  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(MongoDBIndexMismatchError, match="search analyzer"):
+        await provider.validate_search_index()
 
 
 @pytest.mark.parametrize(
