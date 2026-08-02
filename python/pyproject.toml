@@ -36,6 +36,7 @@ testpaths = ["tests"]
 markers = [
     "integration_memory: requires a credentialed MongoDB deployment with Vector Search",
     "integration_history: requires a credentialed MongoDB deployment",
+    "integration_rag_vector: requires a credentialed MongoDB deployment with Vector Search",
 ]
 
 [tool.ruff]

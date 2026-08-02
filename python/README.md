@@ -49,43 +49,67 @@ Run `samples\history_quickstart.py` after setting `MONGODB_URI`,
 `MONGODB_HISTORY_APPLICATION_ID`, `MONGODB_HISTORY_AGENT_ID`, and
 `MONGODB_HISTORY_SESSION_ID`. Index creation and session clearing are explicit.
 
-## RAG contracts
+## Vector RAG quickstart
 
-The package exports the shared, read-only RAG contracts before any search
-execution mode is enabled:
+Vector RAG performs read-only retrieval from a pre-ingested knowledge collection.
+Its mandatory typed filter is applied inside `$vectorSearch` before candidates
+or results are limited.
 
 ```python
 from agent_framework_mongodb import (
     AndFilter,
     EqualFilter,
     InFilter,
+    MongoDBRAGContextProvider,
+    MongoDBRAGProvider,
     MongoDBRAGProviderOptions,
     MongoDBSearchMode,
 )
 
-options = MongoDBRAGProviderOptions(
-    mode=MongoDBSearchMode.VECTOR_ANN,
-    vector_dimensions=1536,
-    vector_index_name="knowledge_vector",
-    text_fields=("content",),
-    vector_field="embedding",
-    filter=AndFilter(
-        EqualFilter("tenant_id", "tenant-123"),
-        InFilter("visibility", ("public", "tenant")),
+direct = MongoDBRAGProvider(
+    MongoDBRAGProviderOptions(
+        mode=MongoDBSearchMode.VECTOR_ANN,
+        vector_dimensions=1536,
+        vector_index_name="knowledge_vector",
+        text_fields=("content",),
+        vector_field="embedding",
+        filter=AndFilter(
+            EqualFilter("tenant_id", "tenant-123"),
+            InFilter("visibility", ("public", "tenant")),
+        ),
     ),
+    embedding_generator=embedding_generator,
+    connection_string=os.environ["MONGODB_URI"],
+    database_name=os.environ["MONGODB_DATABASE"],
+    collection_name=os.environ["MONGODB_RAG_COLLECTION"],
 )
+rag = MongoDBRAGContextProvider(direct)
+await direct.validate_vector_search_index()
+results = await rag.search("tenant isolation")
 ```
 
 Public filters are typed and bounded; raw dictionaries, BSON, field names,
 operators, and pipelines are not accepted as filter input. The package exports
 `MongoDBRAGProvider`, `MongoDBRAGContextProvider`, `MongoDBRAGProviderOptions`,
 `MongoDBRAGSearchOptions`, `MongoDBRAGParentOptions`, `MongoDBRAGResult`, and
-`MongoDBSearchMode`. Direct `search` currently reports that the selected mode
-implementation is not installed. Vector ANN, vector ENN, full-text, and hybrid
-RRF execution are delivered by later independently tested feature slices.
+`MongoDBSearchMode`. Vector ANN and ENN are implemented. Full-text and hybrid
+RRF remain separate feature slices and fail clearly rather than downgrading.
+ENN verifies exact-search planning through public MongoDB commands before
+embedding and caches the observed capability for a bounded interval; it does
+not infer support from an unverified server-version threshold. Only recognized
+unsupported syntax/capability responses are cached; operational failures
+propagate and are retried by the next capability evaluation.
 
 Membership values and field-path collections must be explicit lists or tuples;
 scalar strings and bytes are rejected rather than split into characters.
 Integer filter values must fit BSON int64, and range filters do not treat
 booleans as numbers. Repeated configured field paths are normalized once in
 first-seen order.
+
+Run `samples\rag_vector_quickstart.py` after setting `MONGODB_URI`,
+`MONGODB_DATABASE`, `MONGODB_RAG_COLLECTION`, `MONGODB_RAG_VECTOR_INDEX`, and
+`MONGODB_RAG_TENANT`. The collection must already contain three-dimensional
+vectors produced by the sample generator; production dimensions and embeddings
+must match the configured index. Explicit index ensure requires provisioner
+privileges. Runtime search needs only read/aggregate and Search query privileges.
+The sample does not ingest or delete documents.

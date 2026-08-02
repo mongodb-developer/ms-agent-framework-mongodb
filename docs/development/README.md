@@ -20,3 +20,4 @@ This documentation explains the implemented system at the code level. The
 ## RAG
 
 - [Python RAG contracts and typed filters](rag/python-contracts.md)
+- [Python Vector Search implementation](rag/python-vector.md)

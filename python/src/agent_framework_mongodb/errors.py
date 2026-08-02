@@ -49,6 +49,10 @@ class MongoDBIndexNotReadyError(MongoDBIndexError):
     """Raised when an index exists but is not queryable."""
 
 
+class MongoDBIndexFailedError(MongoDBIndexError):
+    """Raised when an index entered a permanent failed state."""
+
+
 class MongoDBRetrievalError(MongoDBIntegrationError):
     """Raised when a direct MongoDB read operation fails."""
 
