@@ -181,6 +181,7 @@ class MongoDBRAGProviderOptions:
     id_field: str = "_id"
     text_fields: tuple[str, ...] | list[str] = ("content",)
     vector_field: str = "embedding"
+    similarity: str = "cosine"
     source_name_field: str | None = "source.name"
     source_url_field: str | None = "source.url"
     metadata_fields: tuple[str, ...] | list[str] = ()
@@ -214,6 +215,10 @@ class MongoDBRAGProviderOptions:
             "vector_field",
             validate_field_path(self.vector_field, option_name="vector_field"),
         )
+        if self.similarity not in {"cosine", "dotProduct", "euclidean"}:
+            raise MongoDBConfigurationError(
+                "similarity must be 'cosine', 'dotProduct', or 'euclidean'."
+            )
         for name in ("source_name_field", "source_url_field"):
             value = getattr(self, name)
             if value is not None:
