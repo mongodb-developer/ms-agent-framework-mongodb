@@ -107,3 +107,8 @@ def compile_filter(
         )
         return {"vector": _vector(expression), "search": search}
     raise MongoDBFilterTranslationError(f"Search mode {mode!r} cannot translate filters.")
+
+
+def compile_match_filter(expression: MongoDBFilter) -> MongoDocument:
+    """Compile a complete typed filter for an authorized post-retrieval read."""
+    return _vector(expression)

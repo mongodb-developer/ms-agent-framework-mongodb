@@ -6,6 +6,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Mapping, Sequence
+from datetime import datetime
 from types import TracebackType
 from typing import Any, ClassVar, cast
 
@@ -18,7 +19,12 @@ from pymongo.errors import ConnectionFailure, OperationFailure, PyMongoError
 from .._shared.capabilities import CapabilityResult
 from .._shared.client import MongoClientHandle
 from .._shared.embeddings import normalize_embeddings
-from .._shared.indexes import VectorIndexDefinition, VectorIndexManager
+from .._shared.indexes import (
+    SearchIndexDefinition,
+    SearchIndexManager,
+    VectorIndexDefinition,
+    VectorIndexManager,
+)
 from ..errors import (
     MongoDBAuthorizationError,
     MongoDBCapabilityError,
@@ -34,7 +40,7 @@ from ..errors import (
     MongoDBTimeoutError,
     MongoDBTransientRetrievalError,
 )
-from ._filters import compile_filter
+from ._filters import compile_filter, compile_match_filter
 from .filters import (
     AndFilter,
     EqualFilter,
@@ -104,7 +110,11 @@ class MongoDBRAGProvider:
             actual_collection_name = getattr(collection, "name", None)
             if isinstance(actual_collection_name, str) and actual_collection_name:
                 self.collection_name = actual_collection_name
-        elif embedding_generator is None and mongo_client is None:
+        elif (
+            options.mode is not MongoDBSearchMode.FULL_TEXT
+            and embedding_generator is None
+            and mongo_client is None
+        ):
             # Preserve the contract-only construction supported by the preceding slice.
             self.collection = None
         else:
@@ -166,6 +176,7 @@ class MongoDBRAGProvider:
         if self.options.mode not in (
             MongoDBSearchMode.VECTOR_ANN,
             MongoDBSearchMode.VECTOR_ENN,
+            MongoDBSearchMode.FULL_TEXT,
         ):
             raise MongoDBCapabilityError(
                 f"{self.options.mode.value} search execution is not installed; "
@@ -182,6 +193,40 @@ class MongoDBRAGProvider:
             if effective.filter is not None
             else None
         )
+        if self.options.mode is MongoDBSearchMode.FULL_TEXT:
+            await self._validate_effective_search_index(effective.filter)
+            compound: MongoDocument = {
+                "must": [
+                    {
+                        "text": {
+                            "query": query,
+                            "path": list(self.options.text_fields),
+                        }
+                    }
+                ]
+            }
+            if compiled_filter is not None:
+                compound["filter"] = compiled_filter
+            search_stage: MongoDocument = {
+                "index": self.options.search_index_name,
+                "compound": compound,
+            }
+            search_pipeline: list[MongoDocument] = [
+                {"$search": search_stage},
+                {"$limit": effective.top_k},
+                {"$set": {"_ragScore": {"$meta": "searchScore"}}},
+            ]
+            try:
+                cursor = await self.collection.aggregate(search_pipeline)
+                documents = await cursor.to_list(length=effective.top_k)
+            except asyncio.CancelledError:
+                raise
+            except PyMongoError as exc:
+                raise _translate_mongo_error(exc) from exc
+            if self.options.parent is not None:
+                return await self._hydrate_parents(documents)
+            return [self._map_result(document) for document in documents]
+
         await self._validate_effective_vector_search_index(effective.filter)
         if self.options.mode is MongoDBSearchMode.VECTOR_ENN:
             await self.validate_capabilities()
@@ -215,6 +260,10 @@ class MongoDBRAGProvider:
 
     async def validate_capabilities(self, *, refresh: bool = False) -> CapabilityResult:
         """Validate exact Vector Search with public deployment commands and cache the result."""
+        if self.options.mode is MongoDBSearchMode.FULL_TEXT:
+            del refresh
+            await self.validate_search_index()
+            return CapabilityResult(name="full_text", supported=True)
         if self.options.mode is not MongoDBSearchMode.VECTOR_ENN:
             return CapabilityResult(name=self.options.mode.value, supported=True)
         if self.collection is None:
@@ -338,7 +387,7 @@ class MongoDBRAGProvider:
             match = {
                 "$and": [
                     identifier_filter,
-                    compile_filter(self.options.filter, self.options.mode),
+                    compile_match_filter(self.options.filter),
                 ]
             }
         pipeline: list[MongoDocument] = [{"$match": match}]
@@ -416,7 +465,7 @@ class MongoDBRAGProvider:
         if not text_parts:
             raise MongoDBMappingError("MongoDB RAG result is missing configured chunk text.")
         if isinstance(score, bool) or not isinstance(score, (int, float)):
-            raise MongoDBMappingError("MongoDB RAG result is missing a numeric vector score.")
+            raise MongoDBMappingError("MongoDB RAG result is missing a numeric retrieval score.")
         metadata = {
             path: value
             for path in self.options.metadata_fields
@@ -465,6 +514,47 @@ class MongoDBRAGProvider:
             timeout=timeout,
             poll_interval=poll_interval,
         )
+
+    async def validate_search_index(self, *, require_ready: bool = True) -> None:
+        """Validate the named MongoDB Search index without mutating it."""
+        await self._search_index_manager().validate(require_ready=require_ready)
+
+    async def _validate_effective_search_index(
+        self,
+        effective_filter: MongoDBFilter | None,
+    ) -> None:
+        await self._search_index_manager_for_filter(effective_filter).validate(require_ready=True)
+
+    async def ensure_search_index(
+        self,
+        *,
+        wait_until_ready: bool = False,
+        timeout: float = 600.0,
+        poll_interval: float = 1.0,
+    ) -> None:
+        """Explicitly create/update the Search index and optionally await queryability."""
+        await self._search_index_manager().ensure(
+            wait_until_ready=wait_until_ready,
+            timeout=timeout,
+            poll_interval=poll_interval,
+        )
+
+    def _search_index_manager(self) -> SearchIndexManager:
+        return self._search_index_manager_for_filter(self.options.filter)
+
+    def _search_index_manager_for_filter(
+        self,
+        expression: MongoDBFilter | None,
+    ) -> SearchIndexManager:
+        if self.collection is None:
+            raise MongoDBCapabilityError("MongoDB collection is not configured.")
+        expected = SearchIndexDefinition(
+            name=cast(str, self.options.search_index_name),
+            text_paths=tuple(self.options.text_fields),
+            analyzer=self.options.search_analyzer,
+            filter_fields=tuple(sorted(_search_filter_fields(expression).items())),
+        )
+        return SearchIndexManager(cast(Any, self.collection), expected)
 
     def _index_manager(self) -> VectorIndexManager:
         return self._index_manager_for_filter(self.options.filter)
@@ -636,25 +726,25 @@ def _translate_mongo_error(error: PyMongoError) -> MongoDBIntegrationError:
         if error.code in {13, 18}:
             return MongoDBAuthorizationError("MongoDB authentication or authorization failed.")
         if error.code == 27 or code_name in {"IndexNotFound", "SearchIndexNotFound"}:
-            return MongoDBIndexMissingError("The required MongoDB Vector Search index is missing.")
+            return MongoDBIndexMissingError(
+                "The required MongoDB Search/Vector Search index is missing."
+            )
         if error.code in {85, 86} or code_name in {
             "IndexOptionsConflict",
             "IndexKeySpecsConflict",
         }:
             return MongoDBIndexMismatchError(
-                "The configured MongoDB Vector Search index definition does not match."
+                "The configured MongoDB Search/Vector Search index definition does not match."
             )
         if code_name in {"SearchIndexNotReady", "IndexBuildAlreadyInProgress"}:
             return MongoDBIndexNotReadyError(
-                "The required MongoDB Vector Search index is not ready."
+                "The required MongoDB Search/Vector Search index is not ready."
             )
         if error.code in {59, 303} or code_name in {
             "CommandNotFound",
             "Location303",
         }:
-            return MongoDBCapabilityError(
-                "The requested MongoDB Vector Search mode is unavailable."
-            )
+            return MongoDBCapabilityError("The requested MongoDB Search mode is unavailable.")
         if error.code in {2, 9, 14, 72} or code_name in {
             "BadValue",
             "FailedToParse",
@@ -705,6 +795,54 @@ def _filter_paths(expression: MongoDBFilter | None) -> set[str]:
         field = getattr(expression, "field", None)
         return {field} if isinstance(field, str) else set()
     return set()
+
+
+def _search_filter_fields(expression: MongoDBFilter | None) -> dict[str, str]:
+    if expression is None:
+        return {}
+    if isinstance(expression, (AndFilter, OrFilter)):
+        result: dict[str, str] = {}
+        for child in expression.filters:
+            for path, field_type in _search_filter_fields(child).items():
+                existing = result.get(path)
+                if existing is not None and existing != field_type:
+                    raise MongoDBConfigurationError(
+                        f"Search filter path '{path}' is used with incompatible value types."
+                    )
+                result[path] = field_type
+        return result
+    field = getattr(expression, "field", None)
+    if not isinstance(field, str):
+        return {}
+    values: tuple[object, ...]
+    if isinstance(expression, (InFilter, NotInFilter)):
+        values = tuple(expression.values)
+    else:
+        values = (getattr(expression, "value", None),)
+    field_types = {_search_mapping_type(value) for value in values}
+    if len(field_types) != 1:
+        raise MongoDBConfigurationError(
+            f"Search filter path '{field}' requires values with one BSON type."
+        )
+    return {field: field_types.pop()}
+
+
+def _search_mapping_type(value: object) -> str:
+    if isinstance(value, str):
+        return "token"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, datetime):
+        return "date"
+    if isinstance(value, (int, float)):
+        return "number"
+    if value is None:
+        raise MongoDBConfigurationError(
+            "MongoDB Search equality filters do not support null values."
+        )
+    raise MongoDBConfigurationError(
+        f"MongoDB Search filter value type {type(value).__name__!r} is unsupported."
+    )
 
 
 def _is_recognized_unsupported_exact(error: OperationFailure) -> bool:
