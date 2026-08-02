@@ -74,9 +74,6 @@ public sealed class MongoDBRAGProviderOptions
     /// <summary>Validates all options without contacting MongoDB.</summary>
     public void Validate()
     {
-        RequireIndexName(VectorIndexName, nameof(VectorIndexName));
-        RequireIndexName(SearchIndexName, nameof(SearchIndexName));
-        Internal.FieldPath.Validate(VectorFieldName, nameof(VectorFieldName));
         Internal.FieldPath.Validate(IdFieldName, nameof(IdFieldName));
         Internal.FieldPath.Validate(ChunkTextFieldName, nameof(ChunkTextFieldName));
         if (SourceNameFieldName is not null)
@@ -89,7 +86,6 @@ public sealed class MongoDBRAGProviderOptions
             Internal.FieldPath.Validate(SourceUrlFieldName, nameof(SourceUrlFieldName));
         }
 
-        ValidateSearchTextFieldNames();
         ValidateMetadataFieldNames();
 
         if (TopK is < 1 or > MaxTopK)
@@ -97,12 +93,17 @@ public sealed class MongoDBRAGProviderOptions
             throw new MongoDBConfigurationException($"TopK must be between 1 and {MaxTopK}.");
         }
 
+        // Only validate the vector/search configuration a mode actually reads, per the search-mode option contract
+        // in docs/spec/features/rag.md: vector-only modes must not require search index/field configuration, and
+        // FullText must not require vector index/field configuration. Hybrid RRF is the only mode that reads both.
         switch (SearchMode)
         {
             case MongoDBSearchMode.VectorAnn:
+                ValidateVectorConfiguration();
                 ValidateNumCandidates();
                 break;
             case MongoDBSearchMode.VectorEnn:
+                ValidateVectorConfiguration();
                 if (NumCandidates is not null)
                 {
                     throw new MongoDBConfigurationException(
@@ -111,6 +112,7 @@ public sealed class MongoDBRAGProviderOptions
 
                 break;
             case MongoDBSearchMode.FullText:
+                ValidateSearchConfiguration();
                 if (NumCandidates is not null)
                 {
                     throw new MongoDBConfigurationException(
@@ -119,6 +121,8 @@ public sealed class MongoDBRAGProviderOptions
 
                 break;
             case MongoDBSearchMode.HybridRrf:
+                ValidateVectorConfiguration();
+                ValidateSearchConfiguration();
                 ValidateNumCandidates();
                 if (VectorWeight <= 0 && TextWeight <= 0)
                 {
@@ -163,6 +167,18 @@ public sealed class MongoDBRAGProviderOptions
             MandatoryFilter = MandatoryFilter,
             RetrievalTimeout = RetrievalTimeout,
         };
+    }
+
+    private void ValidateVectorConfiguration()
+    {
+        Internal.IndexName.Validate(VectorIndexName, nameof(VectorIndexName));
+        Internal.FieldPath.Validate(VectorFieldName, nameof(VectorFieldName));
+    }
+
+    private void ValidateSearchConfiguration()
+    {
+        Internal.IndexName.Validate(SearchIndexName, nameof(SearchIndexName));
+        ValidateSearchTextFieldNames();
     }
 
     private void ValidateNumCandidates()
@@ -233,14 +249,6 @@ public sealed class MongoDBRAGProviderOptions
         if (weight < 0)
         {
             throw new MongoDBConfigurationException($"{name} must not be negative.");
-        }
-    }
-
-    private static void RequireIndexName(string value, string name)
-    {
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            throw new MongoDBConfigurationException($"{name} must not be empty.");
         }
     }
 }

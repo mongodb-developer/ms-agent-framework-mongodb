@@ -174,37 +174,47 @@ public abstract class MongoDBRAGFilter
 
     internal sealed class LogicalFilter : MongoDBRAGFilter
     {
+        // Chains into the array-accepting constructor so the defensive copy made by CopyAndValidate is the same
+        // array used both to compute the base-class depth and to populate Operands. Without this indirection, a
+        // caller-owned array (e.g. passed directly to And/Or instead of via the params expansion) could be mutated
+        // after construction to silently change an already-validated mandatory authorization filter.
         internal LogicalFilter(LogicalOperator @operator, IReadOnlyList<MongoDBRAGFilter> operands)
-            : base(ValidateAndComputeDepth(operands))
+            : this(@operator, CopyAndValidate(operands))
+        {
+        }
+
+        private LogicalFilter(LogicalOperator @operator, MongoDBRAGFilter[] copiedOperands)
+            : base(1 + copiedOperands.Max(static operand => operand.Depth))
         {
             Operator = @operator;
-            Operands = operands;
+            Operands = copiedOperands;
         }
 
         internal LogicalOperator Operator { get; }
 
         internal IReadOnlyList<MongoDBRAGFilter> Operands { get; }
 
-        private static int ValidateAndComputeDepth(IReadOnlyList<MongoDBRAGFilter> operands)
+        private static MongoDBRAGFilter[] CopyAndValidate(IReadOnlyList<MongoDBRAGFilter> operands)
         {
             ArgumentNullException.ThrowIfNull(operands);
-            if (operands.Any(static operand => operand is null))
+            MongoDBRAGFilter[] copy = [.. operands];
+            if (copy.Any(static operand => operand is null))
             {
                 throw new ArgumentException("Operands must not contain a null filter.", nameof(operands));
             }
 
-            if (operands.Count < 2)
+            if (copy.Length < 2)
             {
                 throw new MongoDBConfigurationException("A logical filter requires at least two operands.");
             }
 
-            if (operands.Count > MaxLogicalOperands)
+            if (copy.Length > MaxLogicalOperands)
             {
                 throw new MongoDBConfigurationException(
                     $"A logical filter must not exceed {MaxLogicalOperands} operands.");
             }
 
-            return 1 + operands.Max(static operand => operand.Depth);
+            return copy;
         }
     }
 }

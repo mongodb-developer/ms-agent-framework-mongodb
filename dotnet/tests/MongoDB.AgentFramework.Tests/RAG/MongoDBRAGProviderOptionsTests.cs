@@ -69,17 +69,6 @@ public sealed class MongoDBRAGProviderOptionsTests
     }
 
     [Fact]
-    public void HybridRequiresVectorAndSearchFieldMappings()
-    {
-        var options = new MongoDBRAGProviderOptions { SearchMode = MongoDBSearchMode.HybridRrf };
-
-        // Defaults already supply both branches; explicitly blank fields must fail validation.
-        options.VectorFieldName = string.Empty;
-
-        Assert.Throws<MongoDBConfigurationException>(options.Validate);
-    }
-
-    [Fact]
     public void HybridRejectsWhenBothWeightsAreZero()
     {
         var options = new MongoDBRAGProviderOptions
@@ -115,6 +104,98 @@ public sealed class MongoDBRAGProviderOptionsTests
         {
             SearchMode = MongoDBSearchMode.HybridRrf,
             VectorWeight = weight,
+        };
+
+        Assert.Throws<MongoDBConfigurationException>(options.Validate);
+    }
+
+    [Fact]
+    public void FullTextIgnoresUnusedVectorConfiguration()
+    {
+        var options = new MongoDBRAGProviderOptions
+        {
+            SearchMode = MongoDBSearchMode.FullText,
+            // Vector index/field are "Not used" for FullText per the search-mode option contract; leaving them
+            // blank (or otherwise invalid) must not fail validation for a mode that never reads them.
+            VectorIndexName = string.Empty,
+            VectorFieldName = string.Empty,
+        };
+
+        options.Validate();
+    }
+
+    [Theory]
+    [InlineData(MongoDBSearchMode.VectorAnn)]
+    [InlineData(MongoDBSearchMode.VectorEnn)]
+    public void VectorOnlyModesIgnoreUnusedSearchConfiguration(MongoDBSearchMode mode)
+    {
+        var options = new MongoDBRAGProviderOptions
+        {
+            SearchMode = mode,
+            // Search index/text fields are "Not used" for vector-only modes; leaving them blank must not fail
+            // validation for a mode that never reads them.
+            SearchIndexName = string.Empty,
+            SearchTextFieldNames = [],
+        };
+
+        options.Validate();
+    }
+
+    [Fact]
+    public void HybridRequiresVectorFieldMapping()
+    {
+        var options = new MongoDBRAGProviderOptions { SearchMode = MongoDBSearchMode.HybridRrf };
+
+        // Defaults already supply both branches; explicitly blank vector fields must fail validation because
+        // Hybrid RRF requires both branches, unlike the single-branch modes.
+        options.VectorFieldName = string.Empty;
+
+        Assert.Throws<MongoDBConfigurationException>(options.Validate);
+    }
+
+    [Fact]
+    public void HybridRequiresSearchFieldMapping()
+    {
+        var options = new MongoDBRAGProviderOptions { SearchMode = MongoDBSearchMode.HybridRrf };
+
+        // Defaults already supply both branches; explicitly blank search fields must fail validation because
+        // Hybrid RRF requires both branches, unlike the single-branch modes.
+        options.SearchTextFieldNames = [];
+
+        Assert.Throws<MongoDBConfigurationException>(options.Validate);
+    }
+
+    [Fact]
+    public void RejectsOperatorLikeVectorIndexName()
+    {
+        var options = new MongoDBRAGProviderOptions
+        {
+            SearchMode = MongoDBSearchMode.VectorAnn,
+            VectorIndexName = "$vectorSearch",
+        };
+
+        Assert.Throws<MongoDBConfigurationException>(options.Validate);
+    }
+
+    [Fact]
+    public void RejectsSearchIndexNameWithSeparators()
+    {
+        var options = new MongoDBRAGProviderOptions
+        {
+            SearchMode = MongoDBSearchMode.FullText,
+            SearchIndexName = "search/index",
+        };
+
+        Assert.Throws<MongoDBConfigurationException>(options.Validate);
+    }
+
+    [Fact]
+    public void RejectsExcessivelyLongIndexName()
+    {
+        var options = new MongoDBRAGProviderOptions
+        {
+            SearchMode = MongoDBSearchMode.VectorAnn,
+            VectorIndexName = new string('a', MongoDB.AgentFramework.Internal.IndexName.MaxLength + 1),
         };
 
         Assert.Throws<MongoDBConfigurationException>(options.Validate);

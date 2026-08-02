@@ -243,6 +243,59 @@ public sealed class MongoDBRAGFilterTranslatorTests
     }
 
     [Fact]
+    public void AndDefensivelyCopiesOperandsAgainstLaterCallerArrayMutation()
+    {
+        MongoDBRAGFilter[] operands =
+        [
+            MongoDBRAGFilter.Equal("tenant_id", "tenant-a"),
+            MongoDBRAGFilter.Equal("status", "published"),
+        ];
+        MongoDBRAGFilter filter = MongoDBRAGFilter.And(operands);
+
+        // Mutate the caller's own array after construction, as if an attacker or a careless caller replaced an
+        // authorization clause post-hoc. The already-constructed filter must keep translating the original clauses.
+        operands[0] = MongoDBRAGFilter.Equal("tenant_id", "attacker-tenant");
+
+        BsonDocument? vector = RAGFilterTranslator.TranslateVectorFilter(filter);
+        BsonArray? search = RAGFilterTranslator.TranslateSearchFilter(filter);
+
+        var expectedVector = new BsonDocument("$and", new BsonArray(
+        [
+            new BsonDocument("tenant_id", new BsonDocument("$eq", "tenant-a")),
+            new BsonDocument("status", new BsonDocument("$eq", "published")),
+        ]));
+        var expectedSearch = new BsonArray
+        {
+            new BsonDocument("equals", new BsonDocument { { "path", "tenant_id" }, { "value", "tenant-a" } }),
+            new BsonDocument("equals", new BsonDocument { { "path", "status" }, { "value", "published" } }),
+        };
+        Assert.Equal(expectedVector, vector);
+        Assert.Equal(expectedSearch, search);
+    }
+
+    [Fact]
+    public void OrDefensivelyCopiesOperandsAgainstLaterCallerArrayMutation()
+    {
+        MongoDBRAGFilter[] operands =
+        [
+            MongoDBRAGFilter.Equal("status", "published"),
+            MongoDBRAGFilter.Equal("status", "review"),
+        ];
+        MongoDBRAGFilter filter = MongoDBRAGFilter.Or(operands);
+
+        operands[1] = MongoDBRAGFilter.Equal("status", "attacker-value");
+
+        BsonDocument? vector = RAGFilterTranslator.TranslateVectorFilter(filter);
+
+        var expectedVector = new BsonDocument("$or", new BsonArray(
+        [
+            new BsonDocument("status", new BsonDocument("$eq", "published")),
+            new BsonDocument("status", new BsonDocument("$eq", "review")),
+        ]));
+        Assert.Equal(expectedVector, vector);
+    }
+
+    [Fact]
     public void MandatoryFilterTranslatesCompletelyIntoBothBranchesWithoutPartialLoss()
     {
         MongoDBRAGFilter filter = MongoDBRAGFilter.And(

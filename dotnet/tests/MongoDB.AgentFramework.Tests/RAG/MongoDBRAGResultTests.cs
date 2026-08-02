@@ -64,6 +64,43 @@ public sealed class MongoDBRAGResultTests
     }
 
     [Fact]
+    public void RawDocumentGetterReturnsIndependentSnapshotOnEachAccess()
+    {
+        var raw = new BsonDocument { { "_id", "doc-1" } };
+        var result = new MongoDBRAGResult("doc-1", "chunk text", 0.9, rawDocument: raw);
+
+        BsonDocument firstRead = result.RawDocument;
+        firstRead["mutated_via_getter"] = true;
+
+        Assert.False(result.RawDocument.Contains("mutated_via_getter"));
+    }
+
+    [Fact]
+    public void MetadataNestedDocumentIsImmutableAgainstLaterMutationOfTheSourceValue()
+    {
+        var nested = new BsonDocument { { "tag", "a" } };
+        var metadata = new Dictionary<string, BsonValue> { { "info", nested } };
+        var result = new MongoDBRAGResult("doc-1", "chunk text", 0.9, metadata: metadata);
+
+        nested["tag"] = "mutated_after_construction";
+
+        Assert.Equal("a", result.Metadata["info"].AsBsonDocument["tag"].AsString);
+    }
+
+    [Fact]
+    public void MetadataNestedDocumentGetterReturnsIndependentSnapshotOnEachAccess()
+    {
+        var nested = new BsonDocument { { "tag", "a" } };
+        var metadata = new Dictionary<string, BsonValue> { { "info", nested } };
+        var result = new MongoDBRAGResult("doc-1", "chunk text", 0.9, metadata: metadata);
+
+        BsonDocument firstRead = result.Metadata["info"].AsBsonDocument;
+        firstRead["tag"] = "mutated_via_getter";
+
+        Assert.Equal("a", result.Metadata["info"].AsBsonDocument["tag"].AsString);
+    }
+
+    [Fact]
     public void PreservesSourceAttribution()
     {
         var result = new MongoDBRAGResult(
