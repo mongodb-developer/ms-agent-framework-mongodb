@@ -374,6 +374,83 @@ public sealed class MongoDBRAGContextProviderTests
         Assert.True((bool)message.AdditionalProperties![MongoDBRAGContextProvider.GeneratedTagKey]!);
     }
 
+    [Fact]
+    public async Task ContextMessagesCarryStandardCitationAnnotationsWithSourceNameAndUrl()
+    {
+        var state = new RAGCollectionState
+        {
+            Results =
+            [
+                new BsonDocument
+                {
+                    { "_id", "chunk-1" },
+                    { "text", "Widgets ship in blue." },
+                    { "_ragScore", 0.9 },
+                    { "source", new BsonDocument { { "name", "Catalog" }, { "url", "https://example.test/c" } } },
+                },
+            ],
+        };
+        MongoDBRAGProvider provider = CreateProvider(state);
+        var contextProvider = new MongoDBRAGContextProvider(provider);
+
+        AIContext context = await contextProvider.InvokingAsync(
+            new AIContextProvider.InvokingContext(
+                new StubAgent(),
+                null,
+                new AIContext { Messages = [new ChatMessage(ChatRole.User, "what color are widgets")] }),
+            default);
+
+        ChatMessage message = Assert.Single(
+            context.Messages!,
+            candidate => candidate.AdditionalProperties?.ContainsKey("_rag_id") is true);
+        TextContent content = Assert.IsType<TextContent>(Assert.Single(message.Contents));
+        CitationAnnotation citation = Assert.IsType<CitationAnnotation>(Assert.Single(content.Annotations!));
+        // Source name/link must be visible to the model through the framework's standard citation annotation
+        // shape, matching TextSearchProvider's citation semantics per rag.md 364-373.
+        Assert.Equal("Catalog", citation.Title);
+        Assert.Equal(new Uri("https://example.test/c"), citation.Url);
+        // The complete MongoDBRAGResult (score, metadata, raw BSON) must still be reachable, not reduced to the
+        // narrower citation shape, per rag.md 369-372.
+        var raw = Assert.IsType<MongoDBRAGResult>(citation.RawRepresentation);
+        Assert.Equal("chunk-1", raw.Id);
+        Assert.Equal(0.9, raw.Score);
+    }
+
+    [Fact]
+    public async Task ContextMessagesOmitCitationUrlWhenSourceUrlIsMissingOrInvalid()
+    {
+        var state = new RAGCollectionState
+        {
+            Results =
+            [
+                new BsonDocument
+                {
+                    { "_id", "chunk-1" },
+                    { "text", "Widgets ship in blue." },
+                    { "_ragScore", 0.9 },
+                    { "source", new BsonDocument { { "name", "Catalog" } } },
+                },
+            ],
+        };
+        MongoDBRAGProvider provider = CreateProvider(state);
+        var contextProvider = new MongoDBRAGContextProvider(provider);
+
+        AIContext context = await contextProvider.InvokingAsync(
+            new AIContextProvider.InvokingContext(
+                new StubAgent(),
+                null,
+                new AIContext { Messages = [new ChatMessage(ChatRole.User, "what color are widgets")] }),
+            default);
+
+        ChatMessage message = Assert.Single(
+            context.Messages!,
+            candidate => candidate.AdditionalProperties?.ContainsKey("_rag_id") is true);
+        TextContent content = Assert.IsType<TextContent>(Assert.Single(message.Contents));
+        CitationAnnotation citation = Assert.IsType<CitationAnnotation>(Assert.Single(content.Annotations!));
+        Assert.Equal("Catalog", citation.Title);
+        Assert.Null(citation.Url);
+    }
+
     private static MongoDBRAGProvider CreateProvider(
         RAGCollectionState state,
         RecordingEmbeddingGenerator? embeddings = null,

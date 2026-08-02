@@ -44,6 +44,17 @@ documented fallback ("a dedicated adapter must preserve the same information thr
 recorded in the class's XML `<remarks>`. Revisit this composition once a resolved package version exposes
 `TextSearchProvider`.
 
+Even without composing `TextSearchProvider` itself, the adapter matches its citation/context formatting semantics
+(rag.md 364-373) using the framework's standard `Microsoft.Extensions.AI.CitationAnnotation` — the same public
+annotation type `Microsoft.Extensions.AI.Abstractions` 10.7.0 exposes independently of
+`Microsoft.Agents.AI.Abstractions` — attached to a `TextContent`'s `Annotations`, so a citation's `Title`
+(`SourceName`) and `Url` (`SourceUrl`, parsed only when it is a valid absolute URI) are visible to the model through
+the same standard shape a composed adapter would produce. Per rag.md 369-372, `TextSearchResult` has no first-class
+score/metadata; since this adapter is not a `TextSearchResult`-based composition, the complete `MongoDBRAGResult` is
+placed directly in `CitationAnnotation.RawRepresentation` (the closest standard analogue to the specification's
+`TextSearchResult.RawRepresentation` requirement) as well as in `AdditionalProperties[ResultKey]`, so score, metadata,
+ID, and raw BSON all remain reachable without inventing a narrower, lossy representation.
+
 ## ANN/ENN pipeline
 
 `Internal.RAGPipelineBuilder` (internal, exercised through `InternalsVisibleTo`) builds the shared pipeline for both
@@ -126,14 +137,18 @@ window landing entirely on such messages, producing an empty query even when rea
 before them.
 
 Each `MongoDBRAGResult` maps to a `ChatRole.Tool`-tagged `ChatMessage` (**not** `ChatRole.System`/`ChatRole.User` —
-retrieved chunks are data, never instructions) carrying `_rag_id`, `_rag_score`, `_rag_source_name`, and
-`_rag_source_url` in `AdditionalProperties`, plus two adapter-internal keys: `GeneratedTagKey` (`_rag_generated`,
-`true`) so a later turn's query-building step can recognize and exclude it, and `ResultKey` (`_rag_result`) carrying
-the complete, immutable `MongoDBRAGResult` itself — preserving `Metadata` and `RawDocument` for advanced callers
-without inventing a narrower, lossy representation, since the result type is already fully immutable end to end.
-`Instructions` is a fixed, provider-configured framing sentence that never contains chunk content, so a
-prompt-injection attempt embedded in a chunk cannot alter the framing instructions themselves — only the base
-`AIContextProvider` class decides how the returned `AIContext` is merged with the agent's other context.
+retrieved chunks are data, never instructions) whose single `TextContent` carries a standard
+`Microsoft.Extensions.AI.CitationAnnotation` (`Title` from `SourceName`, `Url` from `SourceUrl` when it parses as an
+absolute URI, `RawRepresentation` set to the complete `MongoDBRAGResult`) — see the `TextSearchProvider`
+compatibility section above. The message's own `AdditionalProperties` additionally carries `_rag_id`, `_rag_score`,
+`_rag_source_name`, and `_rag_source_url` for callers that read the flattened shape, plus two adapter-internal keys:
+`GeneratedTagKey` (`_rag_generated`, `true`) so a later turn's query-building step can recognize and exclude it, and
+`ResultKey` (`_rag_result`) carrying the complete, immutable `MongoDBRAGResult` itself — preserving `Metadata` and
+`RawDocument` for advanced callers without inventing a narrower, lossy representation, since the result type is
+already fully immutable end to end. `Instructions` is a fixed, provider-configured framing sentence that never
+contains chunk content, so a prompt-injection attempt embedded in a chunk cannot alter the framing instructions
+themselves — only the base `AIContextProvider` class decides how the returned `AIContext` is merged with the
+agent's other context.
 
 Fail-open behavior mirrors ADR 0010/Memory exactly: only `MongoDBRetrievalException`, `MongoDBEmbeddingException`,
 and `MongoDBTimeoutException` are caught (logged as a warning, then an empty `AIContext` is returned).
@@ -163,11 +178,13 @@ Tests live under `dotnet/tests/MongoDB.AgentFramework.Tests/RAG/` and were writt
   non-numeric/non-finite `_ragScore` mapping errors, complete raw-document preservation with the reserved score
   alias stripped, `MongoException` translation, cancellation propagation, timeout translation, and a no-write-
   operations guarantee.
-- `MongoDBRAGContextProviderTests` — attributed message shape, empty-query short-circuit, empty-results handling,
-  fail-open behavior for retrieval/embedding/timeout failures, capability-error and cancellation propagation,
-  recent-message window limiting, query selection restricted to non-empty User/Assistant messages, exclusion of
-  provider-generated (tagged) messages proving no self-retrieval, `MaxRecentMessages` windowing applied after
-  filtering rather than before, and complete result/metadata/raw-document preservation via `AdditionalProperties`.
+- `MongoDBRAGContextProviderTests` — attributed message shape, standard `CitationAnnotation` (`Title`/`Url` from
+  `SourceName`/`SourceUrl`, absent `Url` for a missing/invalid source URL) with the complete `MongoDBRAGResult` in
+  `RawRepresentation`, empty-query short-circuit, empty-results handling, fail-open behavior for
+  retrieval/embedding/timeout failures, capability-error and cancellation propagation, recent-message window
+  limiting, query selection restricted to non-empty User/Assistant messages, exclusion of provider-generated
+  (tagged) messages proving no self-retrieval, `MaxRecentMessages` windowing applied after filtering rather than
+  before, and complete result/metadata/raw-document preservation via `AdditionalProperties`.
 - `MongoDBRAGContractTests` — a language-neutral-style contract test (there is no Python RAG implementation yet to
   share a JSON fixture with) asserting that a multi-branch AND/OR `MandatoryFilter` is completely translated inside
   the `$vectorSearch` stage for both ANN and ENN.

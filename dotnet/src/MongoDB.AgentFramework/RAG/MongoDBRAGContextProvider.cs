@@ -120,8 +120,25 @@ public sealed class MongoDBRAGContextProvider : AIContextProvider
         }
     }
 
-    private static ChatMessage MapContextMessage(MongoDBRAGResult result) =>
-        new(ChatRole.Tool, result.Text)
+    private static ChatMessage MapContextMessage(MongoDBRAGResult result)
+    {
+        // Match TextSearchProvider's citation/context formatting semantics using the framework's standard
+        // Microsoft.Extensions.AI.CitationAnnotation (TextSearchProvider itself is not composable against the
+        // installed Microsoft.Agents.AI.Abstractions 1.13.0 package -- see the class remarks), so source
+        // name/link are visible to the model through the same annotation shape a composed adapter would produce,
+        // per rag.md 364-373.
+        var citation = new CitationAnnotation
+        {
+            Title = result.SourceName,
+            Url = TryCreateAbsoluteUri(result.SourceUrl),
+            // TextSearchResult has no first-class score/metadata property; rag.md 369-372 requires the complete
+            // MongoDBRAGResult (score, metadata, ID, raw BSON) to remain reachable from the adapter's own
+            // result/context path instead of being reduced to the narrower citation shape.
+            RawRepresentation = result,
+        };
+        var content = new TextContent(result.Text) { Annotations = [citation] };
+
+        return new ChatMessage(ChatRole.Tool, [content])
         {
             AdditionalProperties = new AdditionalPropertiesDictionary
             {
@@ -133,4 +150,8 @@ public sealed class MongoDBRAGContextProvider : AIContextProvider
                 [GeneratedTagKey] = true,
             },
         };
+    }
+
+    private static Uri? TryCreateAbsoluteUri(string? value) =>
+        !string.IsNullOrWhiteSpace(value) && Uri.TryCreate(value, UriKind.Absolute, out Uri? uri) ? uri : null;
 }
