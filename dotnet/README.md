@@ -71,3 +71,46 @@ read/write and Search index-management privileges. See the
 [implementation specifications](../docs/spec/README.md).
 
 The package is under active development and is not ready for publication.
+
+## Exact Chat History
+
+`MongoDBChatHistoryProvider : ChatHistoryProvider` stores lossless, ordered
+`ChatMessage` payloads for one immutable application/agent/session authorization
+scope. It uses Agent Framework's public JSON serialization and delegates lifecycle
+filtering, merging, and source attribution to the framework base provider.
+
+```csharp
+await using var history = new MongoDBChatHistoryProvider(
+    collection,
+    new MongoDBChatHistoryProviderOptions
+    {
+        ApplicationId = "my-app",
+        AgentId = "assistant",
+        SessionId = "session-123",
+        MaxMessages = 100,
+    });
+
+await history.EnsureIndexesAsync();
+await history.SaveMessagesAsync(
+    "session-123",
+    [new ChatMessage(ChatRole.User, "Hello") { MessageId = "message-1" }]);
+IReadOnlyList<ChatMessage> messages =
+    await history.GetMessagesAsync("session-123");
+```
+
+`EnsureIndexesAsync` is the only mutating provisioning operation. Runtime history
+does not use MongoDB Search or the Memory collection. `ClearMessagesAsync` rejects
+any session other than the configured authorization scope. Unknown stored versions
+fail with migration guidance.
+
+Run the sample after setting `MONGODB_URI` and `MONGODB_DATABASE`:
+
+```powershell
+dotnet run --project samples\HistoryQuickstart\HistoryQuickstart.csproj
+```
+
+Optional variables are `MONGODB_HISTORY_COLLECTION`,
+`MONGODB_HISTORY_APPLICATION_ID`, `MONGODB_HISTORY_AGENT_ID`, and
+`MONGODB_HISTORY_SESSION_ID`. Set `MONGODB_HISTORY_CLEAR=true` only when the
+sample's authorized session should be removed. See the
+[.NET Chat History developer guide](../docs/development/history/dotnet-history.md).

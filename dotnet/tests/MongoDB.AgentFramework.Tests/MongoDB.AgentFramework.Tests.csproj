@@ -21,4 +21,10 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\MongoDB.AgentFramework\MongoDB.AgentFramework.csproj" />
   </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\..\..\python\tests\contracts\fixtures\history_contract.json"
+          Link="Fixtures\history_contract.json"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 </Project>
