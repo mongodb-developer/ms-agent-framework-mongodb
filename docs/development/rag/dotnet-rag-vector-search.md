@@ -189,10 +189,11 @@ Tests live under `dotnet/tests/MongoDB.AgentFramework.Tests/RAG/` and were writt
   invoked), and disposal of the owned client when a later step (resolving the database/collection) fails.
 - `MongoDBRAGProviderSearchTests` — ANN/ENN filter-in-stage placement, `numCandidates`/`limit`/`exact` wiring,
   capability gating before any embedding/network call, empty-query rejection, embedding dimension/finiteness
-  validation, missing-ID/missing-text mapping errors, missing-optional-field-produces-null mapping, missing/
-  non-numeric/non-finite `_ragScore` mapping errors, complete raw-document preservation with the reserved score
-  alias stripped, `MongoException` translation, cancellation propagation, timeout translation, and a no-write-
-  operations guarantee.
+  validation, missing-ID/missing-text mapping errors (each fixture now includes a valid `_ragScore` so the test
+  actually exercises the ID/text mapping path rather than failing earlier on score validation), missing-optional-
+  field-produces-null mapping, missing/non-numeric/non-finite `_ragScore` mapping errors, complete raw-document
+  preservation with the reserved score alias stripped, `MongoException` translation, cancellation propagation,
+  timeout translation, and a no-write-operations guarantee.
 - `MongoDBRAGContextProviderTests` — attributed message shape, standard `CitationAnnotation` (`Title`/`Url` from
   `SourceName`/`SourceUrl`, absent `Url` for a missing/invalid source URL) with the complete `MongoDBRAGResult` in
   `RawRepresentation`, empty-query short-circuit, empty-results handling, fail-open behavior for

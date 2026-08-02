@@ -227,7 +227,9 @@ public sealed class MongoDBRAGProviderSearchTests
     {
         var state = new RAGCollectionState
         {
-            Results = [new BsonDocument { { "text", "chunk" } }],
+            // A valid _ragScore is included so this test actually exercises the missing-ID mapping path rather
+            // than failing earlier on score validation.
+            Results = [new BsonDocument { { "text", "chunk" }, { "_ragScore", 0.5 } }],
         };
         MongoDBRAGProvider provider = CreateProvider(state);
 
@@ -239,7 +241,9 @@ public sealed class MongoDBRAGProviderSearchTests
     {
         var state = new RAGCollectionState
         {
-            Results = [new BsonDocument { { "_id", "chunk-1" } }],
+            // A valid _ragScore is included so this test actually exercises the missing-text mapping path rather
+            // than failing earlier on score validation.
+            Results = [new BsonDocument { { "_id", "chunk-1" }, { "_ragScore", 0.5 } }],
         };
         MongoDBRAGProvider provider = CreateProvider(state);
 
