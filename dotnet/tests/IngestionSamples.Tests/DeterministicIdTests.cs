@@ -69,4 +69,26 @@ public sealed class DeterministicIdTests
     {
         Assert.Throws<IngestionValidationException>(() => DeterministicId.ForChunk("tenant-a", "source-1", -1));
     }
+
+    [Fact]
+    public void ForChunkDoesNotCollideAcrossControlDelimiterFieldBoundaryShifts()
+    {
+        // "tenant-a\u001fb" + "c" and "tenant-a" + "b\u001fc" would concatenate to the exact same delimiter-joined
+        // string ("tenant-a\u001fb\u001fc"), so a naive `string.Join('\u001f', ...)`-style preimage would collide
+        // these two logically distinct (tenantId, sourceId) tuples into the same hash/ID. Canonical length-prefixed
+        // framing must keep them distinct.
+        string first = DeterministicId.ForChunk("tenant-a\u001fb", "c", 0);
+        string second = DeterministicId.ForChunk("tenant-a", "b\u001fc", 0);
+
+        Assert.NotEqual(first, second);
+    }
+
+    [Fact]
+    public void ForParentDoesNotCollideAcrossControlDelimiterFieldBoundaryShifts()
+    {
+        string first = DeterministicId.ForParent("tenant-a\u001fb", "c");
+        string second = DeterministicId.ForParent("tenant-a", "b\u001fc");
+
+        Assert.NotEqual(first, second);
+    }
 }

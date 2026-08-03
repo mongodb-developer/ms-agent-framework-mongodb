@@ -1,6 +1,5 @@
 using System.Globalization;
 using System.Security.Cryptography;
-using System.Text;
 
 namespace MongoDB.AgentFramework.Samples.Ingestion;
 
@@ -21,7 +20,7 @@ public static class DeterministicId
             throw new IngestionValidationException($"{nameof(chunkIndex)} must not be negative.");
         }
 
-        return "chunk_" + Hash($"{tenantId}\u001f{sourceId}\u001fchunk\u001f{chunkIndex.ToString(CultureInfo.InvariantCulture)}");
+        return "chunk_" + Hash(tenantId, sourceId, "chunk", chunkIndex.ToString(CultureInfo.InvariantCulture));
     }
 
     /// <summary>Derives a stable parent document ID from tenant and source identity, for parent-document RAG.</summary>
@@ -29,11 +28,14 @@ public static class DeterministicId
     {
         RequireText(tenantId, nameof(tenantId));
         RequireText(sourceId, nameof(sourceId));
-        return "parent_" + Hash($"{tenantId}\u001f{sourceId}\u001fparent");
+        return "parent_" + Hash(tenantId, sourceId, "parent");
     }
 
-    private static string Hash(string input) =>
-        Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(input)));
+    // Fields are combined via CanonicalFraming.Frame rather than delimiter-joined concatenation, so no combination
+    // of tenantId/sourceId/tag/index values -- including ones containing embedded delimiter or control characters
+    // -- can be reinterpreted as a different split of fields and collide onto the same ID.
+    private static string Hash(params string[] fields) =>
+        Convert.ToHexStringLower(SHA256.HashData(CanonicalFraming.Frame(fields)));
 
     private static void RequireText(string value, string name)
     {
@@ -43,3 +45,4 @@ public static class DeterministicId
         }
     }
 }
+

@@ -41,7 +41,10 @@ public sealed class ParentDocumentIngestionPipeline
         string parentId = DeterministicId.ForParent(document.TenantId, document.SourceId);
         // The parent's tracked hash covers title/URL as well as content -- not just content -- so a title-only or
         // URL-only edit (no child chunk text change) is still detected as a parent-record change on the next run.
-        string parentHash = ContentHash.Compute($"{document.Title}\u001f{document.Url}\u001f{document.Content}");
+        // ContentHash.ComputeFramed uses canonical length-prefixed framing (CanonicalFraming), not delimiter-joined
+        // concatenation, so a Title/Url boundary shift (e.g. Title="a\u001fb", Url="c" versus Title="a",
+        // Url="b\u001fc") can never be silently mistaken for unchanged content.
+        string parentHash = ContentHash.ComputeFramed(document.Title, document.Url, document.Content);
         IReadOnlyList<string> chunkTexts = DocumentChunker.Chunk(document.Content, _chunkingOptions);
 
         var desired = new List<ChunkCandidate>(chunkTexts.Count + 1)

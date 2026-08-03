@@ -14,6 +14,16 @@ public static class ContentHash
     public static string Compute(string content)
     {
         ArgumentNullException.ThrowIfNull(content);
-        return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(content)));
+        return ComputeBytes(Encoding.UTF8.GetBytes(content));
     }
+
+    /// <summary>
+    /// Computes a stable, lowercase hex SHA-256 hash over multiple fields using <see cref="CanonicalFraming"/>
+    /// rather than delimiter-joined concatenation, so no combination of field values -- including ones containing
+    /// embedded delimiter or other control characters, or a <see langword="null"/> field versus an empty one -- can
+    /// produce the same hash for a logically different combination of fields.
+    /// </summary>
+    public static string ComputeFramed(params string?[] fields) => ComputeBytes(CanonicalFraming.Frame(fields));
+
+    private static string ComputeBytes(byte[] bytes) => Convert.ToHexStringLower(SHA256.HashData(bytes));
 }

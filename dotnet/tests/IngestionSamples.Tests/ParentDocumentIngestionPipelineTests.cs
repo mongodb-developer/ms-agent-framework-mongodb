@@ -43,6 +43,25 @@ public sealed class ParentDocumentIngestionPipelineTests
     }
 
     [Fact]
+    public async Task IngestAsyncDetectsParentChangeAcrossControlDelimiterFieldBoundaryShift()
+    {
+        // Title="a\u001fb", Url="c" and Title="a", Url="b\u001fc" would concatenate identically under a naive
+        // delimiter-joined parent hash preimage ("a\u001fb\u001fc\u001f<content>" either way), silently treating a
+        // genuine title/url change as "unchanged". Canonical framing must still detect this as a parent change.
+        var store = new FakeChunkStore();
+        var pipeline = CreatePipeline(store);
+        var document = new SourceDocument(
+            "tenant-a", "source-1", "Body text stays exactly the same across both runs here.",
+            Title: "a\u001fb", Url: "c");
+        await pipeline.IngestAsync(document);
+
+        IngestionResult result = await pipeline.IngestAsync(document with { Title = "a", Url = "b\u001fc" });
+
+        Assert.Equal(1, result.ChunksUpserted);
+        Assert.True(result.ChunksUnchanged > 0);
+    }
+
+    [Fact]
     public async Task IngestAsyncOnlyEmbedsChangedChildrenNotTheParent()
     {
         var store = new FakeChunkStore();

@@ -78,9 +78,17 @@ public sealed class MongoChunkStore : IChunkStore
             foreach (ChunkRecord record in records.Skip(offset).Take(MaxBatchSize))
             {
                 BsonDocument document = record.ToBsonDocument();
-                batch.Add(new ReplaceOneModel<BsonDocument>(
+                // The replace filter always matches _id together with tenant_id + source_id + record_type -- never
+                // _id alone -- so an accidental or hash-collision match on _id can never silently overwrite a
+                // record belonging to a different tenant/source/record type: with a mismatched existing document,
+                // the filter simply does not match it, and the upsert instead fails with a MongoDB duplicate-key
+                // error on _id rather than corrupting another scope's data.
+                FilterDefinition<BsonDocument> filter = Builders<BsonDocument>.Filter.And(
                     Builders<BsonDocument>.Filter.Eq(ChunkRecord.IdFieldName, record.Id),
-                    document)
+                    Builders<BsonDocument>.Filter.Eq(ChunkRecord.TenantIdFieldName, record.TenantId),
+                    Builders<BsonDocument>.Filter.Eq(ChunkRecord.SourceIdFieldName, record.SourceId),
+                    Builders<BsonDocument>.Filter.Eq(ChunkRecord.RecordTypeFieldName, record.RecordType));
+                batch.Add(new ReplaceOneModel<BsonDocument>(filter, document)
                 {
                     IsUpsert = true,
                 });

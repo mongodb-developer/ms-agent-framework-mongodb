@@ -31,6 +31,18 @@ internal sealed class FakeChunkStore : IChunkStore
         UpsertCallCount++;
         foreach (ChunkRecord record in records)
         {
+            // Mirrors MongoChunkStore's replace filter, which always matches _id together with tenant_id +
+            // source_id + record_type (never _id alone): an _id that collides with a different tenant/source/type
+            // must never silently overwrite that other record.
+            if (_records.TryGetValue(record.Id, out ChunkRecord? existing) &&
+                (existing.TenantId != record.TenantId ||
+                 existing.SourceId != record.SourceId ||
+                 existing.RecordType != record.RecordType))
+            {
+                throw new IngestionValidationException(
+                    $"Record '{record.Id}' already exists for a different tenant/source/record-type scope.");
+            }
+
             _records[record.Id] = record;
         }
 
