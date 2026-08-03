@@ -191,9 +191,10 @@ await using var hybridRag = new MongoDBRAGProvider(
 IReadOnlyList<MongoDBRAGResult> hybridResults = await hybridRag.SearchAsync("What color do widgets ship in?");
 ```
 
-This slice does not provision Vector Search or Search indexes; the target index/indexes must already exist. Injected
-clients/databases/collections/embedding generators remain caller-owned; only a client created by the
-connection-string constructor is disposed by the provider.
+This slice does not provision Vector Search or Search indexes itself; the target index/indexes must already exist
+before `MongoDBRAGProvider` connects. See [Index Management](#index-management) below for the separate facade that
+provisions them. Injected clients/databases/collections/embedding generators remain caller-owned; only a client
+created by the connection-string constructor is disposed by the provider.
 
 Run the sample after setting `MONGODB_URI`, `MONGODB_DATABASE`, and a pre-provisioned Vector Search index
 (`MONGODB_RAG_VECTOR_INDEX`, optionally `MONGODB_RAG_COLLECTION`). Additionally set `MONGODB_RAG_SEARCH_INDEX` to a
@@ -209,3 +210,54 @@ See the [.NET RAG contracts developer guide](../docs/development/rag/dotnet-rag.
 [.NET FullText RAG developer guide](../docs/development/rag/dotnet-rag-full-text-search.md), and the
 [.NET HybridRrf RAG developer guide](../docs/development/rag/dotnet-rag-hybrid-rrf.md) for the full public
 surface, pipeline shape, and deferred work.
+
+## Index Management
+
+`MongoDBMemoryIndexManager` and `MongoDBRAGIndexManager` (`dotnet/src/MongoDB.AgentFramework/Memory/` and
+`.../RAG/`) are explicit, feature-specific facades over the same shared internal index mechanics
+`MongoDBMemoryProvider`/`MongoDBRAGProvider` use, independently constructible from a database, collection, client,
+or connection string without requiring a provider or an embedding generator. They exist to keep the "provisioner"
+role (creating, updating, waiting for, and dropping indexes) operationally and privilege-separate from the
+"runtime" role a running provider plays (ADR
+[0006](../docs/decisions/0006-make-index-provisioning-explicit.md)/[0016](../docs/decisions/0016-keep-index-facades-in-runtime-packages.md)):
+
+```csharp
+var definition = new MongoDBVectorSearchIndexDefinition(
+    indexName: "agent_framework_memory",
+    vectorFieldName: "content_embedding",
+    vectorDimensions: 1536,
+    filterFieldPaths: ["application_id", "agent_id", "user_id", "session_id"]);
+
+// Provisioner: run under a distinct, more privileged identity than the runtime provider connects with.
+await using var provisioner = new MongoDBMemoryIndexManager(client, "my_database", "memories", definition);
+await provisioner.EnsureIndexAsync(waitUntilReady: true, timeout: TimeSpan.FromMinutes(5));
+
+// Runtime: read-only validation only -- never creates, updates, or drops.
+await using var runtime = new MongoDBMemoryIndexManager(client, "my_database", "memories", definition);
+MongoDBIndexComparison comparison = await runtime.ValidateIndexAsync();
+```
+
+Every `Get*`/`List*`/`Validate*` method never mutates MongoDB; only `Ensure*`/`Update*`/`Drop*` do, and only when
+explicitly called -- never from a constructor or a framework lifecycle hook. Comparison is semantic and
+order-insensitive, and distinguishes an actionable mismatch (`MongoDBIndexComparison.Mismatches`) from a merely
+informational compatible difference (`CompatibleDifferences`). `Ensure*`/`Drop*` are idempotent under concurrent
+callers; `WaitUntilReadyAsync`/`Ensure*(waitUntilReady: true)` poll with a bounded, cancellable exponential backoff.
+A connected identity lacking index-management privileges raises `MongoDBIndexPrivilegeException` distinctly from a
+generic deployment error.
+
+**Least privilege:** runtime identities (what `MongoDBMemoryProvider`/`MongoDBRAGProvider` connect with) should only
+ever need collection read/write/aggregate plus Search query permissions -- never `createSearchIndexes`/
+`updateSearchIndexes`/`dropSearchIndexes`. Reserve those index-management privileges for a separate provisioner
+identity that runs the `Ensure*`/`Update*`/`Drop*` calls, typically as a deployment-pipeline step. Exact
+built-in/custom MongoDB roles must still be verified against the target deployment before package publication.
+
+Run the sample after setting `MONGODB_URI` and `MONGODB_DATABASE` (optionally `MONGODB_MEMORY_COLLECTION` and
+`MONGODB_RAG_COLLECTION`):
+
+```powershell
+dotnet run --project samples\IndexManagementQuickstart\IndexManagementQuickstart.csproj
+```
+
+The sample constructs separate provisioner and runtime facade instances side by side over both a Memory Vector
+Search index and a RAG Hybrid (Vector Search + Search) index pair, then drops all three indexes at the end. See the
+[.NET Index Management developer guide](../docs/development/index-management/dotnet-index-management.md).

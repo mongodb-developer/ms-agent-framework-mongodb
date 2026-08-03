@@ -27,3 +27,7 @@ This documentation explains the implemented system at the code level. The
 - [.NET Vector RAG (ANN/ENN) direct search and context adapter](rag/dotnet-rag-vector-search.md)
 - [.NET FullText RAG direct search](rag/dotnet-rag-full-text-search.md)
 - [.NET HybridRrf RAG direct search](rag/dotnet-rag-hybrid-rrf.md)
+
+## Index Management
+
+- [.NET Index Management implementation](index-management/dotnet-index-management.md)
