@@ -2,10 +2,15 @@ name: .NET dependency, secret, and code scanning
 
 # Implements the "security" job from docs/spec/quality-release.md's CI workflow topology, scoped to this change:
 # a .NET NuGet (including transitive) dependency vulnerability audit, a repository secret scan, and CodeQL code
-# scanning for the .NET provider. All three use free, already-available GitHub-native or open-source tooling only
-# (the `dotnet` SDK itself, GitHub's first-party CodeQL action, and the open-source gitleaks CLI) -- no paid
-# third-party service is introduced. Runs on every pull request and push so credential-free checks always gate
-# review, plus a weekly schedule so newly disclosed advisories are caught even without new commits.
+# scanning for the .NET provider.
+#
+# Supply-chain note: every action below is pinned to an immutable full commit SHA (not a mutable tag) with a
+# trailing `# vX.Y.Z` comment recording the release that SHA corresponds to, so a compromised or republished tag
+# cannot silently change what this workflow executes. The secret scan runs a repository-local, dependency-free
+# `git grep` script (.github/scripts/secret-scan.sh) instead of downloading and executing any third-party
+# scanner binary, avoiding both the supply-chain risk of an unverified download and the licensing questions
+# around gitleaks' GitHub Action wrapper for private-organization use. CodeQL is GitHub's first-party action.
+# Every job requests only the workflow permissions it actually needs.
 on:
   pull_request:
   push:
@@ -26,10 +31,10 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
         with:
           dotnet-version: |
             8.0.x
@@ -61,27 +66,14 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Checkout full history
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      # gitleaks is open-source (MIT licensed) and free to run as a plain CLI in any repository visibility; only
-      # the separately distributed GitHub Action wrapper requires a paid license for private-organization use, so
-      # the CLI binary is downloaded and invoked directly to avoid introducing any paid dependency.
-      - name: Download gitleaks CLI
+      # No third-party binary is downloaded or executed here; see .github/scripts/secret-scan.sh for the
+      # pattern set and its documented limitations (working-tree-only, pattern-based, no entropy analysis).
+      - name: Scan repository for common secret patterns
         shell: bash
-        run: |
-          set -euo pipefail
-          version="8.21.2"
-          curl -sSL -o gitleaks.tar.gz \
-            "https://github.com/gitleaks/gitleaks/releases/download/v${version}/gitleaks_${version}_linux_x64.tar.gz"
-          tar -xzf gitleaks.tar.gz gitleaks
-          chmod +x gitleaks
-
-      - name: Scan git history and working tree for secrets
-        shell: bash
-        run: ./gitleaks detect --source . --redact --verbose --exit-code 1
+        run: .github/scripts/secret-scan.sh
 
   codeql:
     name: CodeQL code scanning (C#)
@@ -89,12 +81,13 @@ jobs:
     permissions:
       contents: read
       security-events: write
+      actions: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
         with:
           dotnet-version: |
             8.0.x
@@ -102,14 +95,14 @@ jobs:
             10.0.x
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
+        uses: github/codeql-action/init@e60ea984bd3baa95954f2856bcf24f9eaba46637 # v3.37.5
         with:
           languages: csharp
 
       - name: Build (autobuild)
-        uses: github/codeql-action/autobuild@v3
+        uses: github/codeql-action/autobuild@e60ea984bd3baa95954f2856bcf24f9eaba46637 # v3.37.5
 
       - name: Perform CodeQL analysis
-        uses: github/codeql-action/analyze@v3
+        uses: github/codeql-action/analyze@e60ea984bd3baa95954f2856bcf24f9eaba46637 # v3.37.5
         with:
           category: "/language:csharp"

@@ -59,6 +59,11 @@ feature) and that its own code never requires more than that shape to function.
 
 The CI workflow added by this slice (`.github/workflows/dotnet-security.yml`) follows the same least-privilege
 principle for automation identities: each job declares the narrowest `permissions:` block it needs
-(`contents: read` for the dependency audit and secret scan; `contents: read` + `security-events: write` only for
-the CodeQL job, which needs the latter solely to upload its SARIF results) rather than defaulting to broader
-repository write access.
+(`contents: read` for the dependency audit and secret scan; `contents: read` + `security-events: write` +
+`actions: read` only for the CodeQL job, which needs `security-events: write` to upload its SARIF results and
+`actions: read` per GitHub's own recommended CodeQL workflow permissions for private repositories) rather than
+defaulting to broader repository write access. Every `uses:` reference in the workflow is pinned to an immutable
+full commit SHA (with a `# vX.Y.Z` comment recording the release), not a mutable tag, so the workflow's supply
+chain cannot change without a reviewable diff to this repository. The secret-scan job runs a repository-local
+`git grep` script (`.github/scripts/secret-scan.sh`) rather than downloading a third-party scanner binary,
+removing the need to pin or verify a release artifact's checksum at all.
