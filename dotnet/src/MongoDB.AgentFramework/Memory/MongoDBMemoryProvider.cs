@@ -321,22 +321,14 @@ public sealed class MongoDBMemoryProvider : AIContextProvider, IAsyncDisposable
         IEnumerable<ChatMessage> messages,
         MongoDBMemoryScope scope,
         CancellationToken cancellationToken = default) =>
-        WithDeadlineAsync(
-            token => StoreCoreAsync(messages, scope, sessionState: null, token),
-            _options.PersistenceTimeout,
-            "MongoDB Memory persistence deadline exceeded.",
-            cancellationToken);
+        StoreCoreAsync(messages, scope, sessionState: null, cancellationToken);
 
     private Task<int> StoreFrameworkAsync(
         IEnumerable<ChatMessage> messages,
         MongoDBMemoryScope scope,
         AgentSessionStateBag? sessionState,
         CancellationToken cancellationToken) =>
-        WithDeadlineAsync(
-            token => StoreCoreAsync(messages, scope, sessionState, token),
-            _options.PersistenceTimeout,
-            "MongoDB Memory persistence deadline exceeded.",
-            cancellationToken);
+        StoreCoreAsync(messages, scope, sessionState, cancellationToken);
 
     private Task<int> StoreCoreAsync(
         IEnumerable<ChatMessage> messages,
@@ -348,7 +340,11 @@ public sealed class MongoDBMemoryProvider : AIContextProvider, IAsyncDisposable
             MongoDBTelemetryFeature.Memory,
             MongoDBTelemetryOperation.Persist,
             mode: null,
-            () => StoreCoreInnerAsync(messages, scope, sessionState, cancellationToken),
+            () => WithDeadlineAsync(
+                token => StoreCoreInnerAsync(messages, scope, sessionState, token),
+                _options.PersistenceTimeout,
+                "MongoDB Memory persistence deadline exceeded.",
+                cancellationToken),
             static count => new MongoDBTelemetryResult(
                 count > 0 ? MongoDBTelemetryOutcome.Success : MongoDBTelemetryOutcome.Empty,
                 count,
@@ -455,11 +451,7 @@ public sealed class MongoDBMemoryProvider : AIContextProvider, IAsyncDisposable
         int? maxResults = null,
         bool? exact = null,
         CancellationToken cancellationToken = default) =>
-        WithDeadlineAsync(
-            token => SearchCoreAsync(query, scope, maxResults, exact, token),
-            _options.RetrievalTimeout,
-            "MongoDB Memory retrieval deadline exceeded.",
-            cancellationToken);
+        SearchCoreAsync(query, scope, maxResults, exact, cancellationToken);
 
     private Task<IReadOnlyList<MongoDBMemorySearchResult>> SearchCoreAsync(
         string query,
@@ -487,7 +479,11 @@ public sealed class MongoDBMemoryProvider : AIContextProvider, IAsyncDisposable
             MongoDBTelemetryFeature.Memory,
             MongoDBTelemetryOperation.Retrieve,
             mode,
-            () => SearchCoreInnerAsync(query, scope, limit, useExact, cancellationToken),
+            () => WithDeadlineAsync(
+                token => SearchCoreInnerAsync(query, scope, limit, useExact, token),
+                _options.RetrievalTimeout,
+                "MongoDB Memory retrieval deadline exceeded.",
+                cancellationToken),
             results => new MongoDBTelemetryResult(
                 results.Count > 0 ? MongoDBTelemetryOutcome.Success : MongoDBTelemetryOutcome.Empty,
                 results.Count,

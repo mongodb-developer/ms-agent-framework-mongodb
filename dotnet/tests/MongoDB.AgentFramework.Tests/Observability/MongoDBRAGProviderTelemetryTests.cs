@@ -131,6 +131,30 @@ public sealed class MongoDBRAGProviderTelemetryTests
     }
 
     [Fact]
+    public async Task SearchAsync_WhenRetrievalDeadlineElapses_RecordsFailedTimeoutNotCancelled()
+    {
+        // A hung embedding call only ever completes once the deadline-linked token fires (the caller's own
+        // token is never cancelled here): telemetry must observe the already-translated MongoDBTimeoutException
+        // rather than the raw deadline-driven OperationCanceledException.
+        var state = new RAGCollectionState();
+        var embeddings = new RecordingEmbeddingGenerator { Delay = TimeSpan.FromSeconds(30) };
+        var options = new MongoDBRAGProviderOptions
+        {
+            SearchMode = MongoDBSearchMode.VectorAnn,
+            RetrievalTimeout = TimeSpan.FromMilliseconds(20),
+        };
+        using var activities = new ActivityCapture(MongoDBTelemetry.ActivitySourceName);
+        using var scope = new TelemetryTestScope();
+        MongoDBRAGProvider provider = CreateProvider(state, embeddings, options);
+
+        await Assert.ThrowsAsync<MongoDBTimeoutException>(() => provider.SearchAsync("query"));
+
+        Activity activity = Assert.Single(activities.StoppedUnder(scope));
+        Assert.Equal(MongoDBTelemetryOutcome.Failed, activity.GetTagItem("outcome"));
+        Assert.Equal("timeout", activity.GetTagItem("error_category"));
+    }
+
+    [Fact]
     public async Task ValidateSearchIndexAsync_RecordsValidateIndexOperationAndOmitsIndexName()
     {
         var state = new RAGCollectionState

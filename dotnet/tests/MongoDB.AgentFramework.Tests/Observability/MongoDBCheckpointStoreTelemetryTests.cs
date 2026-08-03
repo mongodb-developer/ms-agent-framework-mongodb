@@ -233,6 +233,48 @@ public sealed class MongoDBCheckpointStoreTelemetryTests
     }
 
     [Fact]
+    public async Task SaveCheckpointAsync_WhenPersistenceDeadlineElapses_RecordsFailedTimeoutNotCancelled()
+    {
+        // A hung sequence-allocation read only ever completes once the deadline-linked token fires (the
+        // caller's own token is never cancelled here): telemetry must observe the already-translated
+        // MongoDBTimeoutException, not the raw deadline-driven OperationCanceledException.
+        var state = new CheckpointCollectionState
+        {
+            FindDelay = async token => await Task.Delay(Timeout.InfiniteTimeSpan, token),
+        };
+        using var activities = new ActivityCapture(MongoDBTelemetry.ActivitySourceName);
+        using var scope = new TelemetryTestScope();
+        MongoDBCheckpointStore store = CreateStore(state, persistenceTimeout: TimeSpan.FromMilliseconds(20));
+
+        await Assert.ThrowsAsync<MongoDBTimeoutException>(
+            () => store.SaveCheckpointAsync(
+                "session-timeout", "checkpoint-1", JsonSerializer.SerializeToElement("value")));
+
+        Activity activity = Assert.Single(activities.StoppedUnder(scope));
+        Assert.Equal(MongoDBTelemetryOutcome.Failed, activity.GetTagItem("outcome"));
+        Assert.Equal("timeout", activity.GetTagItem("error_category"));
+    }
+
+    [Fact]
+    public async Task CreateCheckpointAsync_WhenPersistenceDeadlineElapses_RecordsFailedTimeoutNotCancelled()
+    {
+        var state = new CheckpointCollectionState
+        {
+            FindDelay = async token => await Task.Delay(Timeout.InfiniteTimeSpan, token),
+        };
+        using var activities = new ActivityCapture(MongoDBTelemetry.ActivitySourceName);
+        using var scope = new TelemetryTestScope();
+        MongoDBCheckpointStore store = CreateStore(state, persistenceTimeout: TimeSpan.FromMilliseconds(20));
+
+        await Assert.ThrowsAsync<MongoDBTimeoutException>(() => store.CreateCheckpointAsync(
+            "session-timeout-2", JsonSerializer.SerializeToElement("value")).AsTask());
+
+        Activity activity = Assert.Single(activities.StoppedUnder(scope));
+        Assert.Equal(MongoDBTelemetryOutcome.Failed, activity.GetTagItem("outcome"));
+        Assert.Equal("timeout", activity.GetTagItem("error_category"));
+    }
+
+    [Fact]
     public async Task LoadCheckpointAsync_WhenCanceled_RecordsCancelledOutcomeDistinctFromFailed()
     {
         var state = new CheckpointCollectionState();
@@ -252,13 +294,15 @@ public sealed class MongoDBCheckpointStoreTelemetryTests
 
     private static MongoDBCheckpointStore CreateStore(
         CheckpointCollectionState state,
-        ILogger<MongoDBCheckpointStore>? logger = null) =>
+        ILogger<MongoDBCheckpointStore>? logger = null,
+        TimeSpan? persistenceTimeout = null) =>
         new(
             CheckpointCollectionProxy.Create(state),
             new MongoDBCheckpointStoreOptions
             {
                 WorkflowId = "workflow",
                 ContinuationTokenSigningKey = CheckpointStoreTestSigningKey.Bytes,
+                PersistenceTimeout = persistenceTimeout,
             },
             logger);
 

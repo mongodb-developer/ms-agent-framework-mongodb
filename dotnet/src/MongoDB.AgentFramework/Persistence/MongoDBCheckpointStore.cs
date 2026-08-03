@@ -399,11 +399,9 @@ public sealed class MongoDBCheckpointStore : JsonCheckpointStore, IAsyncDisposab
         CheckpointInfo? parent = null)
     {
         string checkpointId = Guid.NewGuid().ToString("N");
-        MongoDBCheckpointRecord record = await WithDeadlineAsync(
-            token => SaveCheckpointCoreAsync(sessionId, checkpointId, value, parent?.CheckpointId, expiresAt: null, token),
-            _options.PersistenceTimeout,
-            "MongoDB Workflow Checkpoint Store persistence deadline exceeded.",
-            CancellationToken.None).ConfigureAwait(false);
+        MongoDBCheckpointRecord record = await SaveCheckpointCoreAsync(
+            sessionId, checkpointId, value, parent?.CheckpointId, expiresAt: null, CancellationToken.None)
+            .ConfigureAwait(false);
         return new CheckpointInfo(record.SessionId, record.CheckpointId);
     }
 
@@ -530,11 +528,9 @@ public sealed class MongoDBCheckpointStore : JsonCheckpointStore, IAsyncDisposab
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        return await WithDeadlineAsync(
-            token => SaveCheckpointCoreAsync(sessionId, checkpointId, payload, parentCheckpointId, expiresAt, token),
-            _options.PersistenceTimeout,
-            "MongoDB Workflow Checkpoint Store persistence deadline exceeded.",
-            cancellationToken).ConfigureAwait(false);
+        return await SaveCheckpointCoreAsync(
+            sessionId, checkpointId, payload, parentCheckpointId, expiresAt, cancellationToken)
+            .ConfigureAwait(false);
     }
 
     /// <summary>Loads a checkpoint by its explicit identifier, or <see langword="null"/> if absent.</summary>
@@ -971,8 +967,12 @@ public sealed class MongoDBCheckpointStore : JsonCheckpointStore, IAsyncDisposab
             MongoDBTelemetryFeature.CheckpointStore,
             MongoDBTelemetryOperation.Persist,
             mode: null,
-            () => SaveCheckpointCoreInnerAsync(
-                sessionId, checkpointId, payload, parentCheckpointId, expiresAt, cancellationToken),
+            () => WithDeadlineAsync(
+                token => SaveCheckpointCoreInnerAsync(
+                    sessionId, checkpointId, payload, parentCheckpointId, expiresAt, token),
+                _options.PersistenceTimeout,
+                "MongoDB Workflow Checkpoint Store persistence deadline exceeded.",
+                cancellationToken),
             static _ => new MongoDBTelemetryResult(MongoDBTelemetryOutcome.Success, 1, CandidateBucket: null),
             cancellationToken);
 

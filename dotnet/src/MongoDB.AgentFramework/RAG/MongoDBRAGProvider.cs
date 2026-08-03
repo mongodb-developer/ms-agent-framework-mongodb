@@ -660,11 +660,7 @@ public sealed class MongoDBRAGProvider : IAsyncDisposable
     public Task<IReadOnlyList<MongoDBRAGResult>> SearchAsync(
         string query,
         CancellationToken cancellationToken = default) =>
-        WithDeadlineAsync(
-            token => SearchTrackedAsync(query, token),
-            _options.RetrievalTimeout,
-            "MongoDB RAG retrieval deadline exceeded.",
-            cancellationToken);
+        SearchTrackedAsync(query, cancellationToken);
 
     /// <summary>
     /// Computes the telemetry mode/candidate-bucket for the configured <see cref="MongoDBRAGProviderOptions.SearchMode"/>
@@ -697,7 +693,11 @@ public sealed class MongoDBRAGProvider : IAsyncDisposable
             MongoDBTelemetryFeature.Rag,
             MongoDBTelemetryOperation.Retrieve,
             mode,
-            () => SearchCoreAsync(query, cancellationToken),
+            () => WithDeadlineAsync(
+                token => SearchCoreAsync(query, token),
+                _options.RetrievalTimeout,
+                "MongoDB RAG retrieval deadline exceeded.",
+                cancellationToken),
             results => new MongoDBTelemetryResult(
                 results.Count > 0 ? MongoDBTelemetryOutcome.Success : MongoDBTelemetryOutcome.Empty,
                 results.Count,

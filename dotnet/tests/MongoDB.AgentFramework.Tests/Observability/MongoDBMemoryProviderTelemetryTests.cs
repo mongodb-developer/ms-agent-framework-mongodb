@@ -145,6 +145,51 @@ public sealed class MongoDBMemoryProviderTelemetryTests
     }
 
     [Fact]
+    public async Task StoreAsync_WhenPersistenceDeadlineElapses_RecordsFailedTimeoutNotCancelled()
+    {
+        // A hung insert only ever completes once the deadline-linked token fires (never the caller's own
+        // token, which is never cancelled here): telemetry must observe the already-translated
+        // MongoDBTimeoutException, not the raw deadline-driven OperationCanceledException.
+        var state = new MemoryCollectionState
+        {
+            InsertHandler = async (_, token) => await Task.Delay(Timeout.InfiniteTimeSpan, token),
+        };
+        using var activities = new ActivityCapture(MongoDBTelemetry.ActivitySourceName);
+        using var scope = new TelemetryTestScope();
+        MongoDBMemoryProvider provider = CreateProvider(
+            state,
+            options: new MongoDBMemoryProviderOptions { PersistenceTimeout = TimeSpan.FromMilliseconds(20) });
+
+        await Assert.ThrowsAsync<MongoDBTimeoutException>(() => provider.StoreAsync(
+            [new ChatMessage(ChatRole.User, "blue preference")],
+            new MongoDBMemoryScope(userId: "u")));
+
+        Activity activity = Assert.Single(activities.StoppedUnder(scope));
+        Assert.Equal(MongoDBTelemetryOutcome.Failed, activity.GetTagItem("outcome"));
+        Assert.Equal("timeout", activity.GetTagItem("error_category"));
+    }
+
+    [Fact]
+    public async Task SearchAsync_WhenRetrievalDeadlineElapses_RecordsFailedTimeoutNotCancelled()
+    {
+        var state = new MemoryCollectionState();
+        var embeddings = new RecordingEmbeddingGenerator { Delay = TimeSpan.FromSeconds(30) };
+        using var activities = new ActivityCapture(MongoDBTelemetry.ActivitySourceName);
+        using var scope = new TelemetryTestScope();
+        MongoDBMemoryProvider provider = CreateProvider(
+            state,
+            embeddings,
+            options: new MongoDBMemoryProviderOptions { RetrievalTimeout = TimeSpan.FromMilliseconds(20) });
+
+        await Assert.ThrowsAsync<MongoDBTimeoutException>(
+            () => provider.SearchAsync("blue", new MongoDBMemoryScope(userId: "u")));
+
+        Activity activity = Assert.Single(activities.StoppedUnder(scope));
+        Assert.Equal(MongoDBTelemetryOutcome.Failed, activity.GetTagItem("outcome"));
+        Assert.Equal("timeout", activity.GetTagItem("error_category"));
+    }
+
+    [Fact]
     public async Task DeleteByIdAsync_RecordsDeleteOutcomeAndCount()
     {
         var state = new MemoryCollectionState { DeletedCount = 1 };
@@ -200,13 +245,14 @@ public sealed class MongoDBMemoryProviderTelemetryTests
     private static MongoDBMemoryProvider CreateProvider(
         MemoryCollectionState state,
         RecordingEmbeddingGenerator? embeddings = null,
-        ILogger<MongoDBMemoryProvider>? logger = null) =>
+        ILogger<MongoDBMemoryProvider>? logger = null,
+        MongoDBMemoryProviderOptions? options = null) =>
         new(
             MemoryCollectionProxy.Create(state),
             embeddings ?? new RecordingEmbeddingGenerator(),
             3,
             _ => new MongoDBMemoryProvider.State(new MongoDBMemoryScope(userId: "user")),
-            options: null,
+            options: options,
             logger: logger);
 
     private static MongoConnectionException OfflineException(string message) =>
