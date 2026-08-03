@@ -218,13 +218,15 @@ class MongoDBSessionStore(SessionStore):
             await self.collection.insert_one(document)
         except DuplicateKeyError:
             existing = await self._read_after_conflict(scope)
-            if existing is not None and _same_snapshot(
-                existing,
-                payload_hash,
-                effective_expiry,
-                expiration_was_explicit=expires_at is not None,
-            ):
-                return _document_version(existing)
+            if existing is not None:
+                _validate_versions(existing)
+                if _same_snapshot(
+                    existing,
+                    payload_hash,
+                    effective_expiry,
+                    expiration_was_explicit=expires_at is not None,
+                ):
+                    return _document_version(existing)
             raise MongoDBConcurrencyError(
                 f"Session {session_id!r} already exists in the authorized scope."
             ) from None
@@ -360,6 +362,7 @@ class MongoDBSessionStore(SessionStore):
                 {
                     "name": "session_store_scope_identity",
                     "unique": True,
+                    "collation": {"locale": "simple"},
                     "partialFilterExpression": partial,
                 },
             ),
@@ -371,6 +374,7 @@ class MongoDBSessionStore(SessionStore):
                 ],
                 {
                     "name": "session_store_scope_version",
+                    "collation": {"locale": "simple"},
                     "partialFilterExpression": partial,
                 },
             ),
@@ -431,6 +435,7 @@ class MongoDBSessionStore(SessionStore):
                 _index_keys(index) != keys
                 or bool(index.get("unique", False)) is not unique
                 or index.get("partialFilterExpression") != partial
+                or (expire_after is None and not _has_simple_collation(index))
                 or (expire_after is not None and index.get("expireAfterSeconds") != expire_after)
             ):
                 raise MongoDBIndexMismatchError(
@@ -465,6 +470,16 @@ def _index_keys(index: Mapping[str, Any]) -> tuple[tuple[str, int], ...]:
         return ()
     keys = cast(Mapping[str, int], raw)
     return tuple((name, value) for name, value in keys.items())
+
+
+def _has_simple_collation(index: Mapping[str, Any]) -> bool:
+    raw = index.get("collation")
+    if raw is None:
+        return True
+    if not isinstance(raw, Mapping):
+        return False
+    collation = cast(Mapping[str, Any], raw)
+    return collation.get("locale") == "simple"
 
 
 def _serialize(session: AgentSession) -> MongoDocument:

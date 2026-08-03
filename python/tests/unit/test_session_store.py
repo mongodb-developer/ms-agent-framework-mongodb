@@ -268,6 +268,8 @@ async def test_expiration_is_utc_and_versions_are_migration_gated() -> None:
     collection.documents[0]["schema_version"] = 999
     with pytest.raises(MongoDBMappingError, match="migrate"):
         await store.get("store-key")
+    with pytest.raises(MongoDBMappingError, match="migrate"):
+        await store.create("store-key", AgentSession())
     collection.documents[0]["schema_version"] = 1
     collection.documents[0]["framework_version"] = "future"
     with pytest.raises(MongoDBMappingError, match="supported Agent Framework"):
@@ -294,6 +296,7 @@ async def test_regular_index_provisioning_is_explicit_and_includes_ttl() -> None
             {
                 "name": "session_store_scope_identity",
                 "unique": True,
+                "collation": {"locale": "simple"},
                 "partialFilterExpression": {
                     "_kind": "agent_session",
                     "scope_discriminator": {"$type": "string"},
@@ -308,6 +311,7 @@ async def test_regular_index_provisioning_is_explicit_and_includes_ttl() -> None
             ],
             {
                 "name": "session_store_scope_version",
+                "collation": {"locale": "simple"},
                 "partialFilterExpression": {
                     "_kind": "agent_session",
                     "scope_discriminator": {"$type": "string"},
@@ -338,6 +342,10 @@ async def test_regular_index_provisioning_is_explicit_and_includes_ttl() -> None
         for keys, kwargs in collection.created_indexes
     ]
     await store.validate_indexes()
+    collection.regular_indexes[0]["collation"] = {"locale": "en", "strength": 2}
+    with pytest.raises(MongoDBIndexMismatchError, match="scope_identity"):
+        await store.validate_indexes()
+    collection.regular_indexes[0]["collation"] = {"locale": "simple"}
     collection.regular_indexes[1]["key"] = {"session_id": 1}
     with pytest.raises(MongoDBIndexMismatchError, match="scope_version"):
         await store.validate_indexes()

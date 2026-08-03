@@ -86,6 +86,8 @@ from Memory and Chat History.
 `ensure_indexes()` is the only provisioning path; `validate_indexes()` is
 read-only. Both identity indexes and the TTL index use a partial filter for
 `_kind: "agent_session"` and string `scope_discriminator`.
+The identity and version indexes explicitly use simple binary collation so
+opaque session IDs retain case-sensitive identity under any collection default.
 
 | Name | Keys | Options |
 | --- | --- | --- |
