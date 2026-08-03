@@ -263,6 +263,24 @@ def test_history_provider_uses_public_framework_contract() -> None:
     assert provider.owns_client is False
 
 
+async def test_save_messages_accepts_keyword_arguments_without_duplicate_writes(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    collection = FakeCollection()
+    provider = MongoDBHistoryProvider(cast(Any, collection), options=options())
+    caplog.set_level("INFO", logger="agent_framework_mongodb")
+
+    await provider.save_messages(
+        session_id="session-1",
+        messages=[Message("user", "hello", message_id="message-1")],
+    )
+
+    assert len(message_documents(collection)) == 1
+    record = caplog.records[-1]
+    assert record.__dict__["operation"] == "persist"
+    assert record.__dict__["result_count"] == 1
+
+
 @pytest.mark.parametrize(
     ("overrides", "message"),
     [

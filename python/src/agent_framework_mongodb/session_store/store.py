@@ -227,7 +227,7 @@ class MongoDBSessionStore(SessionStore):
     @instrument(
         "session_store",
         "persist",
-        result_count=lambda _args, _kwargs, _result: 1,
+        result_count=lambda _arguments, _result: 1,
     )
     async def compare_and_set(
         self,

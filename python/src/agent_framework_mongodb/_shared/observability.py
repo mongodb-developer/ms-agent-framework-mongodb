@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import inspect
 import logging
 import time
-from collections.abc import Callable, Collection, Coroutine
+from collections.abc import Callable, Collection, Coroutine, Mapping
 from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar, cast
 
 if TYPE_CHECKING:
@@ -77,7 +78,7 @@ def instrument(
     operation: str,
     *,
     mode: Callable[[Any], str | None] | None = None,
-    result_count: Callable[[tuple[object, ...], dict[str, object], object], int] | None = None,
+    result_count: Callable[[Mapping[str, object], object], int] | None = None,
 ) -> Callable[
     [Callable[_P, Coroutine[Any, Any, _T]]],
     Callable[_P, _CoroutineType[Any, Any, _T]],
@@ -87,10 +88,12 @@ def instrument(
     def decorate(
         function: Callable[_P, Coroutine[Any, Any, _T]],
     ) -> Callable[_P, _CoroutineType[Any, Any, _T]]:
+        signature = inspect.signature(function)
+
         @functools.wraps(function)
         async def observed(*args: _P.args, **kwargs: _P.kwargs) -> _T:
             started = time.monotonic()
-            mode_value = mode(args[0]) if mode is not None and args else None
+            mode_value = _resolve_mode(mode, args)
             tracer = trace.get_tracer(_INSTRUMENTATION_NAME)
             with tracer.start_as_current_span(
                 f"{_INSTRUMENTATION_NAME}.{feature}.{operation}",
@@ -131,14 +134,12 @@ def instrument(
                         mode=mode_value,
                     )
                     raise
-                count = (
-                    result_count(
-                        cast(tuple[object, ...], args),
-                        cast(dict[str, object], kwargs),
-                        result,
-                    )
-                    if result_count is not None
-                    else _result_count(result)
+                count = _resolve_result_count(
+                    result_count,
+                    signature,
+                    cast(tuple[object, ...], args),
+                    cast(dict[str, object], kwargs),
+                    result,
                 )
                 _complete(
                     span,
@@ -158,6 +159,34 @@ def instrument(
         return cast(Callable[_P, _CoroutineType[Any, Any, _T]], observed)
 
     return decorate
+
+
+def _resolve_mode(
+    resolver: Callable[[Any], str | None] | None,
+    args: tuple[object, ...],
+) -> str | None:
+    if resolver is None or not args:
+        return None
+    try:
+        return resolver(args[0])
+    except Exception:
+        return None
+
+
+def _resolve_result_count(
+    resolver: Callable[[Mapping[str, object], object], int] | None,
+    signature: inspect.Signature,
+    args: tuple[object, ...],
+    kwargs: dict[str, object],
+    result: object,
+) -> int:
+    try:
+        if resolver is not None:
+            arguments = signature.bind_partial(*args, **kwargs).arguments
+            return max(resolver(arguments, result), 0)
+        return _result_count(result)
+    except Exception:
+        return 0
 
 
 def _result_count(result: object) -> int:

@@ -312,7 +312,7 @@ class MongoDBHistoryProvider(HistoryProvider):
     @instrument(
         "history",
         "persist",
-        result_count=lambda args, _kwargs, _result: len(cast(Sequence[object], args[2])),
+        result_count=lambda arguments, _result: len(cast(Sequence[object], arguments["messages"])),
     )
     async def save_messages(
         self,
