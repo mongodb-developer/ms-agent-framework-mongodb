@@ -53,6 +53,13 @@ def test_checkpoint_storage_contract_matches_public_surface() -> None:
         "instance_state_beyond_entries": "reject_with_serialization_error",
         "unsupported_subclass": "reject_with_serialization_error",
     }
+    assert contract["serialization_validation"] == {
+        "mapping_guard": "before_all_type_handlers",
+        "pickle_dispatch": "controlled_without_copyreg",
+        "custom_pickle_hooks": "reject_before_execution",
+        "round_trip_load": "restricted_checkpoint_load_path",
+        "round_trip_canonical_match": "required_before_io",
+    }
     assert [item["name"] for item in contract["indexes"]] == [
         "checkpoint_scope_identity",
         "checkpoint_scope_sequence",

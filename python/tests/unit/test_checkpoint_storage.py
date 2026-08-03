@@ -9,6 +9,7 @@ import sys
 from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Any, SupportsIndex, cast
 from unittest.mock import patch
@@ -338,6 +339,45 @@ class DictIteratorStateMapping(dict[str, Any]):
         )
 
 
+class MappingEnum(dict[str, int], Enum):
+    VALUE = {"alpha": 1}
+
+
+class PlainToDictOrderedReducer:
+    reduce_calls = 0
+
+    def to_dict(self) -> dict[str, str]:
+        return {"value": "plain"}
+
+    def __reduce_ex__(self, protocol: SupportsIndex) -> tuple[Any, ...]:
+        del protocol
+        type(self).reduce_calls += 1
+        return OrderedDict, ((("value", "ordered"),),)
+
+
+class ReducerOnlyState:
+    reduce_calls = 0
+
+    def __init__(self, label: str) -> None:
+        self.label = label
+
+    def to_dict(self) -> dict[str, str]:
+        return {"value": "public"}
+
+    def __reduce_ex__(self, protocol: SupportsIndex) -> tuple[Any, ...]:
+        del protocol
+        type(self).reduce_calls += 1
+        return type(self), (self.label,)
+
+
+class UnstableToDict:
+    to_dict_calls = 0
+
+    def to_dict(self) -> dict[str, int]:
+        type(self).to_dict_calls += 1
+        return {"call": type(self).to_dict_calls}
+
+
 class ApprovalExecutor(Executor):
     def __init__(self) -> None:
         super().__init__(id="approver")
@@ -563,6 +603,18 @@ async def test_only_exact_plain_dict_mapping_values_are_supported() -> None:
 
 
 @pytest.mark.asyncio
+async def test_mapping_enum_is_rejected_before_enum_handling_or_io() -> None:
+    collection = FakeCollection()
+    storage = MongoDBCheckpointStorage(cast(Any, collection), options=options())
+    invalid = checkpoint("mapping-enum")
+    invalid.state["mapping_enum"] = MappingEnum.VALUE
+
+    with pytest.raises(MongoDBSerializationError, match="plain dict/list"):
+        await storage.save(invalid)
+    assert collection.documents == []
+
+
+@pytest.mark.asyncio
 async def test_exact_dict_serialization_ignores_copyreg_registration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -595,6 +647,61 @@ async def test_exact_dict_serialization_ignores_copyreg_registration(
     assert bytes(registered_document["checkpoint"]) == bytes(baseline_document["checkpoint"])
     restored = await registered.load("copyreg")
     assert restored.state["mapping"] == {"alpha": 1, "beta": [2, 3]}
+
+
+@pytest.mark.asyncio
+async def test_to_dict_object_cannot_reduce_to_ordered_mapping() -> None:
+    PlainToDictOrderedReducer.reduce_calls = 0
+    collection = FakeCollection()
+    type_key = f"{PlainToDictOrderedReducer.__module__}:{PlainToDictOrderedReducer.__qualname__}"
+    storage = MongoDBCheckpointStorage(
+        cast(Any, collection),
+        options=options(allowed_checkpoint_types=(type_key,)),
+    )
+    invalid = checkpoint("to-dict-reducer")
+    invalid.state["value"] = PlainToDictOrderedReducer()
+
+    with pytest.raises(MongoDBSerializationError, match="custom pickle"):
+        await storage.save(invalid)
+    assert PlainToDictOrderedReducer.reduce_calls == 0
+    assert collection.documents == []
+
+
+@pytest.mark.asyncio
+async def test_reducer_only_state_is_rejected_without_executing_reducer() -> None:
+    ReducerOnlyState.reduce_calls = 0
+    collection = FakeCollection()
+    type_key = f"{ReducerOnlyState.__module__}:{ReducerOnlyState.__qualname__}"
+    storage = MongoDBCheckpointStorage(
+        cast(Any, collection),
+        options=options(allowed_checkpoint_types=(type_key,)),
+    )
+    for label in ("first", "second"):
+        invalid = checkpoint(f"reducer-state-{label}")
+        invalid.state["value"] = ReducerOnlyState(label)
+        with pytest.raises(MongoDBSerializationError, match="custom pickle"):
+            await storage.save(invalid)
+
+    assert ReducerOnlyState.reduce_calls == 0
+    assert collection.documents == []
+
+
+@pytest.mark.asyncio
+async def test_serialized_graph_must_match_original_canonical_graph() -> None:
+    UnstableToDict.to_dict_calls = 0
+    collection = FakeCollection()
+    type_key = f"{UnstableToDict.__module__}:{UnstableToDict.__qualname__}"
+    storage = MongoDBCheckpointStorage(
+        cast(Any, collection),
+        options=options(allowed_checkpoint_types=(type_key,)),
+    )
+    invalid = checkpoint("unstable-round-trip")
+    invalid.state["value"] = UnstableToDict()
+
+    with pytest.raises(MongoDBSerializationError, match="changes during serialization round trip"):
+        await storage.save(invalid)
+    assert UnstableToDict.to_dict_calls == 2
+    assert collection.documents == []
 
 
 @pytest.mark.asyncio

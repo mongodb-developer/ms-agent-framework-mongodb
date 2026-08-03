@@ -50,7 +50,24 @@ binary with Python pickle so public framework message/event objects and
 application executor state remain lossless. Loading uses a restricted unpickler:
 safe built-ins and concrete `agent_framework` types are permitted, while
 application types must be explicitly listed as `module:qualname` values in
-`allowed_checkpoint_types`.
+`allowed_checkpoint_types`. That allowlist permits class resolution only; it
+does not permit custom `__reduce__`, `__reduce_ex__`, `__getstate__`,
+`__setstate__`, or new-argument pickle hooks. A controlled pickler ignores the
+process-global `copyreg` dispatch table and rejects custom hooks before they
+execute. Application dataclasses and public `to_dict` types must use default
+object serialization. The implementation retains a narrow exact-type allowlist
+for standard values whose Python reducers are part of the documented codec:
+`None`, `bool`, `int`, `float`, `str`, `bytes`, `bytearray`, exact `dict`,
+`list`, `tuple`, `set`, `frozenset`, `date`, `datetime`, `time`,
+`timedelta`, `timezone`, `Decimal`, and `UUID`. The default `Enum` reduction is
+allowed; enum classes that override pickle hooks are rejected.
+
+Before allocating a sequence or contacting MongoDB, save creates the exact
+payload bytes, decodes them through the same restricted load path, recursively
+canonicalizes the decoded graph, and compares it with the original canonical
+graph. Unsupported values or any mismatch raise `MongoDBSerializationError`.
+This validates the bytes that will actually be stored rather than assuming that
+logical projection and pickle behavior agree.
 
 Pickle is appropriate only for application-owned, access-controlled checkpoint
 storage. It is not a boundary against an attacker who can modify the collection.
@@ -88,16 +105,17 @@ for the complete scope and ID. Idempotency hashes use a versioned canonical
 logical representation of the public checkpoint dictionary rather than pickle
 bytes. Exact built-in `dict` is the only supported mapping type, and its values
 are explicitly order-insensitive because their public checkpoint meaning is
-key/value state. `OrderedDict` and every mapping subclass are rejected before
-sequence allocation with `MongoDBSerializationError`, even when allowlisted.
+key/value state. The mapping guard runs before scalar, enum, dataclass,
+`to_dict`, and every other type handler, then exact-dict keys and values recurse
+through the same validation. `OrderedDict`, mapping/enum multiple inheritance,
+and every mapping subclass are rejected before sequence allocation with
+`MongoDBSerializationError`, even when allowlisted.
 Callers must migrate them to plain `dict`/`list` structures. This intentionally
-eliminates instance reducer, iterator-state, `copyreg`, and concrete mapping
-semantics from the canonical contract. CPython's exact-dict pickle path ignores
-attempted `copyreg.dispatch_table` registrations; unit coverage installs a
-divergent reducer and proves the stored pickle bytes and canonical hash remain
-unchanged. The same test is an environment gate: an interpreter where the
-registration changes exact-dict serialization fails validation rather than
-silently persisting divergent state. Sets are stably ordered, scalar and
+eliminates instance reducer, iterator-state, and concrete mapping semantics from
+the canonical contract. The controlled pickler excludes attempted
+`copyreg.dispatch_table` registrations; unit coverage installs a divergent
+reducer and proves the stored pickle bytes and canonical hash remain unchanged.
+Sets are stably ordered, scalar and
 collection types carry explicit
 tags, and framework/application dataclasses or public `to_dict` values carry
 stable type identities. The same logical checkpoint therefore hashes
@@ -197,11 +215,12 @@ collection/database names, filters, driver messages, hosts, and credentials.
 
 ## Verification
 
-Public serialization, actual workflow pause/resume, cross-process canonical
-idempotency, stateful-mapping rejection, conflict, lineage, concurrent sequence,
-missing-counter recovery, complete inherited listing, bounded pagination, latest,
-scope cleanup, counter TTL, TTL-gap, compatibility, index, cancellation, error,
-and ownership tests are in
+Public serialization, restricted round-trip equivalence, custom-reducer
+rejection, mapping/enum precedence, actual workflow pause/resume, cross-process
+canonical idempotency, stateful-mapping rejection, conflict, lineage, concurrent
+sequence, missing-counter recovery, complete inherited listing, bounded
+pagination, latest, scope cleanup, counter TTL, TTL-gap, compatibility, index,
+cancellation, error, and ownership tests are in
 `python/tests/unit/test_checkpoint_storage.py`. Language-neutral outcomes are in
 `python/tests/contracts/fixtures/checkpoint_storage_contract.json`.
 Credential-gated real-deployment coverage is in

@@ -726,20 +726,56 @@ class _RestrictedCheckpointUnpickler(pickle.Unpickler):  # nosec B301
         )
 
 
+class _RestrictedCheckpointPickler(pickle.Pickler):
+    def reducer_override(self, value: object) -> Any:
+        _reject_unapproved_pickle_hooks(value)
+        return NotImplemented
+
+
 def _serialize(
     checkpoint: WorkflowCheckpoint,
     allowed_types: frozenset[str],
 ) -> tuple[Binary, str]:
     public_payload = checkpoint.to_dict()
-    payload_hash = _logical_payload_hash(checkpoint, allowed_types)
+    canonical = _canonical_checkpoint_payload(public_payload, allowed_types)
     try:
-        encoded = pickle.dumps(public_payload, protocol=pickle.HIGHEST_PROTOCOL)
+        buffer = io.BytesIO()
+        pickler = _RestrictedCheckpointPickler(
+            buffer,
+            protocol=pickle.HIGHEST_PROTOCOL,
+        )
+        pickler.dispatch_table = {}
+        pickler.dump(public_payload)
+        encoded = buffer.getvalue()
     except (pickle.PickleError, TypeError, AttributeError) as exc:
         raise MongoDBMappingError(
             "Checkpoint public state cannot be serialized; "
             "store only serializable workflow and executor state."
         ) from exc
-    return Binary(encoded), payload_hash
+    try:
+        decoded = _restricted_loads(encoded, allowed_types)
+        if type(decoded) is not dict:
+            raise MongoDBSerializationError(
+                "Checkpoint payload does not restore to an exact public dictionary."
+            )
+        restored = WorkflowCheckpoint.from_dict(cast(dict[str, Any], decoded))
+        round_trip_canonical = _canonical_checkpoint_payload(
+            restored.to_dict(),
+            allowed_types,
+        )
+    except MongoDBSerializationError:
+        raise
+    except Exception as exc:
+        raise MongoDBSerializationError(
+            "Checkpoint payload cannot be restored through the approved load path; "
+            "migrate it to supported plain values."
+        ) from exc
+    if round_trip_canonical != canonical:
+        raise MongoDBSerializationError(
+            "Checkpoint payload changes during serialization round trip; "
+            "migrate it to supported plain values."
+        )
+    return Binary(encoded), _canonical_payload_hash(canonical)
 
 
 def _logical_payload_hash(
@@ -747,14 +783,25 @@ def _logical_payload_hash(
     allowed_types: frozenset[str],
 ) -> str:
     """Hash a canonical logical representation of public checkpoint state."""
-    canonical = {
+    canonical = _canonical_checkpoint_payload(checkpoint.to_dict(), allowed_types)
+    return _canonical_payload_hash(canonical)
+
+
+def _canonical_checkpoint_payload(
+    public_payload: object,
+    allowed_types: frozenset[str],
+) -> object:
+    return {
         "version": MongoDBCheckpointStorage.IDEMPOTENCY_HASH_VERSION,
         "checkpoint": _canonical_checkpoint_value(
-            checkpoint.to_dict(),
+            public_payload,
             allowed_types=allowed_types,
             active_ids=set(),
         ),
     }
+
+
+def _canonical_payload_hash(canonical: object) -> str:
     encoded = json.dumps(
         canonical,
         sort_keys=True,
@@ -770,6 +817,13 @@ def _canonical_checkpoint_value(
     allowed_types: frozenset[str],
     active_ids: set[int],
 ) -> object:
+    if _is_unsupported_mapping(value):
+        raise MongoDBSerializationError(
+            "Checkpoint mapping values must be exact built-in dict instances; "
+            f"'{_type_key(type(value))}' cannot be serialized canonically. "
+            "Migrate it to plain dict/list structures before persistence."
+        )
+    _reject_unapproved_pickle_hooks(value)
     if value is None:
         return {"type": "none"}
     if type(value) is bool:
@@ -860,13 +914,6 @@ def _canonical_checkpoint_value(
             ]
             pairs.sort(key=lambda pair: _canonical_sort_key(pair[0]))
             return {"type": "mapping", "items": pairs}
-        if isinstance(value, Mapping):
-            mapping_object = cast(object, value)
-            raise MongoDBSerializationError(
-                "Checkpoint mapping values must be exact built-in dict instances; "
-                f"'{_type_key(type(mapping_object))}' cannot be serialized canonically. "
-                "Migrate it to plain dict/list structures before persistence."
-            )
         if isinstance(value, list):
             list_value = cast(list[object], value)
             return {
@@ -954,6 +1001,63 @@ def _canonical_sort_key(value: object) -> str:
 
 def _type_key(value_type: type[object]) -> str:
     return f"{value_type.__module__}:{value_type.__qualname__}"
+
+
+_APPROVED_CUSTOM_PICKLE_TYPES = frozenset(
+    {
+        bytearray,
+        bool,
+        bytes,
+        date,
+        datetime,
+        datetime_time,
+        Decimal,
+        dict,
+        float,
+        frozenset,
+        int,
+        list,
+        type(None),
+        set,
+        str,
+        timedelta,
+        timezone,
+        tuple,
+        UUID,
+    }
+)
+
+
+def _is_unsupported_mapping(value: object) -> bool:
+    if type(value) is dict:
+        return False
+    return isinstance(value, Mapping)
+
+
+def _reject_unapproved_pickle_hooks(value: object) -> None:
+    value_type = type(value)
+    if value_type in _APPROVED_CUSTOM_PICKLE_TYPES or isinstance(value, type):
+        return
+    if isinstance(value, Enum):
+        if (
+            getattr(value_type, "__reduce_ex__", None) is Enum.__reduce_ex__
+            and getattr(value_type, "__reduce__", None) is object.__reduce__
+        ):
+            return
+    hooks = (
+        ("__reduce_ex__", getattr(object, "__reduce_ex__", None)),
+        ("__reduce__", getattr(object, "__reduce__", None)),
+        ("__getstate__", getattr(object, "__getstate__", None)),
+        ("__setstate__", getattr(object, "__setstate__", None)),
+        ("__getnewargs__", None),
+        ("__getnewargs_ex__", None),
+    )
+    if any(getattr(value_type, name, None) is not default for name, default in hooks):
+        raise MongoDBSerializationError(
+            "Checkpoint public state contains a type with custom pickle hooks "
+            f"'{_type_key(value_type)}'; migrate it to a framework-supported type, "
+            "application dataclass with default serialization, or plain dict/list structures."
+        )
 
 
 def _noncanonical_error(value: object) -> MongoDBMappingError:

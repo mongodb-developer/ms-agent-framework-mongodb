@@ -11,6 +11,13 @@
     "instance_state_beyond_entries": "reject_with_serialization_error",
     "unsupported_subclass": "reject_with_serialization_error"
   },
+  "serialization_validation": {
+    "mapping_guard": "before_all_type_handlers",
+    "pickle_dispatch": "controlled_without_copyreg",
+    "custom_pickle_hooks": "reject_before_execution",
+    "round_trip_load": "restricted_checkpoint_load_path",
+    "round_trip_canonical_match": "required_before_io"
+  },
   "payload_versions": ["1.0"],
   "collection_default": "workflow_checkpoints",
   "scope_dimensions": ["tenant_id", "workflow_name", "session_id", "checkpoint_id"],
