@@ -98,25 +98,41 @@ version that publishes a real session-hosting contract can add a new codec
 store's public methods, its storage schema, or any already-stored documents.
 
 - **`CreateAsync`** inserts a new document at version `1`. A duplicate-key
-  race is resolved by content-equality: if the already-stored document's
-  payload bytes *and* normalized `expires_at` are identical to what this call
-  intended to write, the call converges and returns the existing record
-  instead of throwing -- identical content with a *different* intended expiry
-  is a genuine conflict, not a retry, and throws. If the colliding document
-  carries an incompatible `schema_version`/`framework_version`, the call
-  throws the migration exception below instead of ever comparing content.
-  Otherwise a real content conflict throws `MongoDBConcurrencyException` -- a
-  real conflict is never silently overwritten or silently discarded.
+  race is resolved by content-equality: the already-stored document's payload
+  bytes must always match what this call intended to write. The expiry
+  comparison then depends on how this call's effective expiry was derived:
+  - If the caller passed an explicit `expiresAt`, it must match the stored
+    `expires_at` exactly (millisecond-normalized) -- identical content with a
+    *different* explicit intended expiry is a genuine conflict, not a retry,
+    and throws.
+  - If the caller passed no `expiresAt` and `DefaultExpiration` is configured,
+    the effective expiry is computed fresh from "now" on every call, so a
+    retry's freshly recomputed default will almost never equal the originally
+    persisted timestamp exactly. The call instead converges whenever the
+    stored document already has a still-future `expires_at` (consistent with
+    default-expiration semantics) *without extending it* -- the retry returns
+    the original result and its original expiry unchanged. A stored document
+    with no expiry, or one whose expiry has already passed, is not a
+    compatible convergence target and throws instead.
+
+  If the colliding document carries an incompatible
+  `schema_version`/`framework_version`, the call throws the migration
+  exception below instead of ever comparing content. Otherwise a real content
+  conflict throws `MongoDBConcurrencyException` -- a real conflict is never
+  silently overwritten or silently discarded.
 - **`SetAsync`** with `expectedVersion: null` unconditionally creates or
   replaces (an upsert): there is no compare-and-swap, and no prior read is
-  required. With a non-null `expectedVersion`, it performs an atomic
-  compare-and-swap (`FindOneAndUpdateAsync` filtered on the exact stored
-  version *and* the current `schema_version`/`framework_version`) that
-  increments the version by exactly one on success. If the filter does not
-  match because a *prior, already-applied* attempt already produced that
-  exact version, content, and normalized expiry, the call converges rather
-  than conflicting (retry idempotency without last-write-wins); a different
-  intended expiry still conflicts. If the scoped document exists but its
+  required -- every successful call always writes a freshly computed expiry.
+  With a non-null `expectedVersion`, it performs an atomic compare-and-swap
+  (`FindOneAndUpdateAsync` filtered on the exact stored version *and* the
+  current `schema_version`/`framework_version`) that increments the version by
+  exactly one on success (and, on that success path, always applies a freshly
+  computed expiry, since an intentional content change is not a retry). If the
+  filter does not match because a *prior, already-applied* attempt already
+  produced that exact version and content, the call converges rather than
+  conflicting (retry idempotency without last-write-wins), using the same
+  explicit-exact-match versus default-derived-still-future-and-not-extended
+  expiry rule as `CreateAsync` above. If the scoped document exists but its
   schema/framework markers are incompatible, the call throws the migration
   exception below instead of a compare-and-swap conflict. If the stored
   document differs in version or content from what this call expected, it
@@ -218,8 +234,12 @@ lossless round-trips (including numeric literals beyond `double` precision
 and trailing-zero decimals), tenant/user isolation, create duplicate-key
 convergence versus real conflict, unconditional upsert versus
 compare-and-swap semantics, CAS retry convergence versus real staleness
-(including expiry-aware convergence: identical content with a *different*
-intended expiry still conflicts), idempotent and version-checked deletion,
+(including expiry-aware convergence: an explicit intended expiry must match
+exactly, while a default-derived expiry converges on the persisted,
+still-future expiration without extending it, proven with an injectable fake
+clock across simulated elapsed time so a retry's freshly recomputed default
+cannot spuriously conflict; an intentional content change still gets a freshly
+computed default expiry), idempotent and version-checked deletion,
 default/explicit/absent TTL, list pagination/ordering/expiration filtering,
 schema/framework version rejection on both read and every mutation path
 (proving no mutation occurs and that the failure is distinguishable from a
@@ -230,7 +250,10 @@ owned-client construction exception safety (validation-before-client-creation
 and disposal-after-later-failure), cancellation propagation, invalid
 version-token rejection, and index provisioning/validation. The
 credential-gated `integration-persistence` test uses an
-`af_persistence_dotnet_test_` collection and targeted `finally` cleanup.
+`af_persistence_dotnet_test_` collection and targeted `finally` cleanup, and
+additionally proves default-expiration `CreateAsync`/CAS `SetAsync` retry
+convergence after a real elapsed delay without extending the persisted
+expiry.
 
 Run:
 

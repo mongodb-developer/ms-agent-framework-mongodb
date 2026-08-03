@@ -60,12 +60,13 @@ public sealed class MongoDBAgentSessionStore : IAsyncDisposable
     private readonly IMongoCollection<BsonDocument> _collection;
     private readonly MongoDBAgentSessionStoreOptions _options;
     private readonly OwnedResource<IMongoClient>? _client;
+    private readonly Func<DateTimeOffset> _clock;
 
     /// <summary>Creates a store over an injected collection, which remains caller-owned.</summary>
     public MongoDBAgentSessionStore(
         IMongoCollection<BsonDocument> collection,
         MongoDBAgentSessionStoreOptions options)
-        : this(collection, options, DefaultResolvedFrameworkAssemblyVersionProvider)
+        : this(collection, options, DefaultResolvedFrameworkAssemblyVersionProvider, DefaultClock)
     {
     }
 
@@ -78,9 +79,34 @@ public sealed class MongoDBAgentSessionStore : IAsyncDisposable
         IMongoCollection<BsonDocument> collection,
         MongoDBAgentSessionStoreOptions options,
         Func<Version> resolvedFrameworkAssemblyVersionProvider)
+        : this(collection, options, resolvedFrameworkAssemblyVersionProvider, DefaultClock)
+    {
+    }
+
+    /// <summary>
+    /// Test-only seam allowing "now" to be injected instead of <see cref="DateTimeOffset.UtcNow"/>, so
+    /// default-expiration retry-convergence behavior across elapsed time (a retried <see cref="CreateAsync"/> or
+    /// compare-and-swap <see cref="SetAsync"/> call whose default-derived candidate expiry is recomputed later
+    /// than the persisted one) is unit-testable with a fake clock instead of a real sleep.
+    /// </summary>
+    internal MongoDBAgentSessionStore(
+        IMongoCollection<BsonDocument> collection,
+        MongoDBAgentSessionStoreOptions options,
+        Func<DateTimeOffset> clock)
+        : this(collection, options, DefaultResolvedFrameworkAssemblyVersionProvider, clock)
+    {
+    }
+
+    /// <summary>Test-only seam allowing both the resolved framework assembly version and "now" to be injected.</summary>
+    internal MongoDBAgentSessionStore(
+        IMongoCollection<BsonDocument> collection,
+        MongoDBAgentSessionStoreOptions options,
+        Func<Version> resolvedFrameworkAssemblyVersionProvider,
+        Func<DateTimeOffset> clock)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(resolvedFrameworkAssemblyVersionProvider);
+        ArgumentNullException.ThrowIfNull(clock);
         options.Validate();
         ValidateResolvedFrameworkAssemblyVersion(resolvedFrameworkAssemblyVersionProvider());
         _options = options with
@@ -91,6 +117,7 @@ public sealed class MongoDBAgentSessionStore : IAsyncDisposable
             UserId = options.UserId?.Trim(),
         };
         _collection = collection ?? throw new ArgumentNullException(nameof(collection));
+        _clock = clock;
     }
 
     /// <summary>Creates a store over an injected database, which remains caller-owned.</summary>
@@ -218,6 +245,8 @@ public sealed class MongoDBAgentSessionStore : IAsyncDisposable
     /// <summary>Gets whether this store owns its MongoDB client.</summary>
     public bool OwnsClient => _client?.OwnsValue is true;
 
+    private static DateTimeOffset DefaultClock() => DateTimeOffset.UtcNow;
+
     private static Version DefaultResolvedFrameworkAssemblyVersionProvider() =>
         typeof(AIAgent).Assembly.GetName().Version
             ?? throw new MongoDBConfigurationException(
@@ -305,8 +334,9 @@ public sealed class MongoDBAgentSessionStore : IAsyncDisposable
             {
                 BsonBinaryData payload = await SerializePayloadAsync(codec, session, token)
                     .ConfigureAwait(false);
-                DateTimeOffset now = DateTimeOffset.UtcNow;
+                DateTimeOffset now = _clock();
                 DateTimeOffset? effectiveExpiresAt = expiresAt ?? DefaultExpiresAt(now);
+                bool expiryIsDefaultDerived = expiresAt is null && effectiveExpiresAt is not null;
                 var candidate = new BsonDocument
                 {
                     { "_id", ScopedId(scope, sessionId) },
@@ -338,8 +368,11 @@ public sealed class MongoDBAgentSessionStore : IAsyncDisposable
                         throw IncompatibleSchemaException();
                     }
 
-                    if (existing is not null && ContentEquals(existing, payload, effectiveExpiresAt))
+                    if (existing is not null &&
+                        ContentEquals(existing, payload, effectiveExpiresAt, expiryIsDefaultDerived, now))
                     {
+                        // Converge on the persisted result unchanged: a retry never extends the expiry that the
+                        // original, successful attempt already wrote.
                         return await ToRecordAsync(existing, codec, token).ConfigureAwait(false);
                     }
 
@@ -382,8 +415,9 @@ public sealed class MongoDBAgentSessionStore : IAsyncDisposable
             {
                 BsonBinaryData payload = await SerializePayloadAsync(codec, session, token)
                     .ConfigureAwait(false);
-                DateTimeOffset now = DateTimeOffset.UtcNow;
+                DateTimeOffset now = _clock();
                 DateTimeOffset? effectiveExpiresAt = expiresAt ?? DefaultExpiresAt(now);
+                bool expiryIsDefaultDerived = expiresAt is null && effectiveExpiresAt is not null;
                 FilterDefinition<BsonDocument> filter = IdentityFilter(scope) &
                     Builders<BsonDocument>.Filter.Eq("schema_version", SchemaVersion) &
                     Builders<BsonDocument>.Filter.Eq("framework_version", FrameworkSerializationVersion);
@@ -462,9 +496,10 @@ public sealed class MongoDBAgentSessionStore : IAsyncDisposable
                 }
 
                 if (existing["version"].ToInt64() == parsedExpectedVersion!.Value + 1 &&
-                    ContentEquals(existing, payload, effectiveExpiresAt))
+                    ContentEquals(existing, payload, effectiveExpiresAt, expiryIsDefaultDerived, now))
                 {
-                    // The exact write already succeeded on a prior, unacknowledged attempt: converge.
+                    // The exact write already succeeded on a prior, unacknowledged attempt: converge on the
+                    // persisted result unchanged. Do not extend the expiry that write already committed.
                     return await ToRecordAsync(existing, codec, token).ConfigureAwait(false);
                 }
 
@@ -913,23 +948,49 @@ public sealed class MongoDBAgentSessionStore : IAsyncDisposable
     }
 
     /// <summary>
-    /// Compares stored envelope state against a candidate write for idempotent-retry convergence. Both the exact
-    /// serialized session payload bytes and the normalized (millisecond-truncated) effective expiration must
-    /// match; a retry that resends identical session content but a different intended expiration is treated as a
-    /// genuine conflict rather than silently converging on whichever expiration was written first.
+    /// Compares stored envelope state against a candidate write for idempotent-retry convergence. The exact
+    /// serialized session payload bytes must always match. The expiration comparison then depends on the
+    /// candidate expiry's origin (see <see cref="ExpiresAtEquals"/>): an explicit caller-supplied
+    /// <c>expiresAt</c> must match the stored value exactly (a retry that resends identical session content but
+    /// a different explicit intended expiration is a genuine conflict, not a converging retry), while a
+    /// default-derived candidate (the caller supplied no <c>expiresAt</c> and <see cref="MongoDBAgentSessionStoreOptions.DefaultExpiration"/>
+    /// computed one from "now") converges whenever the stored expiration is still a compatible, still-future
+    /// default expiration -- since a retry recomputes "now" later than the original attempt did, comparing exact
+    /// timestamps in that case would spuriously conflict on every retry.
     /// </summary>
     private static bool ContentEquals(
         BsonDocument existing,
         BsonBinaryData candidatePayload,
-        DateTimeOffset? candidateExpiresAt) =>
+        DateTimeOffset? candidateExpiresAt,
+        bool candidateExpiryIsDefaultDerived,
+        DateTimeOffset now) =>
         existing.TryGetValue("session", out BsonValue existingPayload) &&
         existingPayload.BsonType == BsonType.Binary &&
         existingPayload.AsBsonBinaryData.Bytes.AsSpan().SequenceEqual(candidatePayload.Bytes) &&
-        ExpiresAtEquals(existing, candidateExpiresAt);
+        ExpiresAtEquals(existing, candidateExpiresAt, candidateExpiryIsDefaultDerived, now);
 
-    private static bool ExpiresAtEquals(BsonDocument existing, DateTimeOffset? candidateExpiresAt)
+    private static bool ExpiresAtEquals(
+        BsonDocument existing,
+        DateTimeOffset? candidateExpiresAt,
+        bool candidateExpiryIsDefaultDerived,
+        DateTimeOffset now)
     {
         bool existingHasExpiry = existing.TryGetValue("expires_at", out BsonValue expires) && !expires.IsBsonNull;
+
+        if (candidateExpiryIsDefaultDerived)
+        {
+            // The candidate's expiry was freshly computed from "now" because the caller supplied no explicit
+            // expiresAt. A retry of the same logical write recomputes "now" later than the original attempt
+            // did, so its default-derived candidate will almost never equal the persisted timestamp exactly --
+            // comparing them exactly would spuriously treat every retry as a conflict. Converge instead purely
+            // on whether the existing document already carries a still-future expiration (consistent with this
+            // store's default-expiration semantics), and never extend it: the retry returns the original,
+            // already-persisted expiry unchanged rather than pushing it further into the future. An existing
+            // document with no expiry, or one whose expiry has already passed, is not a compatible default-
+            // expiration convergence target and is therefore a genuine conflict.
+            return existingHasExpiry && expires.ToUniversalTime() > now.UtcDateTime;
+        }
+
         if (!existingHasExpiry)
         {
             return candidateExpiresAt is null;

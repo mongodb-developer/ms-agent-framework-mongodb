@@ -49,6 +49,16 @@ public sealed class MongoDBAgentSessionStoreIntegrationTests
             MongoDBAgentSessionRecord? crossTenant = await otherTenant.GetAsync("session-a", agent);
             Assert.Null(crossTenant);
 
+            // Retrying an identical CreateAsync call after real elapsed time should converge (not conflict) on
+            // the originally persisted default expiry, without extending it.
+            await Task.Delay(TimeSpan.FromMilliseconds(50));
+            MongoDBAgentSessionRecord createRetried = await store.CreateAsync(
+                "session-a",
+                new IntegrationTestSession(bag),
+                agent);
+            Assert.Equal(created.Version, createRetried.Version);
+            Assert.Equal(created.ExpiresAt, createRetried.ExpiresAt);
+
             MongoDBAgentSessionRecord updated = await store.SetAsync(
                 "session-a",
                 new IntegrationTestSession(bag),
@@ -56,13 +66,17 @@ public sealed class MongoDBAgentSessionStoreIntegrationTests
                 expectedVersion: created.Version);
             Assert.Equal("2", updated.Version);
 
-            // Retrying the same CAS write with the stale expected version should converge, not conflict.
+            // Retrying the same CAS write with the stale expected version should converge, not conflict, even
+            // though real elapsed time means a freshly recomputed default expiry would differ from what the
+            // first successful attempt already persisted; the retry must not extend it.
+            await Task.Delay(TimeSpan.FromMilliseconds(50));
             MongoDBAgentSessionRecord retried = await store.SetAsync(
                 "session-a",
                 new IntegrationTestSession(bag),
                 agent,
                 expectedVersion: created.Version);
             Assert.Equal(updated.Version, retried.Version);
+            Assert.Equal(updated.ExpiresAt, retried.ExpiresAt);
 
             MongoDBAgentSessionRecord? reloaded = await store.GetAsync("session-a", agent);
             Assert.NotNull(reloaded);

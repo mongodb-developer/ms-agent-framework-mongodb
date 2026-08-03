@@ -1,6 +1,7 @@
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
 using MongoDB.Bson;
+using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
@@ -541,19 +542,134 @@ public sealed class MongoDBAgentSessionStoreBehaviorTests
         Assert.Equal(["session-24", "session-25"], page.Items.Select(item => item.SessionId));
     }
 
+    [Fact]
+    public async Task CreateWithDefaultExpirationRetryConvergesAcrossElapsedTimeWithoutExtendingExpiry()
+    {
+        var state = new SessionCollectionState();
+        var clock = new MutableClock(DateTimeOffset.Parse("2026-01-01T00:00:00Z", CultureInfo.InvariantCulture));
+        var store = CreateStore(state, defaultExpiration: TimeSpan.FromMinutes(30), clock: clock.Read);
+        var agent = new FakeSessionAgent();
+        var bag = new AgentSessionStateBag();
+        bag.SetValue("value", "same");
+
+        MongoDBAgentSessionRecord first = await store.CreateAsync("session-27", new TestSession(bag), agent);
+
+        // Advance the fake clock so a retry's freshly recomputed default expiry (now + DefaultExpiration) would
+        // differ from the one the first, successful attempt already persisted.
+        clock.Now += TimeSpan.FromMinutes(10);
+        MongoDBAgentSessionRecord retry = await store.CreateAsync("session-27", new TestSession(bag), agent);
+
+        Assert.Equal(first.Version, retry.Version);
+        Assert.Equal(first.ExpiresAt, retry.ExpiresAt);
+        Assert.Single(state.Documents);
+        Assert.Equal(first.ExpiresAt!.Value.UtcDateTime, state.Documents[0]["expires_at"].ToUniversalTime());
+    }
+
+    [Fact]
+    public async Task CreateWithDefaultExpirationRetryAfterExistingExpiryHasPassedConflicts()
+    {
+        var state = new SessionCollectionState();
+        var clock = new MutableClock(DateTimeOffset.Parse("2026-01-01T00:00:00Z", CultureInfo.InvariantCulture));
+        var store = CreateStore(state, defaultExpiration: TimeSpan.FromMinutes(30), clock: clock.Read);
+        var agent = new FakeSessionAgent();
+        var bag = new AgentSessionStateBag();
+        bag.SetValue("value", "same");
+
+        await store.CreateAsync("session-28", new TestSession(bag), agent);
+
+        // Advance the fake clock past the persisted default expiry: the existing document is logically expired,
+        // so it is not a compatible default-expiration convergence target even though the payload matches.
+        clock.Now += TimeSpan.FromHours(1);
+        await Assert.ThrowsAsync<MongoDBConcurrencyException>(() =>
+            store.CreateAsync("session-28", new TestSession(bag), agent));
+    }
+
+    [Fact]
+    public async Task SetAsyncCasRetryWithDefaultExpirationConvergesAcrossElapsedTimeWithoutExtendingExpiry()
+    {
+        var state = new SessionCollectionState();
+        var clock = new MutableClock(DateTimeOffset.Parse("2026-01-01T00:00:00Z", CultureInfo.InvariantCulture));
+        var store = CreateStore(state, defaultExpiration: TimeSpan.FromMinutes(30), clock: clock.Read);
+        var agent = new FakeSessionAgent();
+        var bag = new AgentSessionStateBag();
+        bag.SetValue("value", "converge");
+        MongoDBAgentSessionRecord created = await store.CreateAsync("session-29", new TestSession(bag), agent);
+
+        MongoDBAgentSessionRecord updated = await store.SetAsync(
+            "session-29",
+            new TestSession(bag),
+            agent,
+            expectedVersion: created.Version);
+
+        // Simulate a retried caller resending the exact same write with the pre-update expected version, after
+        // time has passed -- a freshly recomputed default expiry would differ from what was already persisted.
+        clock.Now += TimeSpan.FromMinutes(10);
+        MongoDBAgentSessionRecord retried = await store.SetAsync(
+            "session-29",
+            new TestSession(bag),
+            agent,
+            expectedVersion: created.Version);
+
+        Assert.Equal(updated.Version, retried.Version);
+        Assert.Equal(updated.ExpiresAt, retried.ExpiresAt);
+        Assert.Equal(updated.ExpiresAt!.Value.UtcDateTime, state.Documents[0]["expires_at"].ToUniversalTime());
+    }
+
+    [Fact]
+    public async Task SetAsyncIntentionalUpdateWithChangedPayloadGetsNewlyComputedDefaultExpiry()
+    {
+        var state = new SessionCollectionState();
+        var clock = new MutableClock(DateTimeOffset.Parse("2026-01-01T00:00:00Z", CultureInfo.InvariantCulture));
+        var store = CreateStore(state, defaultExpiration: TimeSpan.FromMinutes(30), clock: clock.Read);
+        var agent = new FakeSessionAgent();
+        var originalBag = new AgentSessionStateBag();
+        originalBag.SetValue("value", "original");
+        MongoDBAgentSessionRecord created = await store.CreateAsync(
+            "session-30", new TestSession(originalBag), agent);
+
+        clock.Now += TimeSpan.FromMinutes(10);
+        var changedBag = new AgentSessionStateBag();
+        changedBag.SetValue("value", "changed");
+        MongoDBAgentSessionRecord updated = await store.SetAsync(
+            "session-30",
+            new TestSession(changedBag),
+            agent,
+            expectedVersion: created.Version);
+
+        // An actual content change is a genuine update, not a retry: it must get a freshly computed default
+        // expiry based on the later "now", not the original create's expiry.
+        Assert.NotEqual(created.ExpiresAt, updated.ExpiresAt);
+        Assert.Equal(clock.Now + TimeSpan.FromMinutes(30), updated.ExpiresAt);
+    }
+
     private static MongoDBAgentSessionStore CreateStore(
         SessionCollectionState state,
         string? tenantId = null,
-        TimeSpan? defaultExpiration = null) =>
-        new(
-            SessionCollectionProxy.Create(state),
-            new MongoDBAgentSessionStoreOptions
-            {
-                TenantId = tenantId,
-                ApplicationId = "app",
-                AgentId = "agent",
-                DefaultExpiration = defaultExpiration,
-            });
+        TimeSpan? defaultExpiration = null,
+        Func<DateTimeOffset>? clock = null)
+    {
+        var options = new MongoDBAgentSessionStoreOptions
+        {
+            TenantId = tenantId,
+            ApplicationId = "app",
+            AgentId = "agent",
+            DefaultExpiration = defaultExpiration,
+        };
+        return clock is null
+            ? new MongoDBAgentSessionStore(SessionCollectionProxy.Create(state), options)
+            : new MongoDBAgentSessionStore(SessionCollectionProxy.Create(state), options, clock);
+    }
+
+    /// <summary>
+    /// A settable fake clock used to prove default-expiration retry-convergence behavior across elapsed time
+    /// without a real sleep: <see cref="Read"/> is passed as the store's injected "now" provider.
+    /// </summary>
+    private sealed class MutableClock(DateTimeOffset initial)
+    {
+        public DateTimeOffset Now { get; set; } = initial;
+
+        public DateTimeOffset Read() => Now;
+    }
 
     private sealed class TestSession : AgentSession
     {
