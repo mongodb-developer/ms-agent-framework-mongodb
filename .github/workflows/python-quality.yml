@@ -42,23 +42,60 @@ jobs:
         run: python -m pytest --cov=agent_framework_mongodb --cov-report=term -q
       - name: Run Ruff
         run: |
-          python -m ruff check src tests samples ../scripts/scan_credentials.py
-          python -m ruff format --check src tests samples ../scripts/scan_credentials.py
+          python -m ruff check src tests samples scripts ../scripts/scan_credentials.py
+          python -m ruff format --check src tests samples scripts ../scripts/scan_credentials.py
       - name: Run MyPy
         run: python -m mypy
       - name: Run Pyright
         run: python -m pyright
       - name: Build and validate distributions
         run: |
+          rm -rf build dist
           python -m build
           python -m twine check dist/*
+          python scripts/verify_artifacts.py dist/*.whl dist/*.tar.gz
+          python scripts/check_api_baseline.py api-baseline.json
       - name: Smoke test exact wheel
         run: |
           python -m venv .artifact-smoke-wheel
-          .artifact-smoke-wheel/bin/python -m pip install --disable-pip-version-check dist/*.whl
-          .artifact-smoke-wheel/bin/python -c "import agent_framework_mongodb"
+          .artifact-smoke-wheel/bin/python -m pip install --disable-pip-version-check --no-cache-dir dist/*.whl
+          .artifact-smoke-wheel/bin/python scripts/smoke_public_api.py
+          .artifact-smoke-wheel/bin/python -m pydoc agent_framework_mongodb > /dev/null
       - name: Smoke test exact source distribution
         run: |
           python -m venv .artifact-smoke-sdist
-          .artifact-smoke-sdist/bin/python -m pip install --disable-pip-version-check dist/*.tar.gz
-          .artifact-smoke-sdist/bin/python -c "import agent_framework_mongodb"
+          .artifact-smoke-sdist/bin/python -m pip install --disable-pip-version-check --no-cache-dir dist/*.tar.gz
+          .artifact-smoke-sdist/bin/python scripts/smoke_public_api.py
+      - name: Resolve minimum supported dependencies
+        run: |
+          python -m venv .dependency-minimum
+          .dependency-minimum/bin/python -m pip install --disable-pip-version-check \
+            "agent-framework-core==1.13.0" \
+            "opentelemetry-api==1.39.0" \
+            "pymongo==4.13.0"
+          .dependency-minimum/bin/python -m pip install --disable-pip-version-check --no-deps dist/*.whl
+          .dependency-minimum/bin/python scripts/smoke_public_api.py
+          .dependency-minimum/bin/python -m pip freeze
+      - name: Resolve newest allowed dependencies
+        run: |
+          python -m venv .dependency-latest
+          .dependency-latest/bin/python -m pip install --disable-pip-version-check \
+            --upgrade --upgrade-strategy eager dist/*.whl
+          .dependency-latest/bin/python scripts/smoke_public_api.py
+          .dependency-latest/bin/python -m pip freeze
+      - name: Generate CycloneDX SBOM
+        run: |
+          python -m pip install --disable-pip-version-check "pip-audit==2.10.1"
+          .artifact-smoke-wheel/bin/python -m pip install --disable-pip-version-check \
+            --upgrade pip setuptools
+          pip-audit --path .artifact-smoke-wheel/lib/python3.10/site-packages \
+            --format cyclonedx-json \
+            --output dist/agent-framework-mongodb.sbom.cdx.json
+      - name: Record artifact checksums
+        run: sha256sum dist/* > dist/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-package-${{ github.sha }}
+          path: python/dist/
+          if-no-files-found: error
+          retention-days: 14
