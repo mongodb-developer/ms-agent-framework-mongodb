@@ -10,6 +10,7 @@
     <Project Path="samples/RAGQuickstart/RAGQuickstart.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/IngestionSamples.Tests/IngestionSamples.Tests.csproj" />
     <Project Path="tests/MongoDB.AgentFramework.Tests/MongoDB.AgentFramework.Tests.csproj" />
   </Folder>
 </Solution>
