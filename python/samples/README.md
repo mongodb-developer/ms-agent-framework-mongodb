@@ -3,6 +3,34 @@
 These programs are demonstrations, not production ingestion or orchestration APIs.
 Runtime RAG remains read-only.
 
+## Session persistence
+
+`session_persistence.py` saves a complete public Agent Framework `AgentSession`,
+reloads and continues it with compare-and-swap, configures UTC expiration, and
+performs an authorized versioned delete. It uses only the immutable
+tenant/application/agent scope supplied by the application; the session ID alone
+is never authorization.
+
+Set `MONGODB_URI`, `MONGODB_DATABASE`, `MONGODB_SESSION_COLLECTION`,
+`MONGODB_SESSION_TENANT_ID`, `MONGODB_SESSION_APPLICATION_ID`,
+`MONGODB_SESSION_AGENT_ID`, and `MONGODB_SESSION_ID`.
+`MONGODB_SESSION_TTL_SECONDS` defaults to 3600. Use a dedicated runtime identity
+with find, insert, replace/update, and targeted delete privileges. The sample
+also explicitly creates regular indexes, so that run requires index-provisioning
+privileges; production deployments should provision them separately.
+
+From `python`:
+
+```powershell
+python samples\session_persistence.py
+python samples\session_persistence.py --keep
+```
+
+The default run deletes only its exact authorized session. `--keep` leaves that
+snapshot for MongoDB's asynchronous TTL monitor. The collection is never
+dropped. Expected output reports versions and cleanup count without scope or
+payload data.
+
 ## Incremental ingestion
 
 `incremental_ingestion.py` copies only sample-prefixed records from a bounded
