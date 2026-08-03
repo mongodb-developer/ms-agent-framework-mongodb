@@ -40,6 +40,22 @@ or any already-stored documents. Re-run the reflection methodology in
 resolved `Microsoft.Agents.AI.Abstractions` version before treating this gap
 as closed.
 
+Because there is no framework contract to bind this facade's envelope shape
+to, the `Microsoft.Agents.AI.Abstractions` `PackageReference` is itself
+narrowed to the verified range `[1.13.0, 1.17.0)` (the next-minor exclusive
+upper bound above the last verified 1.16.0), and every constructor
+additionally inspects the *resolved* assembly version at runtime
+(`typeof(AIAgent).Assembly.GetName().Version`) and throws
+`MongoDBConfigurationException` for any version outside that same range --
+even if a consuming project's dependency resolution or a transitive
+reference somehow loads a version the `PackageReference` range did not
+prevent. An internal `Func<Version>` constructor seam lets tests inject an
+out-of-range version without loading multiple real assemblies side by side.
+If this range is widened after re-verifying against a newer
+`Microsoft.Agents.AI.Abstractions` release, both the `PackageReference` range
+and the two `MongoDBAgentSessionStore` version constants must be updated
+together.
+
 ## Public surface and ownership
 
 `MongoDBAgentSessionStore` in
@@ -56,11 +72,18 @@ content.
 
 Injected clients, databases, and collections remain caller-owned. The
 connection-string constructor creates one owned `MongoClient`, disposed
-exactly once by `DisposeAsync`. Construction neither contacts MongoDB nor
-creates indexes. All APIs pass `CancellationToken` to the driver. Optional
-operation deadlines raise `MongoDBTimeoutException`; caller cancellation
-remains cancellation. Driver failures preserve their cause in stable
-retrieval, persistence, or concurrency errors.
+exactly once by `DisposeAsync`. Construction validates options, the resolved
+framework assembly version, and required database/collection text entirely
+*before* creating that owned client, so a validation failure never creates
+(and therefore never needs to dispose) a client; if a later construction step
+that does require the client (resolving the database/collection) fails, the
+constructor disposes the already-created client itself before rethrowing,
+since no `MongoDBAgentSessionStore` instance ever exists to do so.
+Construction otherwise neither contacts MongoDB nor creates indexes. All APIs
+pass `CancellationToken` to the driver. Optional operation deadlines raise
+`MongoDBTimeoutException`; caller cancellation remains cancellation. Driver
+failures preserve their cause in stable retrieval, persistence, or
+concurrency errors.
 
 ## Lifecycle and data flow
 
@@ -76,38 +99,77 @@ store's public methods, its storage schema, or any already-stored documents.
 
 - **`CreateAsync`** inserts a new document at version `1`. A duplicate-key
   race is resolved by content-equality: if the already-stored document's
-  `session` payload is byte-identical to the one this call intended to write,
-  the call converges and returns the existing record instead of throwing.
-  Otherwise it throws `MongoDBConcurrencyException` -- a real conflict is
-  never silently overwritten or silently discarded.
+  payload bytes *and* normalized `expires_at` are identical to what this call
+  intended to write, the call converges and returns the existing record
+  instead of throwing -- identical content with a *different* intended expiry
+  is a genuine conflict, not a retry, and throws. If the colliding document
+  carries an incompatible `schema_version`/`framework_version`, the call
+  throws the migration exception below instead of ever comparing content.
+  Otherwise a real content conflict throws `MongoDBConcurrencyException` -- a
+  real conflict is never silently overwritten or silently discarded.
 - **`SetAsync`** with `expectedVersion: null` unconditionally creates or
   replaces (an upsert): there is no compare-and-swap, and no prior read is
   required. With a non-null `expectedVersion`, it performs an atomic
   compare-and-swap (`FindOneAndUpdateAsync` filtered on the exact stored
-  version) that increments the version by exactly one on success. If the
-  filter does not match because a *prior, already-applied* attempt already
-  produced that exact version and content, the call converges rather than
-  conflicting (retry idempotency without last-write-wins). If the stored
+  version *and* the current `schema_version`/`framework_version`) that
+  increments the version by exactly one on success. If the filter does not
+  match because a *prior, already-applied* attempt already produced that
+  exact version, content, and normalized expiry, the call converges rather
+  than conflicting (retry idempotency without last-write-wins); a different
+  intended expiry still conflicts. If the scoped document exists but its
+  schema/framework markers are incompatible, the call throws the migration
+  exception below instead of a compare-and-swap conflict. If the stored
   document differs in version or content from what this call expected, it
   throws `MongoDBConcurrencyException`.
 - **`DeleteAsync`** without `expectedVersion` is an idempotent no-op
-  (`false`) when nothing matches. With `expectedVersion`, a mismatch throws
-  `MongoDBConcurrencyException` rather than silently deleting (or silently
-  not deleting) the wrong version.
+  (`false`) when nothing matches. If the scoped document exists but its
+  schema/framework markers are incompatible, `DeleteAsync` throws the
+  migration exception below -- regardless of whether `expectedVersion` was
+  supplied -- rather than deleting a document it cannot safely read first.
+  With `expectedVersion` against a compatible document, a version mismatch
+  throws `MongoDBConcurrencyException` rather than silently deleting (or
+  silently not deleting) the wrong version.
 - **`ListAsync`** never deserializes session content; it returns
   metadata-only summaries in ascending `session_id` order with an opaque
-  continuation token, bounded to at most 10,000 items per call.
+  continuation token, bounded to at most 10,000 items per call, and excludes
+  any session whose `expires_at` has already passed (logically expired even
+  if the TTL index has not yet physically reaped it).
 
-The complete framework-serialized session JSON is stored as a nested BSON
-sub-document (`BsonDocument.Parse(element.GetRawText())` on write,
-`ToJson(RelaxedExtendedJson)` + `JsonDocument.Parse` on read -- the same
-round-trip technique `MongoDBChatHistoryProvider` uses for `ChatMessage`
-losslessness). The store never inspects, maps, or type-coerces individual
-fields inside that payload; unknown or future `AgentSessionStateBag` entries
-survive a round trip unchanged. Every envelope carries `schema_version` and
-`framework_version` markers; loading a document whose markers do not match
-this build's constants throws `MongoDBMappingException` with migration
-guidance rather than attempting a lossy or silent migration.
+Every `CreateAsync`/`SetAsync`/`DeleteAsync` mutation filter requires an exact
+match on this build's `schema_version` and `framework_version` constants, not
+just the identity scope. A scoped record that exists but was written by an
+incompatible schema/framework version is therefore always detected
+**read-only, before any mutation is attempted** -- never partially updated or
+deleted -- and raises `MongoDBMappingException` with a message that states the
+expected markers, confirms no read/update/delete was attempted, and links
+[dotnet-session-store-migration.md](dotnet-session-store-migration.md)
+verbatim. This is a distinct failure mode from both "not found" (no scoped
+document exists at all) and a compare-and-swap conflict (the document is
+readable but its `version` does not match); callers must not conflate any of
+the three.
+
+`session_id` is treated as opaque and is never trimmed: `RequireText` still
+rejects `null`/empty/whitespace-only values (there is no such thing as a
+"session" with no id at all), but any other value -- including one with
+leading or trailing whitespace -- is preserved exactly as given and forms a
+distinct, independently reachable session identity. (The canonical
+tenant/application/agent/user scope dimensions are still trimmed at
+construction, per existing behavior; only `session_id` itself is exempt.)
+
+The complete framework-serialized session JSON is stored as the public
+serializer's exact UTF-8 JSON bytes (`element.GetRawText()`), wrapped
+verbatim in a BSON `Binary` field on write and read back as the identical
+bytes (`JsonDocument.Parse` over the stored bytes) -- never re-parsed through
+`BsonDocument`, so there is no BSON-type-coercion round trip to lose
+precision or distinguish integers from decimals. The store never inspects,
+maps, or type-coerces individual fields inside that payload; unknown or
+future `AgentSessionStateBag` entries -- including numeric literals beyond
+`double` precision and decimals with trailing zeros -- survive a round trip
+byte-for-byte. Every envelope carries `schema_version` and
+`framework_version` markers; every read and mutation path requires an exact
+match against this build's constants (see above), and a mismatch always
+throws `MongoDBMappingException` with migration guidance rather than
+attempting a lossy or silent migration.
 
 ## Schema and indexes
 
@@ -128,7 +190,7 @@ Representative document:
   "created_at": "UTC BSON date",
   "updated_at": "UTC BSON date",
   "expires_at": "optional UTC BSON date",
-  "session": { "...": "agent-defined AgentSession JSON, stored verbatim" }
+  "session": "BSON Binary wrapping the agent-defined AgentSession JSON's exact UTF-8 bytes, stored verbatim"
 }
 ```
 
@@ -151,16 +213,24 @@ contract, not the on-disk `session` payload shape, which is inherently
 ## Verification and operations
 
 Offline public-seam tests under
-`dotnet/tests/MongoDB.AgentFramework.Tests/Persistence` cover lossless
-round-trips including unknown `AgentSessionStateBag` state, tenant/user
-isolation, create duplicate-key convergence versus real conflict,
-unconditional upsert versus compare-and-swap semantics, CAS retry
-convergence versus real staleness, idempotent and version-checked deletion,
-default/explicit/absent TTL, list pagination and ordering, schema/framework
-version rejection, cancellation propagation, invalid version-token rejection,
-and index provisioning/validation. The credential-gated
-`integration-persistence` test uses an `af_persistence_dotnet_test_`
-collection and targeted `finally` cleanup.
+`dotnet/tests/MongoDB.AgentFramework.Tests/Persistence` cover byte-for-byte
+lossless round-trips (including numeric literals beyond `double` precision
+and trailing-zero decimals), tenant/user isolation, create duplicate-key
+convergence versus real conflict, unconditional upsert versus
+compare-and-swap semantics, CAS retry convergence versus real staleness
+(including expiry-aware convergence: identical content with a *different*
+intended expiry still conflicts), idempotent and version-checked deletion,
+default/explicit/absent TTL, list pagination/ordering/expiration filtering,
+schema/framework version rejection on both read and every mutation path
+(proving no mutation occurs and that the failure is distinguishable from a
+not-found result or a CAS conflict), opaque non-trimmed `session_id` handling
+(whitespace-only rejection; leading/trailing-space distinctness), resolved
+framework assembly version gating (supported/below-floor/at-or-above-ceiling),
+owned-client construction exception safety (validation-before-client-creation
+and disposal-after-later-failure), cancellation propagation, invalid
+version-token rejection, and index provisioning/validation. The
+credential-gated `integration-persistence` test uses an
+`af_persistence_dotnet_test_` collection and targeted `finally` cleanup.
 
 Run:
 
