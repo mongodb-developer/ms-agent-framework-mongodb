@@ -1,6 +1,10 @@
 using Microsoft.Agents.AI.Workflows;
 using Microsoft.Agents.AI.Workflows.Checkpointing;
 using MongoDB.Bson;
+using MongoDB.Bson.Serialization;
+using MongoDB.Bson.Serialization.Serializers;
+using MongoDB.Driver;
+using System.Security.Cryptography;
 using System.Text.Json;
 
 namespace MongoDB.AgentFramework.Tests.Persistence;
@@ -340,17 +344,361 @@ public sealed class MongoDBCheckpointStoreBehaviorTests
             store.RetrieveCheckpointAsync("session-16", new CheckpointInfo("session-16", "missing")).AsTask());
     }
 
+    // ---------------------------------------------------------------------------------------------------
+    // Blocker 2: transactional, monotonic sequence allocation under concurrency.
+    // ---------------------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task ConcurrentSaveCheckpointAsyncCallsAllocateSequenceAndAreListedInCommitOrder()
+    {
+        var state = new CheckpointCollectionState();
+        var store = CreateStore(state);
+        JsonElement payload = JsonSerializer.SerializeToElement("value");
+
+        using var writerBReachedGate = new ManualResetEventSlim(false);
+        using var releaseWriterA = new ManualResetEventSlim(false);
+        state.BeforeTransactionLockAcquire = callIndex =>
+        {
+            if (callIndex == 2)
+            {
+                writerBReachedGate.Set();
+            }
+        };
+        state.BeforeTransactionBody = attempt =>
+        {
+            if (attempt == 1)
+            {
+                // Writer A now holds the gate. Block here until writer B has genuinely reached (and is
+                // blocked on) the same gate, so the ordering asserted below reflects real contention rather
+                // than incidental scheduling.
+                Assert.True(writerBReachedGate.Wait(TimeSpan.FromSeconds(10)));
+                Assert.True(releaseWriterA.Wait(TimeSpan.FromSeconds(10)));
+            }
+        };
+
+        Task<MongoDBCheckpointRecord> writerA = Task.Run(
+            () => store.SaveCheckpointAsync("session-interleave", "writer-a", payload));
+
+        // Writer A must already be inside the gate (attempt 1) before writer B starts, so writer B is
+        // guaranteed the next call index (2) instead of racing writer A for the first one.
+        Assert.True(SpinWait.SpinUntil(() => state.TransactionAttempt >= 1, TimeSpan.FromSeconds(10)));
+
+        Task<MongoDBCheckpointRecord> writerB = Task.Run(
+            () => store.SaveCheckpointAsync("session-interleave", "writer-b", payload));
+
+        Assert.True(writerBReachedGate.Wait(TimeSpan.FromSeconds(10)));
+        releaseWriterA.Set();
+
+        MongoDBCheckpointRecord recordA = await writerA;
+        MongoDBCheckpointRecord recordB = await writerB;
+
+        Assert.Equal(1L, recordA.Sequence);
+        Assert.Equal(2L, recordB.Sequence);
+
+        MongoDBCheckpointPage page = await store.ListCheckpointsAsync("session-interleave", limit: 10);
+        Assert.Equal(["writer-a", "writer-b"], page.Items.Select(item => item.CheckpointId));
+    }
+
+    [Fact]
+    public async Task SaveCheckpointAsyncThrowsCapabilityExceptionWhenDeploymentDoesNotSupportTransactions()
+    {
+        var state = new CheckpointCollectionState
+        {
+            TransactionsUnsupportedException = CheckpointCollectionProxy.TransactionsUnsupportedException(),
+        };
+        var store = CreateStore(state);
+
+        MongoDBCapabilityException exception = await Assert.ThrowsAsync<MongoDBCapabilityException>(() =>
+            store.SaveCheckpointAsync("session-x", "cp-1", JsonSerializer.SerializeToElement("value")));
+
+        Assert.IsType<MongoCommandException>(exception.InnerException);
+        Assert.Empty(state.Documents);
+    }
+
+    // ---------------------------------------------------------------------------------------------------
+    // Blocker 3: canonical length-prefixed binary framing (no delimiter collisions).
+    // ---------------------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task IdentitiesThatWouldCollideUnderDelimiterJoinedHashingRemainDistinct()
+    {
+        var state = new CheckpointCollectionState();
+        var store = CreateStore(state);
+        JsonElement payload = JsonSerializer.SerializeToElement("value");
+
+        // Under a naive '|'-joined-then-hashed document ID, "sess|A" + "|B" and "sess|A|" + "B" would both
+        // flatten to the literal string "sess|A|B" and collide onto the same document ID.
+        await store.SaveCheckpointAsync("sess|A", "|B", payload);
+        await store.SaveCheckpointAsync("sess|A|", "B", payload);
+
+        Assert.Equal(2, state.Documents.Count(document => document["doc_type"] == "checkpoint"));
+        Assert.NotNull(await store.LoadCheckpointAsync("sess|A", "|B"));
+        Assert.NotNull(await store.LoadCheckpointAsync("sess|A|", "B"));
+
+        string[] ids = state.Documents
+            .Where(document => document["doc_type"] == "checkpoint")
+            .Select(document => document["_id"].AsString)
+            .Distinct()
+            .ToArray();
+        Assert.Equal(2, ids.Length);
+    }
+
+    [Fact]
+    public async Task ParentLineageMatchingIsExactEvenWhenIdentifiersContainDelimiterCharacters()
+    {
+        var state = new CheckpointCollectionState();
+        var store = CreateStore(state);
+        JsonElement payload = JsonSerializer.SerializeToElement("value");
+
+        await store.SaveCheckpointAsync("session-lineage", "root|1", payload);
+        await store.SaveCheckpointAsync("session-lineage", "root", payload);
+        await store.SaveCheckpointAsync("session-lineage", "child", payload, parentCheckpointId: "root|1");
+
+        IEnumerable<CheckpointInfo> children = await store.RetrieveIndexAsync(
+            "session-lineage", withParent: new CheckpointInfo("session-lineage", "root|1"));
+
+        Assert.Equal(["child"], children.Select(child => child.CheckpointId));
+    }
+
+    // ---------------------------------------------------------------------------------------------------
+    // Blocker 4: TTL/regular index partial filters isolate checkpoint documents in a shared collection.
+    // ---------------------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task EnsureIndexesAsyncScopesRegularIndexesToCheckpointsAndTtlIndexToCheckpointsWithDateExpiry()
+    {
+        var state = new CheckpointCollectionState();
+        var store = CreateStore(state);
+
+        await store.EnsureIndexesAsync();
+
+        CreateIndexModel<BsonDocument> identity =
+            state.CreatedIndexes.Single(model => model.Options.Name == "checkpoint_identity_lookup");
+        CreateIndexModel<BsonDocument> sequence =
+            state.CreatedIndexes.Single(model => model.Options.Name == "checkpoint_sequence_lookup");
+        CreateIndexModel<BsonDocument> ttl =
+            state.CreatedIndexes.Single(model => model.Options.Name == "checkpoint_expiration_ttl");
+
+        Assert.Equal(new BsonDocument("doc_type", "checkpoint"), RenderFilter(identity.Options.PartialFilterExpression!));
+        Assert.Equal(new BsonDocument("doc_type", "checkpoint"), RenderFilter(sequence.Options.PartialFilterExpression!));
+        Assert.Equal(
+            new BsonDocument { { "doc_type", "checkpoint" }, { "expires_at", new BsonDocument("$type", "date") } },
+            RenderFilter(ttl.Options.PartialFilterExpression!));
+    }
+
+    [Fact]
+    public async Task ValidateIndexesAsyncRejectsATtlIndexMissingCheckpointDocTypeIsolation()
+    {
+        var state = new CheckpointCollectionState();
+        var store = CreateStore(state);
+        await store.EnsureIndexesAsync();
+
+        // Simulate a legacy/hand-created TTL index that only checks expires_at's type, without isolating
+        // checkpoint documents from any other doc_type sharing this collection (e.g. sequence_counter) --
+        // must be rejected rather than silently accepted, since it could TTL-reap unrelated documents.
+        int index = state.CreatedIndexes.FindIndex(model => model.Options.Name == "checkpoint_expiration_ttl");
+        state.CreatedIndexes[index] = new CreateIndexModel<BsonDocument>(
+            Builders<BsonDocument>.IndexKeys.Ascending("expires_at"),
+            new CreateIndexOptions<BsonDocument>
+            {
+                Name = "checkpoint_expiration_ttl",
+                ExpireAfter = TimeSpan.Zero,
+                PartialFilterExpression = new BsonDocument("expires_at", new BsonDocument("$type", "date")),
+            });
+
+        await Assert.ThrowsAsync<MongoDBIndexMismatchException>(() => store.ValidateIndexesAsync());
+    }
+
+    [Fact]
+    public async Task ValidateIndexesAsyncRejectsARegularIndexMissingCheckpointDocTypeIsolation()
+    {
+        var state = new CheckpointCollectionState();
+        var store = CreateStore(state);
+        await store.EnsureIndexesAsync();
+
+        int index = state.CreatedIndexes.FindIndex(model => model.Options.Name == "checkpoint_sequence_lookup");
+        state.CreatedIndexes[index] = new CreateIndexModel<BsonDocument>(
+            Builders<BsonDocument>.IndexKeys
+                .Ascending("tenant_id").Ascending("workflow_id").Ascending("session_id").Ascending("sequence"),
+            new CreateIndexOptions<BsonDocument> { Name = "checkpoint_sequence_lookup" });
+
+        await Assert.ThrowsAsync<MongoDBIndexMismatchException>(() => store.ValidateIndexesAsync());
+    }
+
+    // ---------------------------------------------------------------------------------------------------
+    // Blocker 5: configurable, redacted HMAC signing key for continuation tokens.
+    // ---------------------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task ContinuationTokensDecodeAcrossStoreInstancesSharingTheSameSigningKeyAndScope()
+    {
+        var state = new CheckpointCollectionState();
+        byte[] key = RandomNumberGenerator.GetBytes(32);
+        var storeA = CreateStore(state, signingKey: key);
+        JsonElement payload = JsonSerializer.SerializeToElement("value");
+        for (int i = 0; i < 3; i++)
+        {
+            await storeA.SaveCheckpointAsync("session-token", $"cp-{i}", payload);
+        }
+
+        MongoDBCheckpointPage firstPage = await storeA.ListCheckpointsAsync("session-token", limit: 2);
+        Assert.NotNull(firstPage.ContinuationToken);
+
+        // A second store instance with the same key and same scope must decode the first store's token --
+        // proves validity is determined by the configured secret key, not per-instance state.
+        var storeB = CreateStore(state, signingKey: key);
+        MongoDBCheckpointPage secondPage = await storeB.ListCheckpointsAsync(
+            "session-token", limit: 2, continuationToken: firstPage.ContinuationToken);
+
+        Assert.Single(secondPage.Items);
+        Assert.Equal("cp-2", secondPage.Items[0].CheckpointId);
+    }
+
+    [Fact]
+    public async Task ContinuationTokenIsRejectedWhenDecodedByAStoreConfiguredWithADifferentSigningKey()
+    {
+        var state = new CheckpointCollectionState();
+        var storeA = CreateStore(state, signingKey: RandomNumberGenerator.GetBytes(32));
+        JsonElement payload = JsonSerializer.SerializeToElement("value");
+        for (int i = 0; i < 3; i++)
+        {
+            await storeA.SaveCheckpointAsync("session-token-2", $"cp-{i}", payload);
+        }
+
+        MongoDBCheckpointPage firstPage = await storeA.ListCheckpointsAsync("session-token-2", limit: 2);
+        Assert.NotNull(firstPage.ContinuationToken);
+
+        var storeB = CreateStore(state, signingKey: RandomNumberGenerator.GetBytes(32));
+        await Assert.ThrowsAsync<MongoDBConfigurationException>(() =>
+            storeB.ListCheckpointsAsync("session-token-2", limit: 2, continuationToken: firstPage.ContinuationToken));
+    }
+
+    // ---------------------------------------------------------------------------------------------------
+    // Blocker 6: stable exception wrapping for every public write/delete/read path.
+    // ---------------------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task SaveCheckpointAsyncWrapsAGenericDriverFailureAsPersistenceException()
+    {
+        var state = new CheckpointCollectionState
+        {
+            InsertException = CheckpointCollectionProxy.GenericServerErrorException(),
+        };
+        var store = CreateStore(state);
+
+        MongoDBPersistenceException exception = await Assert.ThrowsAsync<MongoDBPersistenceException>(() =>
+            store.SaveCheckpointAsync("session-x", "cp-1", JsonSerializer.SerializeToElement("value")));
+
+        Assert.IsType<MongoCommandException>(exception.InnerException);
+    }
+
+    [Fact]
+    public async Task LoadCheckpointAsyncWrapsAGenericDriverFailureAsRetrievalException()
+    {
+        var state = new CheckpointCollectionState
+        {
+            FindException = CheckpointCollectionProxy.GenericServerErrorException(),
+        };
+        var store = CreateStore(state);
+
+        MongoDBRetrievalException exception = await Assert.ThrowsAsync<MongoDBRetrievalException>(
+            () => store.LoadCheckpointAsync("session-x", "cp-1"));
+
+        Assert.IsType<MongoCommandException>(exception.InnerException);
+    }
+
+    [Fact]
+    public async Task ListCheckpointsAsyncWrapsAGenericDriverFailureAsRetrievalException()
+    {
+        var state = new CheckpointCollectionState
+        {
+            FindException = CheckpointCollectionProxy.GenericServerErrorException(),
+        };
+        var store = CreateStore(state);
+
+        await Assert.ThrowsAsync<MongoDBRetrievalException>(() => store.ListCheckpointsAsync("session-x", limit: 10));
+    }
+
+    [Fact]
+    public async Task GetLatestCheckpointAsyncWrapsAGenericDriverFailureAsRetrievalException()
+    {
+        var state = new CheckpointCollectionState
+        {
+            FindException = CheckpointCollectionProxy.GenericServerErrorException(),
+        };
+        var store = CreateStore(state);
+
+        await Assert.ThrowsAsync<MongoDBRetrievalException>(() => store.GetLatestCheckpointAsync("session-x"));
+    }
+
+    [Fact]
+    public async Task DeleteCheckpointAsyncWrapsAGenericDriverFailureAsPersistenceException()
+    {
+        var state = new CheckpointCollectionState
+        {
+            DeleteException = CheckpointCollectionProxy.GenericServerErrorException(),
+        };
+        var store = CreateStore(state);
+
+        await Assert.ThrowsAsync<MongoDBPersistenceException>(() => store.DeleteCheckpointAsync("session-x", "cp-1"));
+    }
+
+    // ---------------------------------------------------------------------------------------------------
+    // Blocker 7: PersistenceTimeout/RetrievalTimeout are enforced even when no caller token is available.
+    // ---------------------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task CreateCheckpointAsyncAppliesPersistenceTimeoutEvenWithNoCallerCancellationToken()
+    {
+        var state = new CheckpointCollectionState
+        {
+            FindDelay = async token => await Task.Delay(Timeout.InfiniteTimeSpan, token),
+        };
+        var store = CreateStore(state, persistenceTimeout: TimeSpan.FromMilliseconds(20));
+
+        // JsonCheckpointStore.CreateCheckpointAsync -- the actual framework hook -- accepts no
+        // CancellationToken parameter at all; this proves PersistenceTimeout is still enforced purely from
+        // configuration, not merely when a caller happens to pass a token through the richer facade.
+        await Assert.ThrowsAsync<MongoDBTimeoutException>(() =>
+            store.CreateCheckpointAsync("session-timeout", JsonSerializer.SerializeToElement("value")).AsTask());
+    }
+
+    [Fact]
+    public async Task LoadCheckpointAsyncAppliesRetrievalTimeoutEvenWithNoCallerCancellationToken()
+    {
+        var state = new CheckpointCollectionState
+        {
+            FindDelay = async token => await Task.Delay(Timeout.InfiniteTimeSpan, token),
+        };
+        var options = new MongoDBCheckpointStoreOptions
+        {
+            WorkflowId = "workflow",
+            ContinuationTokenSigningKey = CheckpointStoreTestSigningKey.Bytes,
+            RetrievalTimeout = TimeSpan.FromMilliseconds(20),
+        };
+        var store = new MongoDBCheckpointStore(CheckpointCollectionProxy.Create(state), options);
+
+        await Assert.ThrowsAsync<MongoDBTimeoutException>(() => store.LoadCheckpointAsync("session-x", "cp-1"));
+    }
+
+    private static BsonDocument RenderFilter(FilterDefinition<BsonDocument> filter) =>
+        filter.Render(new RenderArgs<BsonDocument>(BsonDocumentSerializer.Instance, BsonSerializer.SerializerRegistry));
+
     private static MongoDBCheckpointStore CreateStore(
         CheckpointCollectionState state,
         string? tenantId = null,
         TimeSpan? defaultExpiration = null,
-        Func<DateTimeOffset>? clock = null)
+        Func<DateTimeOffset>? clock = null,
+        byte[]? signingKey = null,
+        TimeSpan? persistenceTimeout = null)
     {
         var options = new MongoDBCheckpointStoreOptions
         {
             TenantId = tenantId,
             WorkflowId = "workflow",
             DefaultExpiration = defaultExpiration,
+            ContinuationTokenSigningKey = signingKey ?? CheckpointStoreTestSigningKey.Bytes,
+            PersistenceTimeout = persistenceTimeout,
         };
         return clock is null
             ? new MongoDBCheckpointStore(CheckpointCollectionProxy.Create(state), options)

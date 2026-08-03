@@ -3,6 +3,7 @@ using Microsoft.Agents.AI.Workflows.Checkpointing;
 using MongoDB.AgentFramework.Internal;
 using MongoDB.Bson;
 using MongoDB.Driver;
+using System.Buffers.Binary;
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
@@ -74,12 +75,34 @@ public sealed class MongoDBCheckpointStore : JsonCheckpointStore, IAsyncDisposab
 
     private const string CheckpointDocType = "checkpoint";
     private const string SequenceCounterDocType = "sequence_counter";
-    private const string ContinuationTokenVersion = "v1";
+    private const byte ContinuationTokenFormatVersion = 1;
+
+    /// <summary>
+    /// Partial filter shared by both regular lookup indexes: scopes each to checkpoint documents only, so
+    /// neither index ever includes the <c>sequence_counter</c> pseudo-documents that intentionally share this
+    /// collection.
+    /// </summary>
+    private static readonly BsonDocument CheckpointOnlyPartialFilter = new("doc_type", CheckpointDocType);
+
+    /// <summary>
+    /// Partial filter for the TTL index: both checkpoint-document isolation (never a sequence counter, which
+    /// has no <c>expires_at</c> field) AND an actual BSON date <c>expires_at</c> (never a checkpoint that was
+    /// written with no expiration, whose <c>expires_at</c> is <see cref="BsonNull"/>) must hold together.
+    /// </summary>
+    private static readonly BsonDocument CheckpointExpirationTtlPartialFilter = new()
+    {
+        { "doc_type", CheckpointDocType },
+        { "expires_at", new BsonDocument("$type", "date") },
+    };
 
     private readonly IMongoCollection<BsonDocument> _collection;
     private readonly MongoDBCheckpointStoreOptions _options;
     private readonly OwnedResource<IMongoClient>? _client;
     private readonly Func<DateTimeOffset> _clock;
+
+    // Defensively copied out of _options.ContinuationTokenSigningKey at construction so a caller that mutates
+    // its original array afterward cannot change this store's effective signing key.
+    private readonly byte[] _continuationTokenSigningKey;
 
     /// <summary>Creates a store over an injected collection, which remains caller-owned.</summary>
     public MongoDBCheckpointStore(
@@ -128,6 +151,7 @@ public sealed class MongoDBCheckpointStore : JsonCheckpointStore, IAsyncDisposab
             TenantId = options.TenantId?.Trim(),
             WorkflowId = options.WorkflowId.Trim(),
         };
+        _continuationTokenSigningKey = (byte[])options.ContinuationTokenSigningKey.Clone();
         _collection = collection ?? throw new ArgumentNullException(nameof(collection));
         _clock = clock;
     }
@@ -281,7 +305,10 @@ public sealed class MongoDBCheckpointStore : JsonCheckpointStore, IAsyncDisposab
     /// <remarks>
     /// Always allocates a fresh <see cref="CheckpointInfo.CheckpointId"/> (the base contract gives callers no
     /// way to request one), applies this store's configured <see cref="MongoDBCheckpointStoreOptions.DefaultExpiration"/>
-    /// if any (the base contract has no expiry parameter), and runs with no external cancellation.
+    /// if any (the base contract has no expiry parameter), and applies this store's configured
+    /// <see cref="MongoDBCheckpointStoreOptions.PersistenceTimeout"/> even though the base contract gives no
+    /// <see cref="CancellationToken"/> to observe an external one -- a hung write still fails with a stable
+    /// <see cref="MongoDBTimeoutException"/> rather than blocking the caller indefinitely.
     /// </remarks>
     public override async ValueTask<CheckpointInfo> CreateCheckpointAsync(
         string sessionId,
@@ -289,12 +316,10 @@ public sealed class MongoDBCheckpointStore : JsonCheckpointStore, IAsyncDisposab
         CheckpointInfo? parent = null)
     {
         string checkpointId = Guid.NewGuid().ToString("N");
-        MongoDBCheckpointRecord record = await SaveCheckpointCoreAsync(
-            sessionId,
-            checkpointId,
-            value,
-            parent?.CheckpointId,
-            expiresAt: null,
+        MongoDBCheckpointRecord record = await WithDeadlineAsync(
+            token => SaveCheckpointCoreAsync(sessionId, checkpointId, value, parent?.CheckpointId, expiresAt: null, token),
+            _options.PersistenceTimeout,
+            "MongoDB Workflow Checkpoint Store persistence deadline exceeded.",
             CancellationToken.None).ConfigureAwait(false);
         return new CheckpointInfo(record.SessionId, record.CheckpointId);
     }
@@ -552,28 +577,45 @@ public sealed class MongoDBCheckpointStore : JsonCheckpointStore, IAsyncDisposab
         return await WithDeadlineAsync(
             async token =>
             {
-                FilterDefinition<BsonDocument> filter = IdentityFilter(scope, sessionId, checkpointId) &
-                    Builders<BsonDocument>.Filter.Eq("schema_version", SchemaVersion);
-                DeleteResult result = await _collection.DeleteOneAsync(filter, token).ConfigureAwait(false);
-                if (!result.IsAcknowledged)
+                try
+                {
+                    FilterDefinition<BsonDocument> filter = IdentityFilter(scope, sessionId, checkpointId) &
+                        Builders<BsonDocument>.Filter.Eq("schema_version", SchemaVersion);
+                    DeleteResult result = await _collection.DeleteOneAsync(filter, token).ConfigureAwait(false);
+                    if (!result.IsAcknowledged)
+                    {
+                        throw new MongoDBPersistenceException(
+                            "MongoDB Workflow Checkpoint Store delete was not acknowledged.");
+                    }
+
+                    if (result.DeletedCount > 0)
+                    {
+                        return true;
+                    }
+
+                    BsonDocument? existing = await FindOneAsync(IdentityFilter(scope, sessionId, checkpointId), token)
+                        .ConfigureAwait(false);
+                    if (existing is not null && !HasCompatibleSchema(existing))
+                    {
+                        throw IncompatibleSchemaException();
+                    }
+
+                    return false;
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (MongoDBIntegrationException)
+                {
+                    throw;
+                }
+                catch (MongoException exception)
                 {
                     throw new MongoDBPersistenceException(
-                        "MongoDB Workflow Checkpoint Store delete was not acknowledged.");
+                        "MongoDB Workflow Checkpoint Store delete failed.",
+                        exception);
                 }
-
-                if (result.DeletedCount > 0)
-                {
-                    return true;
-                }
-
-                BsonDocument? existing = await FindOneAsync(IdentityFilter(scope, sessionId, checkpointId), token)
-                    .ConfigureAwait(false);
-                if (existing is not null && !HasCompatibleSchema(existing))
-                {
-                    throw IncompatibleSchemaException();
-                }
-
-                return false;
             },
             _options.PersistenceTimeout,
             "MongoDB Workflow Checkpoint Store persistence deadline exceeded.",
@@ -587,7 +629,6 @@ public sealed class MongoDBCheckpointStore : JsonCheckpointStore, IAsyncDisposab
     public async Task<IReadOnlyList<string>> EnsureIndexesAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var checkpointOnly = new BsonDocument("doc_type", CheckpointDocType);
         var models = new List<CreateIndexModel<BsonDocument>>
         {
             new(
@@ -600,7 +641,7 @@ public sealed class MongoDBCheckpointStore : JsonCheckpointStore, IAsyncDisposab
                 {
                     Name = "checkpoint_identity_lookup",
                     Unique = true,
-                    PartialFilterExpression = checkpointOnly,
+                    PartialFilterExpression = CheckpointOnlyPartialFilter,
                 }),
             new(
                 Builders<BsonDocument>.IndexKeys
@@ -611,7 +652,7 @@ public sealed class MongoDBCheckpointStore : JsonCheckpointStore, IAsyncDisposab
                 new CreateIndexOptions<BsonDocument>
                 {
                     Name = "checkpoint_sequence_lookup",
-                    PartialFilterExpression = checkpointOnly,
+                    PartialFilterExpression = CheckpointOnlyPartialFilter,
                 }),
             new(
                 Builders<BsonDocument>.IndexKeys.Ascending("expires_at"),
@@ -619,9 +660,7 @@ public sealed class MongoDBCheckpointStore : JsonCheckpointStore, IAsyncDisposab
                 {
                     Name = "checkpoint_expiration_ttl",
                     ExpireAfter = TimeSpan.Zero,
-                    PartialFilterExpression = new BsonDocument(
-                        "expires_at",
-                        new BsonDocument("$type", "date")),
+                    PartialFilterExpression = CheckpointExpirationTtlPartialFilter,
                 }),
         };
         try
@@ -659,17 +698,20 @@ public sealed class MongoDBCheckpointStore : JsonCheckpointStore, IAsyncDisposab
                 indexes,
                 "checkpoint_identity_lookup",
                 ["tenant_id", "workflow_id", "session_id", "checkpoint_id"],
-                expectedUnique: true);
+                expectedUnique: true,
+                CheckpointOnlyPartialFilter);
             ValidateIndex(
                 indexes,
                 "checkpoint_sequence_lookup",
                 ["tenant_id", "workflow_id", "session_id", "sequence"],
-                expectedUnique: false);
+                expectedUnique: false,
+                CheckpointOnlyPartialFilter);
             BsonDocument ttl = ValidateIndex(
                 indexes,
                 "checkpoint_expiration_ttl",
                 ["expires_at"],
-                expectedUnique: false);
+                expectedUnique: false,
+                CheckpointExpirationTtlPartialFilter);
             if (!ttl.TryGetValue("expireAfterSeconds", out BsonValue seconds) ||
                 seconds.IsBsonNull ||
                 seconds.ToDouble() != 0)
@@ -722,56 +764,142 @@ public sealed class MongoDBCheckpointStore : JsonCheckpointStore, IAsyncDisposab
         DateTimeOffset now = _clock();
         DateTimeOffset? effectiveExpiresAt = expiresAt ?? DefaultExpiresAt(now);
 
-        // Check for an existing checkpoint before allocating a sequence number, so a purely idempotent retry
-        // (the common case) never burns a sequence value. A genuine race between two concurrent first writers
-        // for the same identifier is still handled safely below via the insert-time duplicate-key path.
-        BsonDocument? existing = await FindOneAsync(IdentityFilter(scope, sessionId, checkpointId), cancellationToken)
+        // Check for an existing checkpoint before opening a transaction, so a purely idempotent retry (the
+        // common case) never opens a transaction or burns a sequence value.
+        MongoDBCheckpointRecord? converged = await TryConvergeAsync(
+            scope, sessionId, checkpointId, payloadBytes, parentCheckpointId, raceException: null, cancellationToken)
             .ConfigureAwait(false);
-        if (existing is not null)
+        if (converged is not null)
         {
-            if (!HasCompatibleSchema(existing))
-            {
-                throw IncompatibleSchemaException();
-            }
-
-            if (ContentEquals(existing, payloadBytes, parentCheckpointId))
-            {
-                return ToRecord(existing);
-            }
-
-            throw ConflictException(sessionId, checkpointId);
+            return converged;
         }
 
-        long sequence = await AllocateSequenceAsync(scope, sessionId, cancellationToken).ConfigureAwait(false);
-        BsonDocument candidate = BuildCheckpointDocument(
-            scope, sessionId, checkpointId, parentCheckpointId, sequence, payloadBytes, now, effectiveExpiresAt);
+        IClientSessionHandle? session = null;
         try
         {
-            await _collection.InsertOneAsync(candidate, cancellationToken: cancellationToken).ConfigureAwait(false);
+            session = await _collection.Database.Client.StartSessionAsync(cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+            var transactionOptions = new TransactionOptions(writeConcern: WriteConcern.WMajority);
+
+            // Sequence allocation and the checkpoint insert commit atomically together inside one transaction,
+            // so sequence genuinely reflects committed order under cross-process concurrency, not merely
+            // allocation order. WithTransactionAsync's own retry loop (per official MongoDB driver guidance)
+            // handles TransientTransactionError/UnknownTransactionCommitResult within this cancellation token.
+            return await session.WithTransactionAsync(
+                async (txnSession, token) =>
+                {
+                    long sequence = await AllocateSequenceAsync(txnSession, scope, sessionId, token)
+                        .ConfigureAwait(false);
+                    BsonDocument candidate = BuildCheckpointDocument(
+                        scope, sessionId, checkpointId, parentCheckpointId, sequence, payloadBytes, now,
+                        effectiveExpiresAt);
+                    await _collection.InsertOneAsync(txnSession, candidate, cancellationToken: token)
+                        .ConfigureAwait(false);
+                    return ToRecord(candidate);
+                },
+                transactionOptions,
+                cancellationToken).ConfigureAwait(false);
         }
         catch (MongoException exception) when (IsDuplicateKey(exception))
         {
-            // Another concurrent caller won the race for this exact checkpoint identifier. The failed insert
-            // did not mutate the winner's document; detect and reject/converge read-only.
-            BsonDocument? raced = await FindOneAsync(IdentityFilter(scope, sessionId, checkpointId), cancellationToken)
+            // A genuine race between two concurrent first writers for the same identifier that the pre-check
+            // above did not observe. The aborted transaction burned no sequence value; the losing writer
+            // re-fetches the winner's document and applies the same converge-or-conflict comparison.
+            MongoDBCheckpointRecord? raced = await TryConvergeAsync(
+                scope, sessionId, checkpointId, payloadBytes, parentCheckpointId, exception, cancellationToken)
                 .ConfigureAwait(false);
-            if (raced is not null && !HasCompatibleSchema(raced))
+            if (raced is not null)
             {
-                throw IncompatibleSchemaException();
-            }
-
-            if (raced is not null && ContentEquals(raced, payloadBytes, parentCheckpointId))
-            {
-                return ToRecord(raced);
+                return raced;
             }
 
             throw ConflictException(sessionId, checkpointId, exception);
         }
+        catch (MongoException exception) when (IsTransactionsUnsupported(exception))
+        {
+            throw new MongoDBCapabilityException(
+                "MongoDB Workflow Checkpoint Store requires a deployment that supports multi-document " +
+                "transactions (a replica set or sharded cluster) so that monotonic sequence allocation and the " +
+                "checkpoint write commit atomically. This deployment rejected the transaction as unsupported, " +
+                "so no ordering guarantee could be honored; the checkpoint was not written. Deploy against a " +
+                "replica set or sharded cluster, or mongos, to use this store.",
+                exception);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (MongoDBIntegrationException)
+        {
+            throw;
+        }
+        catch (MongoException exception)
+        {
+            throw new MongoDBPersistenceException(
+                "MongoDB Workflow Checkpoint Store persistence failed.",
+                exception);
+        }
+        finally
+        {
+            session?.Dispose();
+        }
+    }
 
-        return ToRecord(candidate);
+    /// <summary>
+    /// Re-reads the current state at this checkpoint's authorized identity to determine whether a write attempt
+    /// (either a pre-transaction fast path or a post-abort race resolution) can converge on already-committed,
+    /// identical content instead of writing again. Returns <see langword="null"/> when nothing exists yet (the
+    /// caller should proceed with a real write); throws if something exists but with an unsupported schema or
+    /// different content. Wraps any non-cancellation driver failure from its own read in a stable
+    /// <see cref="MongoDBPersistenceException"/> so both call sites (one outside, one inside a catch handler)
+    /// never propagate a raw driver exception.
+    /// </summary>
+    private async Task<MongoDBCheckpointRecord?> TryConvergeAsync(
+        BsonDocument scope,
+        string sessionId,
+        string checkpointId,
+        BsonBinaryData payloadBytes,
+        string? parentCheckpointId,
+        Exception? raceException,
+        CancellationToken cancellationToken)
+    {
+        BsonDocument? existing;
+        try
+        {
+            existing = await FindOneAsync(IdentityFilter(scope, sessionId, checkpointId), cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (MongoException exception)
+        {
+            throw new MongoDBPersistenceException(
+                "MongoDB Workflow Checkpoint Store persistence failed.",
+                exception);
+        }
+
+        if (existing is null)
+        {
+            return null;
+        }
+
+        if (!HasCompatibleSchema(existing))
+        {
+            throw IncompatibleSchemaException();
+        }
+
+        if (ContentEquals(existing, payloadBytes, parentCheckpointId))
+        {
+            return ToRecord(existing);
+        }
+
+        throw ConflictException(sessionId, checkpointId, raceException);
     }
 
     private async Task<long> AllocateSequenceAsync(
+        IClientSessionHandle session,
         BsonDocument scope,
         string sessionId,
         CancellationToken cancellationToken)
@@ -785,6 +913,7 @@ public sealed class MongoDBCheckpointStore : JsonCheckpointStore, IAsyncDisposab
             .SetOnInsert("workflow_id", scope["workflow_id"])
             .SetOnInsert("session_id", sessionId);
         BsonDocument result = await _collection.FindOneAndUpdateAsync(
+            session,
             filter,
             update,
             new FindOneAndUpdateOptions<BsonDocument, BsonDocument>
@@ -1019,60 +1148,93 @@ public sealed class MongoDBCheckpointStore : JsonCheckpointStore, IAsyncDisposab
         exception is MongoWriteException { WriteError.Category: ServerErrorCategory.DuplicateKey } ||
         exception is MongoCommandException { Code: 11000 or 11001 };
 
+    /// <summary>
+    /// Detects the specific MongoDB server error raised when multi-document transactions are attempted against
+    /// a deployment that does not support them (a standalone <c>mongod</c>) -- server error code 20
+    /// (<c>IllegalOperation</c>) with a message containing "Transaction numbers". Detecting this precisely lets
+    /// the store fail with an explicit <see cref="MongoDBCapabilityException"/> rather than silently claiming
+    /// an ordering guarantee the deployment cannot provide.
+    /// </summary>
+    private static bool IsTransactionsUnsupported(MongoException exception) =>
+        exception is MongoCommandException { Code: 20 } commandException &&
+        commandException.ErrorMessage.Contains("Transaction numbers", StringComparison.OrdinalIgnoreCase);
+
     private static string CheckpointDocumentId(BsonDocument scope, string sessionId, string checkpointId) =>
-        Hash($"checkpoint|{scope["scope_discriminator"].AsString}|{sessionId}|{checkpointId}");
+        Hash(FrameFields("checkpoint", scope["scope_discriminator"].AsString, sessionId, checkpointId));
 
     private static string SequenceCounterDocumentId(BsonDocument scope, string sessionId) =>
-        Hash($"sequence_counter|{scope["scope_discriminator"].AsString}|{sessionId}");
+        Hash(FrameFields("sequence_counter", scope["scope_discriminator"].AsString, sessionId));
 
-    private static string Hash(string value) =>
-        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
+    private static string Hash(byte[] framedValue) =>
+        Convert.ToHexString(SHA256.HashData(framedValue)).ToLowerInvariant();
+
+    /// <summary>
+    /// Canonically frames an ordered sequence of string components as length-prefixed binary -- never
+    /// delimiter-joined text -- before hashing or signing. Session, checkpoint, and parent-checkpoint
+    /// identifiers are arbitrary caller-controlled opaque strings that may contain any character, including any
+    /// delimiter (for example a literal <c>|</c>) this store might otherwise have chosen to join components
+    /// with; delimiter-joining would let a crafted identifier make two logically distinct component sequences
+    /// collide onto the same document ID, cache key, or signed payload. Each component is instead framed as a
+    /// big-endian 4-byte UTF-8 byte length followed by its exact UTF-8 bytes, which is unambiguous and injective
+    /// regardless of component content.
+    /// </summary>
+    private static byte[] FrameFields(params string[] components)
+    {
+        using var stream = new MemoryStream();
+        foreach (string component in components)
+        {
+            WriteLengthPrefixed(stream, Encoding.UTF8.GetBytes(component));
+        }
+
+        return stream.ToArray();
+    }
+
+    private static void WriteLengthPrefixed(Stream stream, byte[] bytes)
+    {
+        Span<byte> length = stackalloc byte[4];
+        BinaryPrimitives.WriteUInt32BigEndian(length, (uint)bytes.Length);
+        stream.Write(length);
+        stream.Write(bytes);
+    }
+
+    private static void WriteOptionalLengthPrefixed(Stream stream, string? value)
+    {
+        if (value is null)
+        {
+            stream.WriteByte(0);
+            return;
+        }
+
+        stream.WriteByte(1);
+        WriteLengthPrefixed(stream, Encoding.UTF8.GetBytes(value));
+    }
 
     private static string CanonicalScopeDiscriminator(string? tenantId, string workflowId)
     {
         using var stream = new MemoryStream();
-        using (var writer = new Utf8JsonWriter(
-            stream,
-            new JsonWriterOptions { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping }))
-        {
-            writer.WriteStartObject();
-            writer.WritePropertyName("dimensions");
-            writer.WriteStartObject();
-            writer.WriteString("workflow_id", workflowId);
-            if (tenantId is null)
-            {
-                writer.WriteNull("tenant_id");
-            }
-            else
-            {
-                writer.WriteString("tenant_id", tenantId);
-            }
-
-            writer.WriteEndObject();
-            writer.WriteNumber("version", 1);
-            writer.WriteEndObject();
-        }
-
+        WriteLengthPrefixed(stream, Encoding.UTF8.GetBytes("workflow-scope"));
+        WriteOptionalLengthPrefixed(stream, tenantId);
+        WriteLengthPrefixed(stream, Encoding.UTF8.GetBytes(workflowId));
         return Convert.ToHexString(SHA256.HashData(stream.ToArray())).ToLowerInvariant();
     }
 
     /// <summary>
-    /// Encodes a scoped, versioned, self-verifying continuation token. The signing key is derived from this
-    /// store's own scope discriminator, so a token issued by a differently scoped store (different tenant or
-    /// workflow) fails signature verification rather than silently returning the wrong scope's data, and any
-    /// alteration of the encoded sequence, session, or scope invalidates the signature.
+    /// Encodes a scoped, versioned, self-verifying continuation token. The payload is length-prefixed binary
+    /// (never delimiter-joined) so an opaque session ID may contain any byte sequence without risk of field
+    /// collision, and the HMAC signature is keyed by this store's configured, genuinely random
+    /// <see cref="MongoDBCheckpointStoreOptions.ContinuationTokenSigningKey"/> (combined with this store's own
+    /// scope for domain separation) -- never derived solely from token-visible data -- so a token cannot be
+    /// forged or reused across a differently scoped store without knowledge of the secret key.
     /// </summary>
-    private static string EncodeContinuationToken(BsonDocument scope, string sessionId, long lastSequence)
+    private string EncodeContinuationToken(BsonDocument scope, string sessionId, long lastSequence)
     {
         string scopeDiscriminator = scope["scope_discriminator"].AsString;
-        string payload = string.Join(
-            "|", ContinuationTokenVersion, scopeDiscriminator, sessionId, lastSequence.ToString(CultureInfo.InvariantCulture));
-        byte[] payloadBytes = Encoding.UTF8.GetBytes(payload);
+        byte[] payloadBytes = FrameContinuationTokenPayload(scopeDiscriminator, sessionId, lastSequence);
         byte[] signature = HMACSHA256.HashData(DeriveTokenKey(scopeDiscriminator), payloadBytes);
         return Base64UrlEncode(payloadBytes) + "." + Base64UrlEncode(signature);
     }
 
-    private static long DecodeContinuationToken(BsonDocument scope, string sessionId, string token)
+    private long DecodeContinuationToken(BsonDocument scope, string sessionId, string token)
     {
         string scopeDiscriminator = scope["scope_discriminator"].AsString;
         try
@@ -1086,31 +1248,113 @@ public sealed class MongoDBCheckpointStore : JsonCheckpointStore, IAsyncDisposab
             byte[] payloadBytes = Base64UrlDecode(parts[0]);
             byte[] signature = Base64UrlDecode(parts[1]);
             byte[] expectedSignature = HMACSHA256.HashData(DeriveTokenKey(scopeDiscriminator), payloadBytes);
-            if (!CryptographicOperations.FixedTimeEquals(signature, expectedSignature))
+            if (signature.Length != expectedSignature.Length ||
+                !CryptographicOperations.FixedTimeEquals(signature, expectedSignature))
             {
                 throw InvalidTokenException();
             }
 
-            string[] fields = Encoding.UTF8.GetString(payloadBytes).Split('|');
-            if (fields.Length != 4 ||
-                fields[0] != ContinuationTokenVersion ||
-                !string.Equals(fields[1], scopeDiscriminator, StringComparison.Ordinal) ||
-                !string.Equals(fields[2], sessionId, StringComparison.Ordinal) ||
-                !long.TryParse(fields[3], NumberStyles.None, CultureInfo.InvariantCulture, out long sequence))
+            if (!TryParseContinuationTokenPayload(
+                    payloadBytes, out byte version, out string decodedScope, out string decodedSessionId, out long sequence) ||
+                version != ContinuationTokenFormatVersion ||
+                !string.Equals(decodedScope, scopeDiscriminator, StringComparison.Ordinal) ||
+                !string.Equals(decodedSessionId, sessionId, StringComparison.Ordinal))
             {
                 throw InvalidTokenException();
             }
 
             return sequence;
         }
-        catch (Exception exception) when (exception is FormatException or IndexOutOfRangeException)
+        catch (Exception exception) when (
+            exception is FormatException or IndexOutOfRangeException or ArgumentOutOfRangeException)
         {
             throw InvalidTokenException(exception);
         }
     }
 
-    private static byte[] DeriveTokenKey(string scopeDiscriminator) =>
-        SHA256.HashData(Encoding.UTF8.GetBytes($"checkpoint-continuation-token|{scopeDiscriminator}"));
+    private static byte[] FrameContinuationTokenPayload(string scopeDiscriminator, string sessionId, long lastSequence)
+    {
+        using var stream = new MemoryStream();
+        stream.WriteByte(ContinuationTokenFormatVersion);
+        WriteLengthPrefixed(stream, Encoding.UTF8.GetBytes(scopeDiscriminator));
+        WriteLengthPrefixed(stream, Encoding.UTF8.GetBytes(sessionId));
+        Span<byte> sequenceBytes = stackalloc byte[8];
+        BinaryPrimitives.WriteInt64BigEndian(sequenceBytes, lastSequence);
+        stream.Write(sequenceBytes);
+        return stream.ToArray();
+    }
+
+    private static bool TryParseContinuationTokenPayload(
+        byte[] payloadBytes,
+        out byte version,
+        out string scopeDiscriminator,
+        out string sessionId,
+        out long sequence)
+    {
+        version = 0;
+        scopeDiscriminator = string.Empty;
+        sessionId = string.Empty;
+        sequence = 0L;
+        int offset = 0;
+        if (!TryReadByte(payloadBytes, ref offset, out version) ||
+            !TryReadLengthPrefixedUtf8(payloadBytes, ref offset, out scopeDiscriminator) ||
+            !TryReadLengthPrefixedUtf8(payloadBytes, ref offset, out sessionId) ||
+            payloadBytes.Length - offset != 8)
+        {
+            return false;
+        }
+
+        sequence = BinaryPrimitives.ReadInt64BigEndian(payloadBytes.AsSpan(offset, 8));
+        offset += 8;
+        return offset == payloadBytes.Length;
+    }
+
+    private static bool TryReadByte(byte[] buffer, ref int offset, out byte value)
+    {
+        if (offset >= buffer.Length)
+        {
+            value = 0;
+            return false;
+        }
+
+        value = buffer[offset];
+        offset++;
+        return true;
+    }
+
+    private static bool TryReadLengthPrefixedUtf8(byte[] buffer, ref int offset, out string value)
+    {
+        value = string.Empty;
+        if (offset + 4 > buffer.Length)
+        {
+            return false;
+        }
+
+        uint length = BinaryPrimitives.ReadUInt32BigEndian(buffer.AsSpan(offset, 4));
+        offset += 4;
+        if (length > int.MaxValue || offset + length > buffer.Length)
+        {
+            return false;
+        }
+
+        value = Encoding.UTF8.GetString(buffer, offset, (int)length);
+        offset += (int)length;
+        return true;
+    }
+
+    /// <summary>
+    /// Derives the effective continuation-token HMAC key by combining the configured, genuinely random
+    /// <see cref="MongoDBCheckpointStoreOptions.ContinuationTokenSigningKey"/> secret with this store's scope
+    /// discriminator for domain separation (so per-scope subkeys are cryptographically independent even though
+    /// they share one configured secret) -- the key is never derived from token-visible data alone.
+    /// </summary>
+    private byte[] DeriveTokenKey(string scopeDiscriminator) =>
+        HMACSHA256.HashData(
+            _continuationTokenSigningKey,
+            FrameFields(
+                "checkpoint-continuation-token",
+                ContinuationTokenFormatVersion.ToString(CultureInfo.InvariantCulture),
+                scopeDiscriminator));
 
     private static string Base64UrlEncode(byte[] bytes) =>
         Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');
@@ -1142,7 +1386,8 @@ public sealed class MongoDBCheckpointStore : JsonCheckpointStore, IAsyncDisposab
         IReadOnlyList<BsonDocument> indexes,
         string name,
         IReadOnlyList<string> expectedKeys,
-        bool expectedUnique)
+        bool expectedUnique,
+        BsonDocument expectedPartialFilterExpression)
     {
         BsonDocument? index = indexes.FirstOrDefault(candidate => candidate.GetValue("name", "") == name);
         if (index is null)
@@ -1159,6 +1404,16 @@ public sealed class MongoDBCheckpointStore : JsonCheckpointStore, IAsyncDisposab
         {
             throw new MongoDBIndexMismatchException(
                 $"Regular index '{name}' does not match the required Workflow Checkpoint Store definition.");
+        }
+
+        if (!index.TryGetValue("partialFilterExpression", out BsonValue partialFilter) ||
+            !partialFilter.IsBsonDocument ||
+            !partialFilter.AsBsonDocument.Equals(expectedPartialFilterExpression))
+        {
+            throw new MongoDBIndexMismatchException(
+                $"Regular index '{name}' does not match the required Workflow Checkpoint Store definition: " +
+                "its partialFilterExpression is missing or does not exactly match the required " +
+                "document-type isolation filter.");
         }
 
         return index;

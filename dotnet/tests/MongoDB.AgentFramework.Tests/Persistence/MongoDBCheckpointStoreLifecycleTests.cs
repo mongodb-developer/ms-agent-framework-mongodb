@@ -10,7 +10,11 @@ namespace MongoDB.AgentFramework.Tests.Persistence;
 /// </summary>
 public sealed class MongoDBCheckpointStoreLifecycleTests
 {
-    private static MongoDBCheckpointStoreOptions ValidOptions => new() { WorkflowId = "workflow" };
+    private static MongoDBCheckpointStoreOptions ValidOptions => new()
+    {
+        WorkflowId = "workflow",
+        ContinuationTokenSigningKey = CheckpointStoreTestSigningKey.Bytes,
+    };
 
     [Fact]
     public void ConstructorAcceptsAResolvedVersionWithinTheSupportedRange()
@@ -73,7 +77,11 @@ public sealed class MongoDBCheckpointStoreLifecycleTests
             "mongodb://localhost:27017",
             "database",
             "checkpoints",
-            new MongoDBCheckpointStoreOptions { WorkflowId = "   " },
+            new MongoDBCheckpointStoreOptions
+            {
+                WorkflowId = "   ",
+                ContinuationTokenSigningKey = CheckpointStoreTestSigningKey.Bytes,
+            },
             clientFactory: _ =>
             {
                 clientFactoryInvoked = true;
