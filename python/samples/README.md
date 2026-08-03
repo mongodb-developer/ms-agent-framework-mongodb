@@ -13,7 +13,7 @@ Tombstones submit targeted deletes. `--cleanup` deletes only deterministic targe
 IDs owned by `MONGODB_RAG_SAMPLE_PREFIX`.
 
 Use a dedicated ingestion identity. Do **not** give these write credentials to the
-runtime RAG process. The ingestion identity needs read access to the source,
+runtime RAG process. The ingestion identity needs read/aggregate access to the source,
 find/replace/insert/delete access to the target sample records, and index-inspection
 access. Index creation needs a separate provisioner identity. Runtime RAG needs
 only index inspection, read/aggregate, and Search query privileges.
@@ -58,6 +58,11 @@ Scanned 3; upserted 2; unchanged 1; deleted 0.
 ```
 
 Pages and batches are limited to 1–1000. Cancellation propagates immediately.
+Every sample-prefix range uses MongoDB's `simple` binary collation, regardless of
+the collection default. Before yielding any record, the loader runs a bounded
+duplicate-ID aggregate and raises `IngestionDataError` if uniqueness would be
+ambiguous; therefore page boundaries cannot silently select one duplicate or
+allow an ingestion write first.
 The sample has no crawler, scheduler, retry loop, OCR, arbitrary query input, or
 index mutation. Use `index_provisioning.py` separately under provisioner
 credentials when an index does not yet exist.

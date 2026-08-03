@@ -210,7 +210,8 @@ Runtime RAG is read-only. The separately run
 dedicated write-capable identity to load only uniquely sample-prefixed source
 records, skip unchanged hashes, replace changed records, process tombstones, and
 perform prefix-targeted cleanup. It waits for an existing Vector Search index but
-never creates one.
+never creates one. Prefix reads and cleanup force simple binary collation, and a
+duplicate source-ID preflight fails before any target write.
 
 The sample requires explicit connection, collection, index, model, dimensions,
 embedding-factory, and unique-prefix environment configuration and refuses to

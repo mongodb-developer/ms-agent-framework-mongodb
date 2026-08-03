@@ -15,6 +15,7 @@ requires structured MongoDB operations and validated field paths.
 the `agent-framework-mongodb` wheel. Its public sample seams are:
 
 - `IngestionDocument`: ingestion-neutral source record.
+- `IngestionDataError`: stable error for nondeterministic sample source data.
 - `MongoDBDocumentLoader.load()`: async, ascending source-ID keyset pagination.
 - `IncrementalIngestor.ingest()`: bounded hash comparison, embedding, and writes.
 - `IncrementalIngestor.cleanup()`: target deletion constrained to the configured
@@ -75,15 +76,22 @@ The sample does not claim cross-language physical schema compatibility.
 ## Security and operations
 
 Source reads are fixed structured range queries over a required unique
-`sample-`/`test-` prefix. The loader projects configured fields and accepts no
-caller or model BSON. Page and embedding/write batch sizes are independently
-bounded to 1–1000. Duplicate source IDs fail the pass rather than allowing
-unordered last-writer behavior.
+`sample-`/`test-` prefix. Each prefix match, page, and cleanup range explicitly
+uses MongoDB `simple` binary collation, so a locale-aware or case-insensitive
+collection default cannot broaden a range. The loader projects configured fields
+and accepts no caller or model BSON. Page and embedding/write batch sizes are
+independently bounded to 1–1000.
+
+Before the loader yields its first record, a structured `$match`/`$group`
+aggregate checks source-ID uniqueness under the same binary collation and limits
+its result to one duplicate. `IngestionDataError` then aborts before embedding or
+MongoDB target writes. This preflight prevents non-unique IDs split by a
+`page_size=1` boundary from being silently skipped by keyset pagination.
 
 Use three identities:
 
-1. ingestion: source read plus target sample find/insert/replace/delete and index
-   inspection;
+1. ingestion: source read/aggregate plus target sample find/insert/replace/delete
+   and index inspection;
 2. runtime RAG: index inspection, read/aggregate, and Search query only;
 3. provisioner: explicit index management through the separate provisioning
    sample.
@@ -96,10 +104,11 @@ range on the validated output prefix; choose a unique prefix for every test run.
 ## Verification
 
 `python/tests/unit/test_ingestion_samples.py` uses source, target, and embedding
-boundary fakes. It covers paging/projection, mapping, field validation,
+boundary fakes. It covers paging/projection, binary collation, mapping, field validation,
 deterministic IDs, changed/unchanged behavior, model refresh, batch dimensions,
 bounded batches, tombstones, cleanup isolation, duplicate IDs, cancellation, and
-required environment configuration. No credentialed integration test is needed
+required environment configuration. The `page_size=1` duplicate regression proves
+the preflight fails before embedding or target writes. No credentialed integration test is needed
 for this sample-only seam; existing RAG integration suites validate real index
 inspection and runtime retrieval.
 

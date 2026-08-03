@@ -10,6 +10,13 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 from pymongo import DeleteOne, ReplaceOne
+from pymongo.collation import Collation
+
+_SIMPLE_COLLATION = Collation(locale="simple")
+
+
+class IngestionDataError(ValueError):
+    """Raised when sample source data cannot be ingested deterministically."""
 
 
 @dataclass(frozen=True)
@@ -124,7 +131,8 @@ class IncrementalIngestor:
                     "$gte": self._sample_prefix,
                     "$lt": f"{self._sample_prefix}\uffff",
                 }
-            }
+            },
+            collation=_SIMPLE_COLLATION,
         )
         return int(result.deleted_count)
 
@@ -244,6 +252,7 @@ class MongoDBDocumentLoader:
 
     async def load(self) -> AsyncIterator[IngestionDocument]:
         """Yield mapped documents in stable source-ID order."""
+        await self._validate_unique_source_ids()
         last_source_id: str | None = None
         projection = {
             self._source_id_field: 1,
@@ -263,6 +272,7 @@ class MongoDBDocumentLoader:
                 bounds["$gt"] = last_source_id
             cursor = (
                 self._collection.find({self._source_id_field: bounds}, projection)
+                .collation(_SIMPLE_COLLATION)
                 .sort(self._source_id_field, 1)
                 .limit(self._page_size)
             )
@@ -281,6 +291,33 @@ class MongoDBDocumentLoader:
                     deleted=bool(_resolve(item, self._deleted_field, default=False)),
                 )
                 last_source_id = source_id
+
+    async def _validate_unique_source_ids(self) -> None:
+        duplicate_cursor = self._collection.aggregate(
+            [
+                {
+                    "$match": {
+                        self._source_id_field: {
+                            "$gte": self._sample_prefix,
+                            "$lt": f"{self._sample_prefix}\uffff",
+                        }
+                    }
+                },
+                {
+                    "$group": {
+                        "_id": f"${self._source_id_field}",
+                        "count": {"$sum": 1},
+                    }
+                },
+                {"$match": {"count": {"$gt": 1}}},
+                {"$limit": 1},
+            ],
+            collation=_SIMPLE_COLLATION,
+        )
+        if await duplicate_cursor.to_list(length=1):
+            raise IngestionDataError(
+                "Source contains a duplicate source ID within the sample prefix."
+            )
 
 
 def _validated_field(value: str, name: str) -> str:

@@ -8,19 +8,26 @@ from typing import Any, cast
 import pytest
 from agent_framework import Embedding, GeneratedEmbeddings
 from pymongo import DeleteOne, ReplaceOne
+from pymongo.collation import Collation
 
 from samples.incremental_ingestion import IngestionSettings
 from samples.ingestion_helpers import (
     IncrementalIngestor,
+    IngestionDataError,
     IngestionDocument,
     MongoDBDocumentLoader,
 )
 
 
 class SourceCursor:
-    def __init__(self, documents: list[dict[str, Any]]) -> None:
+    def __init__(
+        self,
+        documents: list[dict[str, Any]],
+        collations: list[Collation] | None = None,
+    ) -> None:
         self._documents = documents
         self._limit = len(documents)
+        self._collations = collations
 
     def sort(self, field: str, direction: int) -> SourceCursor:
         self._documents.sort(key=lambda document: document[field], reverse=direction < 0)
@@ -28,6 +35,11 @@ class SourceCursor:
 
     def limit(self, limit: int) -> SourceCursor:
         self._limit = limit
+        return self
+
+    def collation(self, collation: Collation) -> SourceCursor:
+        if self._collations is not None:
+            self._collations.append(collation)
         return self
 
     async def to_list(self, *, length: int | None) -> list[dict[str, Any]]:
@@ -39,6 +51,8 @@ class SourceCollection:
     def __init__(self, documents: list[dict[str, Any]]) -> None:
         self._documents = documents
         self.reads: list[tuple[dict[str, Any], dict[str, int]]] = []
+        self.collations: list[Collation] = []
+        self.aggregate_collations: list[Collation] = []
 
     def find(self, query: dict[str, Any], projection: dict[str, int]) -> SourceCursor:
         self.reads.append((query, projection))
@@ -50,7 +64,26 @@ class SourceCollection:
             and document["source_key"] < bounds["$lt"]
             and document["source_key"] > bounds.get("$gt", "")
         ]
-        return SourceCursor(documents)
+        return SourceCursor(documents, self.collations)
+
+    def aggregate(
+        self,
+        pipeline: list[dict[str, Any]],
+        *,
+        collation: Collation,
+    ) -> SourceCursor:
+        self.aggregate_collations.append(collation)
+        field = pipeline[1]["$group"]["_id"][1:]
+        bounds = pipeline[0]["$match"][field]
+        counts: dict[str, int] = {}
+        for document in self._documents:
+            value = document[field]
+            if bounds["$gte"] <= value < bounds["$lt"]:
+                counts[value] = counts.get(value, 0) + 1
+        duplicates = [
+            {"_id": value, "count": count} for value, count in counts.items() if count > 1
+        ]
+        return SourceCursor(duplicates[:1])
 
 
 @pytest.mark.asyncio
@@ -78,6 +111,14 @@ async def test_loader_pages_only_prefixed_documents_into_neutral_records() -> No
                 "body": "must not load",
                 "heading": "C",
                 "source_url": "https://example.invalid/c",
+                "attributes": {},
+                "tenant": "production",
+            },
+            {
+                "source_key": "Sample-test-casefold",
+                "body": "must not load under simple collation",
+                "heading": "Case",
+                "source_url": "https://example.invalid/case",
                 "attributes": {},
                 "tenant": "production",
             },
@@ -116,6 +157,14 @@ async def test_loader_pages_only_prefixed_documents_into_neutral_records() -> No
         ),
     ]
     assert len(collection.reads) == 3
+    assert [collation.document for collation in collection.collations] == [
+        {"locale": "simple"},
+        {"locale": "simple"},
+        {"locale": "simple"},
+    ]
+    assert [collation.document for collation in collection.aggregate_collations] == [
+        {"locale": "simple"}
+    ]
     assert all(
         read[1]
         == {
@@ -229,6 +278,7 @@ class TargetCollection:
     def __init__(self) -> None:
         self.documents: dict[str, dict[str, Any]] = {}
         self.bulk_sizes: list[int] = []
+        self.cleanup_collations: list[Collation] = []
 
     def find(self, query: dict[str, Any], projection: dict[str, int]) -> ResultCursor:
         del projection
@@ -257,7 +307,14 @@ class TargetCollection:
                 raise AssertionError(f"Unexpected write model: {operation!r}")
         return object()
 
-    async def delete_many(self, query: dict[str, Any]) -> object:
+    async def delete_many(
+        self,
+        query: dict[str, Any],
+        *,
+        collation: Collation | None = None,
+    ) -> object:
+        if collation is not None:
+            self.cleanup_collations.append(collation)
         bounds = query["_id"]
         deleted_count = 0
         for identifier in list(self.documents):
@@ -366,6 +423,7 @@ async def test_incremental_ingestion_handles_tombstones_and_targeted_cleanup() -
     )
     await ingestor.ingest(documents(item))
     target.documents["production-record"] = {"content_hash": "preserve"}
+    target.documents["TEST-ingest-cleanup-casefold"] = {"content_hash": "preserve"}
 
     removal = await ingestor.ingest(
         documents(
@@ -385,7 +443,62 @@ async def test_incremental_ingestion_handles_tombstones_and_targeted_cleanup() -
 
     assert (removal.deleted, removal.upserted) == (1, 0)
     assert cleaned == 1
-    assert target.documents == {"production-record": {"content_hash": "preserve"}}
+    assert target.documents == {
+        "production-record": {"content_hash": "preserve"},
+        "TEST-ingest-cleanup-casefold": {"content_hash": "preserve"},
+    }
+    assert [collation.document for collation in target.cleanup_collations] == [{"locale": "simple"}]
+
+
+@pytest.mark.asyncio
+async def test_loader_rejects_duplicate_source_ids_before_any_ingestion_write() -> None:
+    source = SourceCollection(
+        [
+            {
+                "source_key": "test-duplicate-a",
+                "body": "first",
+                "heading": "First",
+                "source_url": "https://example.invalid/first",
+                "attributes": {},
+                "tenant": "test-tenant",
+            },
+            {
+                "source_key": "test-duplicate-a",
+                "body": "second",
+                "heading": "Second",
+                "source_url": "https://example.invalid/second",
+                "attributes": {},
+                "tenant": "test-tenant",
+            },
+        ]
+    )
+    loader = MongoDBDocumentLoader(
+        source,
+        sample_prefix="test-duplicate-",
+        page_size=1,
+        source_id_field="source_key",
+        content_field="body",
+        title_field="heading",
+        url_field="source_url",
+        metadata_field="attributes",
+        tenant_field="tenant",
+    )
+    target = TargetCollection()
+    embeddings = Embeddings()
+    ingestor = IncrementalIngestor(
+        target,
+        embeddings,
+        sample_prefix="test-duplicate-target-",
+        vector_dimensions=3,
+        batch_size=1,
+    )
+
+    with pytest.raises(IngestionDataError, match="duplicate source ID"):
+        await ingestor.ingest(loader.load())
+
+    assert target.documents == {}
+    assert target.bulk_sizes == []
+    assert embeddings.calls == []
 
 
 @pytest.mark.asyncio
