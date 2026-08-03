@@ -35,3 +35,8 @@ This documentation explains the implemented system at the code level. The
 ## Ingestion
 
 - [.NET Ingestion samples implementation](ingestion/dotnet-ingestion-samples.md)
+
+## Persistence
+
+- [.NET Session Store contract verification](persistence/dotnet-contract-research.md)
+- [.NET Session Store implementation](persistence/dotnet-session-store.md)
