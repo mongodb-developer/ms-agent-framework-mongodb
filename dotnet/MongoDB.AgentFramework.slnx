@@ -5,6 +5,7 @@
   <Folder Name="/samples/">
     <Project Path="samples/HistoryQuickstart/HistoryQuickstart.csproj" />
     <Project Path="samples/IndexManagementQuickstart/IndexManagementQuickstart.csproj" />
+    <Project Path="samples/IngestionSamples/IngestionSamples.csproj" />
     <Project Path="samples/MemoryQuickstart/MemoryQuickstart.csproj" />
     <Project Path="samples/RAGQuickstart/RAGQuickstart.csproj" />
   </Folder>
