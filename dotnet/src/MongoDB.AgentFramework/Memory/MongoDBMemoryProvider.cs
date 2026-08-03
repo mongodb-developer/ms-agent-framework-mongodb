@@ -87,15 +87,34 @@ public sealed class MongoDBMemoryProvider : AIContextProvider, IAsyncDisposable
         Func<AgentSession?, State> stateFactory,
         MongoDBMemoryProviderOptions? options = null,
         ILogger<MongoDBMemoryProvider>? logger = null)
+        : this(
+            collection,
+            new ValidatedOptions<MongoDBMemoryProviderOptions>(PrepareOptions(options, vectorDimensions)),
+            embeddingGenerator,
+            vectorDimensions,
+            stateFactory,
+            logger)
+    {
+    }
+
+    /// <summary>
+    /// Core constructor accepting an already-validated, independent options snapshot (produced exactly once by
+    /// <see cref="PrepareOptions"/>), so this never re-copies or re-validates caller-supplied options (or
+    /// <paramref name="vectorDimensions"/> again) a second time. This matters for the connection-string-owned-client
+    /// family below: if options/vectorDimensions were validated again after the owned client already existed and
+    /// that later validation ever threw, the client would leak, since no <see cref="MongoDBMemoryProvider"/>
+    /// instance would ever exist to dispose it.
+    /// </summary>
+    private MongoDBMemoryProvider(
+        IMongoCollection<BsonDocument> collection,
+        ValidatedOptions<MongoDBMemoryProviderOptions> options,
+        IEmbeddingGenerator<string, Embedding<float>> embeddingGenerator,
+        int vectorDimensions,
+        Func<AgentSession?, State> stateFactory,
+        ILogger<MongoDBMemoryProvider>? logger)
         : base()
     {
-        _options = (options ?? new MongoDBMemoryProviderOptions()).Copy();
-        if (vectorDimensions <= 0)
-        {
-            throw new MongoDBConfigurationException(
-                "vectorDimensions must be a positive integer.");
-        }
-
+        _options = options.Value;
         _collection = collection ?? throw new ArgumentNullException(nameof(collection));
         _embeddingGenerator = embeddingGenerator ??
             throw new ArgumentNullException(nameof(embeddingGenerator));
@@ -143,37 +162,130 @@ public sealed class MongoDBMemoryProvider : AIContextProvider, IAsyncDisposable
         MongoDBMemoryProviderOptions? options = null,
         ILogger<MongoDBMemoryProvider>? logger = null)
         : this(
-            MongoClientFactory.FromConnectionString(connectionString),
+            connectionString,
             databaseName,
             collectionName,
             embeddingGenerator,
             vectorDimensions,
             stateFactory,
             options,
-            logger)
+            logger,
+            clientFactory: null)
     {
     }
 
-    private MongoDBMemoryProvider(
-        OwnedResource<IMongoClient> client,
+    /// <summary>
+    /// Test-only seam mirroring <see cref="MongoClientFactory.FromConnectionString"/>'s existing
+    /// <c>clientFactory</c> override. It exists solely so tests can substitute the underlying
+    /// <see cref="IMongoClient"/> and prove that a validation/construction failure occurring after the owned
+    /// client is created still disposes it; it is internal because it is not part of the public surface.
+    /// </summary>
+    internal MongoDBMemoryProvider(
+        string connectionString,
         string databaseName,
         string collectionName,
         IEmbeddingGenerator<string, Embedding<float>> embeddingGenerator,
         int vectorDimensions,
         Func<AgentSession?, State> stateFactory,
         MongoDBMemoryProviderOptions? options,
-        ILogger<MongoDBMemoryProvider>? logger)
+        ILogger<MongoDBMemoryProvider>? logger,
+        Func<string, IMongoClient>? clientFactory)
         : this(
-            client.Value.GetDatabase(
-                MongoDBMemoryProviderOptions.RequireText(databaseName, nameof(databaseName))),
-            collectionName,
+            Connect(
+                connectionString,
+                databaseName,
+                collectionName,
+                embeddingGenerator,
+                vectorDimensions,
+                stateFactory,
+                options,
+                clientFactory),
             embeddingGenerator,
             vectorDimensions,
             stateFactory,
-            options,
             logger)
     {
-        _client = client;
+    }
+
+    private MongoDBMemoryProvider(
+        (OwnedResource<IMongoClient> Client,
+         IMongoCollection<BsonDocument> Collection,
+         MongoDBMemoryProviderOptions Options) connected,
+        IEmbeddingGenerator<string, Embedding<float>> embeddingGenerator,
+        int vectorDimensions,
+        Func<AgentSession?, State> stateFactory,
+        ILogger<MongoDBMemoryProvider>? logger)
+        : this(
+            connected.Collection,
+            new ValidatedOptions<MongoDBMemoryProviderOptions>(connected.Options),
+            embeddingGenerator,
+            vectorDimensions,
+            stateFactory,
+            logger)
+    {
+        _client = connected.Client;
+    }
+
+    /// <summary>
+    /// Validates every constructor argument that does not require a MongoDB client -- including
+    /// <paramref name="options"/> and <paramref name="vectorDimensions"/> (via <see cref="PrepareOptions"/>),
+    /// <paramref name="embeddingGenerator"/>, and <paramref name="stateFactory"/> -- entirely before creating an
+    /// owned client, and disposes that client if the subsequent database/collection resolution step fails.
+    /// Mirrors <see cref="MongoDBRAGProvider"/>'s equivalent construction-exception-safety design.
+    /// </summary>
+    private static (OwnedResource<IMongoClient> Client,
+        IMongoCollection<BsonDocument> Collection,
+        MongoDBMemoryProviderOptions Options) Connect(
+        string connectionString,
+        string databaseName,
+        string collectionName,
+        IEmbeddingGenerator<string, Embedding<float>> embeddingGenerator,
+        int vectorDimensions,
+        Func<AgentSession?, State> stateFactory,
+        MongoDBMemoryProviderOptions? options,
+        Func<string, IMongoClient>? clientFactory)
+    {
+        MongoDBMemoryProviderOptions validated = PrepareOptions(options, vectorDimensions);
+        ArgumentNullException.ThrowIfNull(embeddingGenerator);
+        ArgumentNullException.ThrowIfNull(stateFactory);
+        string validDatabaseName = MongoDBMemoryProviderOptions.RequireText(databaseName, nameof(databaseName));
+        string validCollectionName =
+            MongoDBMemoryProviderOptions.RequireText(collectionName, nameof(collectionName));
+
+        OwnedResource<IMongoClient> client =
+            MongoClientFactory.FromConnectionString(connectionString, clientFactory);
+        try
+        {
+            IMongoCollection<BsonDocument> collection = client.Value
+                .GetDatabase(validDatabaseName)
+                .GetCollection<BsonDocument>(validCollectionName);
+            return (client, collection, validated);
+        }
+        catch
+        {
+            client.DisposeAsync().AsTask().GetAwaiter().GetResult();
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Validates <paramref name="vectorDimensions"/> and produces a single independent, validated options
+    /// snapshot via <see cref="MongoDBMemoryProviderOptions.Copy"/>. Called exactly once per construction path
+    /// (whether or not an owned client is created), so a caller-supplied
+    /// <see cref="MongoDBMemoryProviderOptions"/> is never copied/validated twice.
+    /// </summary>
+    private static MongoDBMemoryProviderOptions PrepareOptions(
+        MongoDBMemoryProviderOptions? options,
+        int vectorDimensions)
+    {
+        MongoDBMemoryProviderOptions validated = (options ?? new MongoDBMemoryProviderOptions()).Copy();
+        if (vectorDimensions <= 0)
+        {
+            throw new MongoDBConfigurationException(
+                "vectorDimensions must be a positive integer.");
+        }
+
+        return validated;
     }
 
     /// <summary>Gets whether the provider owns its MongoDB client.</summary>

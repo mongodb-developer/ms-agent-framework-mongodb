@@ -34,20 +34,26 @@ public sealed class MongoDBChatHistoryProvider : ChatHistoryProvider, IAsyncDisp
     public MongoDBChatHistoryProvider(
         IMongoCollection<BsonDocument> collection,
         MongoDBChatHistoryProviderOptions options)
-        : base(
-            options?.ProvideOutputMessageFilter,
-            options?.StoreInputRequestMessageFilter,
-            options?.StoreInputResponseMessageFilter)
+        : this(collection, new ValidatedOptions<MongoDBChatHistoryProviderOptions>(PrepareOptions(options)))
     {
-        ArgumentNullException.ThrowIfNull(options);
-        options.Validate();
-        _options = options with
-        {
-            TenantId = options.TenantId?.Trim(),
-            ApplicationId = options.ApplicationId.Trim(),
-            AgentId = options.AgentId.Trim(),
-            SessionId = options.SessionId.Trim(),
-        };
+    }
+
+    /// <summary>
+    /// Core constructor accepting an already-validated, independent options snapshot (produced exactly once by
+    /// <see cref="PrepareOptions"/>), so this never re-validates or re-trims caller-supplied options a second
+    /// time. This matters for the connection-string-owned-client family below: if options were validated again
+    /// after the owned client already existed and that later validation ever threw, the client would leak, since
+    /// no <see cref="MongoDBChatHistoryProvider"/> instance would ever exist to dispose it.
+    /// </summary>
+    private MongoDBChatHistoryProvider(
+        IMongoCollection<BsonDocument> collection,
+        ValidatedOptions<MongoDBChatHistoryProviderOptions> options)
+        : base(
+            options.Value.ProvideOutputMessageFilter,
+            options.Value.StoreInputRequestMessageFilter,
+            options.Value.StoreInputResponseMessageFilter)
+    {
+        _options = options.Value;
         _collection = collection ?? throw new ArgumentNullException(nameof(collection));
     }
 
@@ -83,22 +89,88 @@ public sealed class MongoDBChatHistoryProvider : ChatHistoryProvider, IAsyncDisp
         string databaseName,
         string collectionName,
         MongoDBChatHistoryProviderOptions options)
-        : this(
-            MongoClientFactory.FromConnectionString(connectionString),
-            databaseName,
-            collectionName,
-            options)
+        : this(connectionString, databaseName, collectionName, options, clientFactory: null)
+    {
+    }
+
+    /// <summary>
+    /// Test-only seam mirroring <see cref="MongoClientFactory.FromConnectionString"/>'s existing
+    /// <c>clientFactory</c> override. It exists solely so tests can substitute the underlying
+    /// <see cref="IMongoClient"/> and prove that a validation/construction failure occurring after the owned
+    /// client is created still disposes it; it is internal because it is not part of the public surface.
+    /// </summary>
+    internal MongoDBChatHistoryProvider(
+        string connectionString,
+        string databaseName,
+        string collectionName,
+        MongoDBChatHistoryProviderOptions options,
+        Func<string, IMongoClient>? clientFactory)
+        : this(Connect(connectionString, databaseName, collectionName, options, clientFactory))
     {
     }
 
     private MongoDBChatHistoryProvider(
-        OwnedResource<IMongoClient> client,
+        (OwnedResource<IMongoClient> Client,
+         IMongoCollection<BsonDocument> Collection,
+         MongoDBChatHistoryProviderOptions Options) connected)
+        : this(connected.Collection, new ValidatedOptions<MongoDBChatHistoryProviderOptions>(connected.Options))
+    {
+        _client = connected.Client;
+    }
+
+    /// <summary>
+    /// Validates and snapshots every constructor argument that does not require a MongoDB client (via
+    /// <see cref="PrepareOptions"/>) entirely before creating an owned client, and disposes that client if the
+    /// subsequent database/collection resolution step fails. Mirrors <see cref="MongoDBAgentSessionStore"/>'s
+    /// and <see cref="MongoDBRAGProvider"/>'s equivalent construction-exception-safety design.
+    /// </summary>
+    private static (OwnedResource<IMongoClient> Client,
+        IMongoCollection<BsonDocument> Collection,
+        MongoDBChatHistoryProviderOptions Options) Connect(
+        string connectionString,
         string databaseName,
         string collectionName,
-        MongoDBChatHistoryProviderOptions options)
-        : this(client.Value, databaseName, collectionName, options)
+        MongoDBChatHistoryProviderOptions options,
+        Func<string, IMongoClient>? clientFactory)
     {
-        _client = client;
+        MongoDBChatHistoryProviderOptions validated = PrepareOptions(options);
+        string validDatabaseName =
+            MongoDBChatHistoryProviderOptions.RequireText(databaseName, nameof(databaseName));
+        string validCollectionName =
+            MongoDBChatHistoryProviderOptions.RequireText(collectionName, nameof(collectionName));
+
+        OwnedResource<IMongoClient> client =
+            MongoClientFactory.FromConnectionString(connectionString, clientFactory);
+        try
+        {
+            IMongoCollection<BsonDocument> collection = client.Value
+                .GetDatabase(validDatabaseName)
+                .GetCollection<BsonDocument>(validCollectionName);
+            return (client, collection, validated);
+        }
+        catch
+        {
+            client.DisposeAsync().AsTask().GetAwaiter().GetResult();
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Validates and produces a single independent, trimmed options snapshot. Called exactly once per
+    /// construction path (whether or not an owned client is created), so a caller-supplied
+    /// <see cref="MongoDBChatHistoryProviderOptions"/> is never inspected twice.
+    /// </summary>
+    private static MongoDBChatHistoryProviderOptions PrepareOptions(MongoDBChatHistoryProviderOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        options.Validate();
+        return options with
+        {
+            TenantId = options.TenantId?.Trim(),
+            ApplicationId = options.ApplicationId.Trim(),
+            AgentId = options.AgentId.Trim(),
+            SessionId = options.SessionId.Trim(),
+        };
     }
 
     /// <summary>Gets whether this provider owns its MongoDB client.</summary>
