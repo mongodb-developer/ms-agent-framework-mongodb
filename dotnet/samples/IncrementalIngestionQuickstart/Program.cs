@@ -18,6 +18,7 @@ string collectionName = Environment.GetEnvironmentVariable("MONGODB_INGESTION_CO
     ?? "agent_framework_ingestion_chunks";
 const string TenantId = "quickstart";
 const string SourceId = "incremental-quickstart-doc";
+const string SecondSourceId = "incremental-quickstart-doc-2";
 
 using var client = new MongoClient(uri);
 IMongoCollection<BsonDocument> collection = client.GetDatabase(databaseName).GetCollection<BsonDocument>(collectionName);
@@ -25,33 +26,88 @@ var store = new MongoChunkStore(collection);
 var embedder = new BatchEmbedder(new SampleEmbeddingGenerator(), dimensions: 3);
 var pipeline = new IncrementalIngestionPipeline(store, embedder, new ChunkingOptions { WindowSize = 200, OverlapSize = 40 });
 
-Console.WriteLine("Run 1: first ingestion of the source document.");
-var original = new SourceDocument(
-    TenantId,
-    SourceId,
-    "Widgets ship in blue by default. Gadgets ship in red by default. Both items ship within two business days. " +
-        "Customers may request expedited shipping for an additional fee.",
-    Title: "Shipping FAQ");
-IngestionResult first = await pipeline.IngestAsync(original);
-Console.WriteLine($"  upserted={first.ChunksUpserted} unchanged={first.ChunksUnchanged} deleted={first.ChunksDeleted}");
+// The Vector Search index name is never user-supplied: it is always a freshly generated, sample-prefixed, unique
+// name for this run, so cleanup can only ever drop an index this run itself created -- never an arbitrary
+// pre-existing or user-configured index.
+string vectorIndexName = $"agent_framework_sample_incr_{Guid.NewGuid():N}";
+var vectorDefinition = new MongoDBVectorSearchIndexDefinition(
+    vectorIndexName,
+    "embedding",
+    vectorDimensions: 3,
+    similarity: "cosine",
+    filterFieldPaths: [ChunkRecord.TenantIdFieldName]);
+await using var indexManager = new MongoDBRAGIndexManager(collection, vectorDefinition);
 
-Console.WriteLine("Run 2: re-ingesting identical content -- everything should be unchanged.");
-IngestionResult rerun = await pipeline.IngestAsync(original);
-Console.WriteLine($"  upserted={rerun.ChunksUpserted} unchanged={rerun.ChunksUnchanged} deleted={rerun.ChunksDeleted}");
-
-Console.WriteLine("Run 3: ingesting shorter, changed content -- stale chunks are deleted.");
-var updated = original with
+// Because the index name above is always freshly generated, it should never already exist -- but this run still
+// checks rather than assumes, and only tracks (and later drops) the index if this run is the one that created it.
+bool indexCreatedByThisRun;
+if (await indexManager.GetVectorSearchIndexAsync() is null)
 {
-    Content = "Widgets ship in blue by default. Expedited shipping now ships within one business day.",
-};
-IngestionResult changed = await pipeline.IngestAsync(updated);
-Console.WriteLine($"  upserted={changed.ChunksUpserted} unchanged={changed.ChunksUnchanged} deleted={changed.ChunksDeleted}");
+    Console.WriteLine("Provisioning this run's own Vector Search index (this can take a while on a fresh cluster)...");
+    await indexManager.EnsureVectorSearchIndexAsync(waitUntilReady: true, timeout: TimeSpan.FromMinutes(3));
+    indexCreatedByThisRun = true;
+}
+else
+{
+    Console.WriteLine("This run's generated index name already exists; validating rather than re-creating it.");
+    await indexManager.ValidateVectorSearchIndexAsync();
+    indexCreatedByThisRun = false;
+}
 
-Console.WriteLine();
-Console.WriteLine("Cleaning up this quickstart's own chunks (bounded, tenant+source-scoped delete).");
-IReadOnlyDictionary<string, string> remainingHashes = await store.GetExistingHashesAsync(TenantId, SourceId);
-int deletedCount = await store.DeleteAsync(TenantId, SourceId, [.. remainingHashes.Keys]);
-Console.WriteLine($"  deleted={deletedCount}");
+try
+{
+    Console.WriteLine("Run 1: first ingestion of the source document.");
+    var original = new SourceDocument(
+        TenantId,
+        SourceId,
+        "Widgets ship in blue by default. Gadgets ship in red by default. Both items ship within two business days. " +
+            "Customers may request expedited shipping for an additional fee.",
+        Title: "Shipping FAQ");
+    IngestionResult first = await pipeline.IngestAsync(original);
+    Console.WriteLine($"  upserted={first.ChunksUpserted} unchanged={first.ChunksUnchanged} deleted={first.ChunksDeleted}");
+
+    Console.WriteLine("Run 2: re-ingesting identical content -- everything should be unchanged.");
+    IngestionResult rerun = await pipeline.IngestAsync(original);
+    Console.WriteLine($"  upserted={rerun.ChunksUpserted} unchanged={rerun.ChunksUnchanged} deleted={rerun.ChunksDeleted}");
+
+    Console.WriteLine("Run 3: ingesting shorter, changed content -- stale chunks are deleted.");
+    var updated = original with
+    {
+        Content = "Widgets ship in blue by default. Expedited shipping now ships within one business day.",
+    };
+    IngestionResult changed = await pipeline.IngestAsync(updated);
+    Console.WriteLine($"  upserted={changed.ChunksUpserted} unchanged={changed.ChunksUnchanged} deleted={changed.ChunksDeleted}");
+
+    Console.WriteLine();
+    Console.WriteLine("Run 4: ingesting a second source, then reconciling it away once it disappears from the manifest.");
+    var secondSource = new SourceDocument(TenantId, SecondSourceId, "A second, unrelated source document.", Title: "Second doc");
+    IngestionResult secondResult = await pipeline.IngestAsync(secondSource);
+    Console.WriteLine($"  upserted={secondResult.ChunksUpserted} unchanged={secondResult.ChunksUnchanged} deleted={secondResult.ChunksDeleted}");
+
+    // SourceManifestReconciler is the complement to IncrementalIngestionPipeline's own per-source stale-chunk
+    // cleanup: it tombstones sources that have disappeared from the corpus entirely (are no longer produced at
+    // all), which the per-source pipeline above would never revisit on its own. Here, the second source is
+    // deliberately omitted from the "currently known" manifest to simulate it having disappeared.
+    var reconciler = new SourceManifestReconciler(store);
+    SourceReconciliationResult reconciliation = await reconciler.ReconcileAsync(TenantId, [SourceId]);
+    Console.WriteLine($"  disappeared sources={string.Join(", ", reconciliation.DisappearedSourceIds)} " +
+        $"recordsDeleted={reconciliation.RecordsDeleted}");
+}
+finally
+{
+    Console.WriteLine();
+    Console.WriteLine("Cleaning up this quickstart's own chunks (bounded, tenant+source-scoped delete).");
+    int deletedCount = await store.DeleteSourceAsync(TenantId, SourceId);
+    deletedCount += await store.DeleteSourceAsync(TenantId, SecondSourceId);
+    Console.WriteLine($"  deleted={deletedCount}");
+
+    // The index is dropped only if this run created it -- never an arbitrary configured or pre-existing index.
+    if (indexCreatedByThisRun)
+    {
+        Console.WriteLine("Cleaning up this run's own Vector Search index.");
+        await indexManager.DropVectorSearchIndexAsync();
+    }
+}
 
 sealed class SampleEmbeddingGenerator : IEmbeddingGenerator<string, Embedding<float>>
 {

@@ -16,8 +16,12 @@ string databaseName = Environment.GetEnvironmentVariable("MONGODB_DATABASE")
     ?? throw new InvalidOperationException("Set MONGODB_DATABASE.");
 string collectionName = Environment.GetEnvironmentVariable("MONGODB_INGESTION_COLLECTION")
     ?? "agent_framework_ingestion_chunks";
-string vectorIndexName = Environment.GetEnvironmentVariable("MONGODB_INGESTION_VECTOR_INDEX")
-    ?? "agent_framework_ingestion_vector";
+// The Vector Search index name is never user-supplied: it is always a freshly generated, sample-prefixed, unique
+// name for this run, so cleanup can only ever drop an index this run itself created -- never an arbitrary
+// pre-existing or user-configured index. (Unlike the index, collectionName remains configurable: MongoDB creates
+// collections implicitly on first write, and this sample's cleanup already only ever touches its own tenant+source
+// chunks within that collection.)
+string vectorIndexName = $"agent_framework_sample_pd_{Guid.NewGuid():N}";
 const string TenantId = "quickstart";
 const string SourceId = "parent-document-quickstart-doc";
 
@@ -34,8 +38,24 @@ var vectorDefinition = new MongoDBVectorSearchIndexDefinition(
     similarity: "cosine",
     filterFieldPaths: [ChunkRecord.TenantIdFieldName, ChunkRecord.RecordTypeFieldName]);
 await using var indexManager = new MongoDBRAGIndexManager(collection, vectorDefinition);
-Console.WriteLine("Ensuring the Vector Search index exists (this can take a while on a fresh cluster)...");
-await indexManager.EnsureVectorSearchIndexAsync(waitUntilReady: true, timeout: TimeSpan.FromMinutes(3));
+
+// Because the index name above is always freshly generated, it should never already exist -- but this run still
+// checks rather than assumes, and only tracks (and later drops) the index if this run is the one that created it.
+// A pre-existing index of the same generated name (astronomically unlikely) is validated instead of re-created,
+// and is deliberately left alone by cleanup.
+bool indexCreatedByThisRun;
+if (await indexManager.GetVectorSearchIndexAsync() is null)
+{
+    Console.WriteLine("Creating this run's own Vector Search index (this can take a while on a fresh cluster)...");
+    await indexManager.EnsureVectorSearchIndexAsync(waitUntilReady: true, timeout: TimeSpan.FromMinutes(3));
+    indexCreatedByThisRun = true;
+}
+else
+{
+    Console.WriteLine("This run's generated index name already exists; validating rather than re-creating it.");
+    await indexManager.ValidateVectorSearchIndexAsync();
+    indexCreatedByThisRun = false;
+}
 
 var store = new MongoChunkStore(collection);
 var pipeline = new ParentDocumentIngestionPipeline(
@@ -43,50 +63,61 @@ var pipeline = new ParentDocumentIngestionPipeline(
     new BatchEmbedder(embeddingGenerator, dimensions: 3),
     new ChunkingOptions { WindowSize = 80, OverlapSize = 15 });
 
-Console.WriteLine("Ingesting one parent document plus its embedded child chunks.");
-var document = new SourceDocument(
-    TenantId,
-    SourceId,
-    "Widgets ship in blue by default. Gadgets ship in red by default. This parent document links both facts " +
-        "together, along with the shipping policy details a retrieved child chunk alone would not carry.",
-    Title: "Shipping colors reference",
-    Url: "https://example.test/shipping-colors");
-IngestionResult result = await pipeline.IngestAsync(document);
-Console.WriteLine($"  upserted={result.ChunksUpserted} unchanged={result.ChunksUnchanged} deleted={result.ChunksDeleted}");
-
-var searchOptions = new MongoDBRAGProviderOptions
+try
 {
-    SearchMode = MongoDBSearchMode.VectorAnn,
-    VectorIndexName = vectorIndexName,
-    TopK = 5,
-    MetadataFieldNames = [ChunkRecord.ParentIdFieldName],
-    // The mandatory filter is the sole authorization boundary here: it constrains Vector Search to this tenant's
-    // child records only, applied inside $vectorSearch itself, not as an application-side post-filter.
-    MandatoryFilter = MongoDBRAGFilter.And(
-        MongoDBRAGFilter.Equal(ChunkRecord.TenantIdFieldName, TenantId),
-        MongoDBRAGFilter.Equal(ChunkRecord.RecordTypeFieldName, ChunkRecord.ChildRecordType)),
-};
-await using var ragProvider = new MongoDBRAGProvider(
-    client, databaseName, collectionName, embeddingGenerator, vectorDimensions: 3, searchOptions);
-await using var childSearcher = new MongoDBRAGChildChunkSearcher(ragProvider);
-var parentLookup = new MongoParentLookup(collection);
-var retriever = new ParentDocumentRetriever(childSearcher, parentLookup, TenantId, maxParents: 5);
+    Console.WriteLine("Ingesting one parent document plus its embedded child chunks.");
+    var document = new SourceDocument(
+        TenantId,
+        SourceId,
+        "Widgets ship in blue by default. Gadgets ship in red by default. This parent document links both facts " +
+            "together, along with the shipping policy details a retrieved child chunk alone would not carry.",
+        Title: "Shipping colors reference",
+        Url: "https://example.test/shipping-colors");
+    IngestionResult result = await pipeline.IngestAsync(document);
+    Console.WriteLine($"  upserted={result.ChunksUpserted} unchanged={result.ChunksUnchanged} deleted={result.ChunksDeleted}");
 
-Console.WriteLine();
-Console.WriteLine("Searching child chunks and hydrating bounded, de-duplicated parents:");
-IReadOnlyList<ParentSearchResult> results = await PollUntilNonEmptyAsync(
-    retriever, "What color do widgets ship in?", TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(1));
-foreach (ParentSearchResult parent in results)
-{
-    Console.WriteLine($"  [{parent.BestChildScore:F3}] {parent.Content} (source: {parent.SourceName ?? "n/a"})");
+    var searchOptions = new MongoDBRAGProviderOptions
+    {
+        SearchMode = MongoDBSearchMode.VectorAnn,
+        VectorIndexName = vectorIndexName,
+        TopK = 5,
+        MetadataFieldNames = [ChunkRecord.ParentIdFieldName],
+        // The mandatory filter is the sole authorization boundary here: it constrains Vector Search to this
+        // tenant's child records only, applied inside $vectorSearch itself, not as an application-side post-filter.
+        MandatoryFilter = MongoDBRAGFilter.And(
+            MongoDBRAGFilter.Equal(ChunkRecord.TenantIdFieldName, TenantId),
+            MongoDBRAGFilter.Equal(ChunkRecord.RecordTypeFieldName, ChunkRecord.ChildRecordType)),
+    };
+    await using var ragProvider = new MongoDBRAGProvider(
+        client, databaseName, collectionName, embeddingGenerator, vectorDimensions: 3, searchOptions);
+    await using var childSearcher = new MongoDBRAGChildChunkSearcher(ragProvider);
+    var parentLookup = new MongoParentLookup(collection);
+    var retriever = new ParentDocumentRetriever(childSearcher, parentLookup, TenantId, maxParents: 5);
+
+    Console.WriteLine();
+    Console.WriteLine("Searching child chunks and hydrating bounded, de-duplicated parents:");
+    IReadOnlyList<ParentSearchResult> results = await PollUntilNonEmptyAsync(
+        retriever, "What color do widgets ship in?", TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(1));
+    foreach (ParentSearchResult parent in results)
+    {
+        Console.WriteLine($"  [{parent.BestChildScore:F3}] {parent.Content} (source: {parent.SourceName ?? "n/a"})");
+    }
 }
+finally
+{
+    Console.WriteLine();
+    Console.WriteLine("Cleaning up this quickstart's own chunks.");
+    IReadOnlyDictionary<string, string> remainingHashes = await store.GetExistingHashesAsync(TenantId, SourceId);
+    int deletedCount = await store.DeleteAsync(TenantId, SourceId, [.. remainingHashes.Keys]);
+    Console.WriteLine($"  deleted={deletedCount}");
 
-Console.WriteLine();
-Console.WriteLine("Cleaning up this quickstart's own chunks and its own index.");
-IReadOnlyDictionary<string, string> remainingHashes = await store.GetExistingHashesAsync(TenantId, SourceId);
-int deletedCount = await store.DeleteAsync(TenantId, SourceId, [.. remainingHashes.Keys]);
-Console.WriteLine($"  deleted={deletedCount}");
-await indexManager.DropVectorSearchIndexAsync();
+    // The index is dropped only if this run created it -- never an arbitrary configured or pre-existing index.
+    if (indexCreatedByThisRun)
+    {
+        Console.WriteLine("Cleaning up this run's own Vector Search index.");
+        await indexManager.DropVectorSearchIndexAsync();
+    }
+}
 
 /// <summary>
 /// Bounded polling that repeatedly invokes <see cref="ParentDocumentRetriever.SearchAsync"/> until it returns a
