@@ -109,6 +109,53 @@ public sealed class PublicConstructorBaselineTests
         ]);
     }
 
+    [Fact]
+    public void MemoryIndexManagerExposesOriginalAndLoggerAwareConstructors()
+    {
+        Type collection = typeof(IMongoCollection<BsonDocument>);
+        Type definition = typeof(MongoDBVectorSearchIndexDefinition);
+        Type logger = typeof(ILogger<MongoDBMemoryIndexManager>);
+
+        AssertExactSignatures(typeof(MongoDBMemoryIndexManager),
+        [
+            // Original (pre-observability) signatures: must never change.
+            [collection, definition],
+            [typeof(IMongoDatabase), typeof(string), definition],
+            [typeof(IMongoClient), typeof(string), typeof(string), definition],
+            [typeof(string), typeof(string), typeof(string), definition],
+            // New sibling overloads with a required (non-optional) logger parameter.
+            [collection, definition, logger],
+            [typeof(IMongoDatabase), typeof(string), definition, logger],
+            [typeof(IMongoClient), typeof(string), typeof(string), definition, logger],
+            [typeof(string), typeof(string), typeof(string), definition, logger],
+        ]);
+    }
+
+    [Fact]
+    public void RAGIndexManagerExposesOriginalAndLoggerAwareConstructors()
+    {
+        Type collection = typeof(IMongoCollection<BsonDocument>);
+        Type vectorDefinition = typeof(MongoDBVectorSearchIndexDefinition);
+        Type searchDefinition = typeof(MongoDBSearchIndexDefinition);
+        Type logger = typeof(ILogger<MongoDBRAGIndexManager>);
+
+        AssertExactSignatures(typeof(MongoDBRAGIndexManager),
+        [
+            // Original (pre-observability) signatures: must never change. vectorDefinition/searchDefinition
+            // are both optional on these overloads.
+            [collection, vectorDefinition, searchDefinition],
+            [typeof(IMongoDatabase), typeof(string), vectorDefinition, searchDefinition],
+            [typeof(IMongoClient), typeof(string), typeof(string), vectorDefinition, searchDefinition],
+            [typeof(string), typeof(string), typeof(string), vectorDefinition, searchDefinition],
+            // New sibling overloads with vectorDefinition/searchDefinition made required (so arity/signature
+            // differs from the optional-parameter overloads above) plus a required logger parameter.
+            [collection, vectorDefinition, searchDefinition, logger],
+            [typeof(IMongoDatabase), typeof(string), vectorDefinition, searchDefinition, logger],
+            [typeof(IMongoClient), typeof(string), typeof(string), vectorDefinition, searchDefinition, logger],
+            [typeof(string), typeof(string), typeof(string), vectorDefinition, searchDefinition, logger],
+        ]);
+    }
+
     /// <summary>
     /// Audit-only: <see cref="MongoDBMemoryProvider"/>'s public constructors already carried an optional
     /// <see cref="ILogger{TCategoryName}"/> parameter before this branch's observability work began (verified via
