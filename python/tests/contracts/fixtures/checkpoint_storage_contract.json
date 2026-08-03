@@ -1,7 +1,12 @@
 {
   "schema_version": 1,
   "framework_serialization": "agent-framework-core/1:WorkflowCheckpoint.to_dict/v1",
-  "idempotency_hash_version": 1,
+  "idempotency_hash_version": 2,
+  "canonical_mappings": {
+    "dict_order": "insensitive",
+    "ordered_dict_order": "sensitive_with_type_tag",
+    "unsupported_subclass": "reject_with_migration_guidance"
+  },
   "payload_versions": ["1.0"],
   "collection_default": "workflow_checkpoints",
   "scope_dimensions": ["tenant_id", "workflow_name", "session_id", "checkpoint_id"],
@@ -27,6 +32,8 @@
     "ttl_is_eventual": true,
     "lineage_gaps_are_valid": true,
     "counter_expiration_is_refreshed": true,
+    "counter_expiration_update": "atomic_max",
+    "permanent_checkpoint_disables_counter_expiration": true,
     "authorized_clear_run_deletes_counter": true
   }
 }

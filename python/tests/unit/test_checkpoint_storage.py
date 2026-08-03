@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -44,6 +45,68 @@ from agent_framework_mongodb._shared.client import MongoClientHandle
 class Result:
     def __init__(self, *, deleted_count: int = 0) -> None:
         self.deleted_count = deleted_count
+
+
+_REMOVE = object()
+
+
+def evaluate_update_expression(expression: object, document: dict[str, Any]) -> object:
+    if isinstance(expression, str):
+        if expression == "$$REMOVE":
+            return _REMOVE
+        if expression.startswith("$"):
+            return document.get(expression[1:])
+        return expression
+    if isinstance(expression, list):
+        values = cast(list[object], expression)
+        return [evaluate_update_expression(item, document) for item in values]
+    if not isinstance(expression, dict):
+        return expression
+    operators = cast(dict[str, object], expression)
+    if "$add" in operators:
+        values = evaluate_update_expression(operators["$add"], document)
+        return sum(cast(list[int], values))
+    if "$ifNull" in operators:
+        values = cast(
+            list[object],
+            evaluate_update_expression(operators["$ifNull"], document),
+        )
+        return values[1] if values[0] is None else values[0]
+    if "$cond" in operators:
+        condition, when_true, when_false = cast(list[object], operators["$cond"])
+        branch = when_true if evaluate_update_expression(condition, document) else when_false
+        return evaluate_update_expression(branch, document)
+    if "$eq" in operators:
+        values = cast(
+            list[object],
+            evaluate_update_expression(operators["$eq"], document),
+        )
+        return values[0] == values[1]
+    if "$ne" in operators:
+        values = cast(
+            list[object],
+            evaluate_update_expression(operators["$ne"], document),
+        )
+        return values[0] != values[1]
+    if "$gt" in operators:
+        values = cast(
+            list[Any],
+            evaluate_update_expression(operators["$gt"], document),
+        )
+        return bool(values[0] > values[1])
+    if "$and" in operators:
+        values = cast(
+            list[object],
+            evaluate_update_expression(operators["$and"], document),
+        )
+        return all(bool(value) for value in values)
+    if "$or" in operators:
+        values = cast(
+            list[object],
+            evaluate_update_expression(operators["$or"], document),
+        )
+        return any(bool(value) for value in values)
+    raise AssertionError(f"Unsupported fake update expression: {operators}")
 
 
 class FakeCursor:
@@ -115,7 +178,7 @@ class FakeCollection:
     async def find_one_and_update(
         self,
         query: dict[str, Any],
-        update: dict[str, Any],
+        update: dict[str, Any] | list[dict[str, Any]],
         *,
         upsert: bool,
         return_document: ReturnDocument,
@@ -133,11 +196,26 @@ class FakeCollection:
             if not upsert:
                 raise AssertionError("counter update must upsert")
             document = copy.deepcopy(query)
-            document.update(copy.deepcopy(update.get("$setOnInsert", {})))
-            document["sequence"] = 0
             self.documents.append(document)
-        document["sequence"] += cast(int, update["$inc"]["sequence"])
-        document.update(copy.deepcopy(update.get("$set", {})))
+        if isinstance(update, list):
+            for stage in update:
+                source = copy.deepcopy(document)
+                changes = {
+                    key: evaluate_update_expression(expression, source)
+                    for key, expression in cast(dict[str, Any], stage["$set"]).items()
+                }
+                for key, value in changes.items():
+                    if value is _REMOVE:
+                        document.pop(key, None)
+                    else:
+                        document[key] = value
+        else:
+            document.update(copy.deepcopy(update.get("$setOnInsert", {})))
+            document["sequence"] = document.get("sequence", 0) + cast(
+                int,
+                update["$inc"]["sequence"],
+            )
+            document.update(copy.deepcopy(update.get("$set", {})))
         return copy.deepcopy(document)
 
     async def insert_one(self, document: dict[str, Any]) -> Result:
@@ -206,6 +284,10 @@ class ApprovalRequest:
 @dataclass(frozen=True)
 class ApprovalResponse:
     approved: bool
+
+
+class UnsupportedMapping(dict[str, int]):
+    pass
 
 
 class ApprovalExecutor(Executor):
@@ -405,6 +487,47 @@ async def test_save_is_idempotent_and_rejects_same_id_with_conflicting_payload()
 
 
 @pytest.mark.asyncio
+async def test_plain_dict_order_is_logically_insensitive_but_ordered_dict_conflicts() -> None:
+    collection = FakeCollection()
+    storage = MongoDBCheckpointStorage(cast(Any, collection), options=options())
+    plain = checkpoint("plain")
+    plain.state["mapping"] = {"alpha": 1, "beta": 2}
+    reordered_plain = copy.deepcopy(plain)
+    reordered_plain.state["mapping"] = {"beta": 2, "alpha": 1}
+
+    assert plain.to_dict()["state"] == reordered_plain.to_dict()["state"]
+    assert await storage.save(plain) == "plain"
+    assert await storage.save(reordered_plain) == "plain"
+    ordered_instead_of_plain = copy.deepcopy(plain)
+    ordered_instead_of_plain.state["mapping"] = OrderedDict([("alpha", 1), ("beta", 2)])
+    with pytest.raises(MongoDBConcurrencyError, match="different payload"):
+        await storage.save(ordered_instead_of_plain)
+
+    ordered = checkpoint("ordered")
+    ordered.state["mapping"] = OrderedDict([("alpha", 1), ("beta", 2)])
+    assert await storage.save(ordered) == "ordered"
+    assert await storage.save(copy.deepcopy(ordered)) == "ordered"
+    reversed_order = copy.deepcopy(ordered)
+    reversed_order.state["mapping"] = OrderedDict([("beta", 2), ("alpha", 1)])
+
+    assert ordered.state["mapping"] != reversed_order.state["mapping"]
+    with pytest.raises(MongoDBConcurrencyError, match="different payload"):
+        await storage.save(reversed_order)
+
+
+@pytest.mark.asyncio
+async def test_unsupported_mapping_subclass_has_stable_migration_guidance() -> None:
+    collection = FakeCollection()
+    storage = MongoDBCheckpointStorage(cast(Any, collection), options=options())
+    invalid = checkpoint("unsupported-mapping")
+    invalid.state["mapping"] = UnsupportedMapping(alpha=1)
+
+    with pytest.raises(MongoDBMappingError, match="noncanonical.*migrate"):
+        await storage.save(invalid)
+    assert collection.documents == []
+
+
+@pytest.mark.asyncio
 async def test_concurrent_saves_have_unique_monotonic_sequence_order() -> None:
     collection = FakeCollection()
     storage = MongoDBCheckpointStorage(
@@ -587,6 +710,46 @@ async def test_expiration_can_leave_documented_lineage_gaps() -> None:
     collection.documents.remove(parent_document)
     child = await storage.load("child")
     assert child.previous_checkpoint_id == "parent"
+
+
+@pytest.mark.asyncio
+async def test_counter_expiration_uses_max_then_permanent_retention_without_reset() -> None:
+    collection = FakeCollection()
+    longer = MongoDBCheckpointStorage(
+        cast(Any, collection),
+        options=options(ttl=timedelta(hours=2)),
+    )
+    shorter = MongoDBCheckpointStorage(
+        cast(Any, collection),
+        options=options(ttl=timedelta(hours=1)),
+    )
+    permanent = MongoDBCheckpointStorage(
+        cast(Any, collection),
+        options=options(ttl=None),
+    )
+
+    await longer.save(checkpoint("longer"))
+    long_expiry = next(
+        item["expires_at"]
+        for item in checkpoint_documents(collection)
+        if item["checkpoint_id"] == "longer"
+    )
+    await shorter.save(checkpoint("shorter"))
+    counter = next(
+        item for item in collection.documents if item["_kind"] == "workflow_checkpoint_counter"
+    )
+    assert counter["expires_at"] == long_expiry
+    assert counter["retention_mode"] == "ttl"
+
+    await permanent.save(checkpoint("permanent"))
+    assert "expires_at" not in counter
+    assert counter["retention_mode"] == "permanent"
+
+    await shorter.save(checkpoint("ttl-after-permanent"))
+    assert "expires_at" not in counter
+    assert counter["retention_mode"] == "permanent"
+    assert counter["sequence"] == 4
+    assert sorted(item["sequence"] for item in checkpoint_documents(collection)) == [1, 2, 3, 4]
 
 
 @pytest.mark.asyncio

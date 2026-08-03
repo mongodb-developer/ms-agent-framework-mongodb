@@ -10,6 +10,7 @@ import json
 import logging
 import pickle  # nosec B403 -- restricted unpickling of authorized checkpoint storage
 import time
+from collections import OrderedDict
 from collections.abc import Callable, Mapping, Set
 from dataclasses import dataclass, fields, is_dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -162,7 +163,7 @@ class MongoDBCheckpointStorage(CheckpointStorage):
 
     SCHEMA_VERSION: ClassVar[int] = 1
     CURSOR_VERSION: ClassVar[int] = 1
-    IDEMPOTENCY_HASH_VERSION: ClassVar[int] = 1
+    IDEMPOTENCY_HASH_VERSION: ClassVar[int] = 2
     FRAMEWORK_SERIALIZATION_VERSION: ClassVar[str] = (
         "agent-framework-core/1:WorkflowCheckpoint.to_dict/v1"
     )
@@ -446,12 +447,7 @@ class MongoDBCheckpointStorage(CheckpointStorage):
         now: datetime,
         expires_at: datetime | None,
     ) -> int:
-        update: MongoDocument = {
-            "$inc": {"sequence": 1},
-            "$setOnInsert": {"created_at": now},
-        }
-        if expires_at is not None:
-            update["$set"] = {"expires_at": expires_at}
+        update = _counter_update_pipeline(now=now, expires_at=expires_at)
         try:
             counter = await self.collection.find_one_and_update(
                 self._counter_identity(),
@@ -739,11 +735,14 @@ def _logical_payload_hash(
     allowed_types: frozenset[str],
 ) -> str:
     """Hash a canonical logical representation of public checkpoint state."""
-    canonical = _canonical_checkpoint_value(
-        checkpoint.to_dict(),
-        allowed_types=allowed_types,
-        active_ids=set(),
-    )
+    canonical = {
+        "version": MongoDBCheckpointStorage.IDEMPOTENCY_HASH_VERSION,
+        "checkpoint": _canonical_checkpoint_value(
+            checkpoint.to_dict(),
+            allowed_types=allowed_types,
+            active_ids=set(),
+        ),
+    }
     encoded = json.dumps(
         canonical,
         sort_keys=True,
@@ -830,7 +829,7 @@ def _canonical_checkpoint_value(
         )
     active_ids.add(value_id)
     try:
-        if isinstance(value, Mapping):
+        if type(value) is dict:
             mapping = cast(Mapping[object, object], value)
             pairs = [
                 [
@@ -849,6 +848,61 @@ def _canonical_checkpoint_value(
             ]
             pairs.sort(key=lambda pair: _canonical_sort_key(pair[0]))
             return {"type": "mapping", "items": pairs}
+        if type(value) is OrderedDict:
+            ordered_mapping = cast(Mapping[object, object], value)
+            return {
+                "type": "ordered_mapping",
+                "class": "collections:OrderedDict",
+                "items": [
+                    [
+                        _canonical_checkpoint_value(
+                            key,
+                            allowed_types=allowed_types,
+                            active_ids=active_ids,
+                        ),
+                        _canonical_checkpoint_value(
+                            item,
+                            allowed_types=allowed_types,
+                            active_ids=active_ids,
+                        ),
+                    ]
+                    for key, item in ordered_mapping.items()
+                ],
+            }
+        if isinstance(value, Mapping):
+            mapping_object = cast(object, value)
+            mapping_type = type(mapping_object)
+            type_key = _type_key(mapping_type)
+            if (
+                not mapping_type.__module__.startswith("agent_framework.")
+                and type_key not in allowed_types
+            ):
+                raise MongoDBMappingError(
+                    "Checkpoint public state contains unsupported noncanonical "
+                    f"mapping type '{type_key}'; migrate it to dict/OrderedDict "
+                    "or register a lossless ordered mapping type in "
+                    "allowed_checkpoint_types."
+                )
+            ordered_mapping = cast(Mapping[object, object], value)
+            return {
+                "type": "ordered_mapping",
+                "class": type_key,
+                "items": [
+                    [
+                        _canonical_checkpoint_value(
+                            key,
+                            allowed_types=allowed_types,
+                            active_ids=active_ids,
+                        ),
+                        _canonical_checkpoint_value(
+                            item,
+                            allowed_types=allowed_types,
+                            active_ids=active_ids,
+                        ),
+                    ]
+                    for key, item in ordered_mapping.items()
+                ],
+            }
         if isinstance(value, list):
             list_value = cast(list[object], value)
             return {
@@ -955,6 +1009,71 @@ def _canonical_hash(value: object) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def _counter_update_pipeline(
+    *,
+    now: datetime,
+    expires_at: datetime | None,
+) -> list[MongoDocument]:
+    common: MongoDocument = {
+        "sequence": {"$add": [{"$ifNull": ["$sequence", 0]}, 1]},
+        "created_at": {"$ifNull": ["$created_at", now]},
+    }
+    if expires_at is None:
+        return [
+            {
+                "$set": {
+                    **common,
+                    "retention_mode": "permanent",
+                }
+            },
+            {"$set": {"expires_at": "$$REMOVE"}},
+        ]
+
+    existing_permanent = {
+        "$or": [
+            {"$eq": ["$retention_mode", "permanent"]},
+            {
+                "$and": [
+                    {"$ne": [{"$ifNull": ["$sequence", None]}, None]},
+                    {"$eq": [{"$ifNull": ["$expires_at", None]}, None]},
+                ]
+            },
+        ]
+    }
+    return [
+        {
+            "$set": {
+                **common,
+                "retention_mode": {
+                    "$cond": [existing_permanent, "permanent", "ttl"],
+                },
+            }
+        },
+        {
+            "$set": {
+                "expires_at": {
+                    "$cond": [
+                        {"$eq": ["$retention_mode", "permanent"]},
+                        "$$REMOVE",
+                        {
+                            "$cond": [
+                                {
+                                    "$gt": [
+                                        {"$ifNull": ["$expires_at", expires_at]},
+                                        expires_at,
+                                    ]
+                                },
+                                "$expires_at",
+                                expires_at,
+                            ]
+                        },
+                    ]
+                }
+            }
+        },
+    ]
+
+
 def _encode_cursor(sequence: int, checkpoint_id: str) -> str:
     payload = json.dumps(
         {"v": MongoDBCheckpointStorage.CURSOR_VERSION, "s": sequence, "i": checkpoint_id},
@@ -1027,7 +1146,7 @@ def _validate_versions(document: Mapping[str, Any]) -> None:
     if hash_version != MongoDBCheckpointStorage.IDEMPOTENCY_HASH_VERSION:
         raise MongoDBMappingError(
             f"Unsupported checkpoint idempotency hash version {hash_version!r}; "
-            "migrate the authorized checkpoint with the canonical version 1 hash."
+            "migrate the authorized checkpoint with the canonical version 2 hash."
         )
 
 

@@ -67,7 +67,7 @@ Each immutable checkpoint document is:
   "schema_version": 1,
   "framework_version": "agent-framework-core/1:WorkflowCheckpoint.to_dict/v1",
   "payload_version": "1.0",
-  "idempotency_hash_version": 1,
+  "idempotency_hash_version": 2,
   "scope_discriminator": "<scope sha-256>",
   "tenant_id": "tenant-1",
   "application_id": "application-1",
@@ -86,14 +86,21 @@ Each immutable checkpoint document is:
 The framework checkpoint ID is preserved exactly, while `_id` is deterministic
 for the complete scope and ID. Idempotency hashes use a versioned canonical
 logical representation of the public checkpoint dictionary rather than pickle
-bytes. Mappings and sets are stably ordered, scalar and collection types carry
-explicit tags, and framework/application dataclasses or public `to_dict` values
-carry stable type identities. The same logical checkpoint therefore hashes
-identically across processes and `PYTHONHASHSEED` values. Cycles, non-finite
-floats, and unsupported objects fail before sequence allocation with a stable
+bytes. Exact `dict` values are explicitly order-insensitive because their public
+checkpoint meaning is key/value state. `OrderedDict` carries its fully qualified
+type and entry sequence, so a reversed order conflicts; allowlisted/framework
+mapping subclasses also carry concrete type and sequence. Other mapping
+subclasses fail with stable migration guidance rather than being silently
+flattened. Sets are stably ordered, scalar and collection types carry explicit
+tags, and framework/application dataclasses or public `to_dict` values carry
+stable type identities. The same logical checkpoint therefore hashes
+identically across processes and `PYTHONHASHSEED` values without discarding
+lossless concrete-type or order semantics. Cycles, non-finite floats, and
+unsupported objects fail before sequence allocation with a stable
 `MongoDBMappingError`. Pickle remains only the lossless storage encoding and is
-not part of identity. An identical retry returns the same ID. Reusing the ID
-with different public state raises `MongoDBConcurrencyError`.
+not part of identity. Hash version 2 rejects version 1 records with migration
+guidance. An identical retry returns the same ID. Reusing the ID with different
+public state raises `MongoDBConcurrencyError`.
 `schema_version`, `framework_version`, the checkpoint's public `version`, and
 `idempotency_hash_version` are independent compatibility gates. Unknown values
 raise `MongoDBMappingError` with migration guidance rather than best-effort
@@ -101,13 +108,18 @@ loading. Python/.NET physical checkpoint interoperability is not claimed.
 
 ## Sequence allocation, lineage, and retention
 
-A separate, scoped counter document uses atomic `$inc` with upsert. Concurrent
-saves therefore receive unique, positive, monotonic sequences. When TTL is
-configured, the same atomic update refreshes the counter's `expires_at` to the
-new checkpoint's expiration, so counter metadata cannot outlive retained run
-history indefinitely. Retries and failed inserts may leave sequence gaps;
-ordering never assumes contiguity. `get_latest()` sorts by descending sequence
-and checkpoint ID.
+A separate, scoped counter document uses an atomic aggregation-pipeline upsert.
+Concurrent saves therefore receive unique, positive, monotonic sequences. When
+TTL is configured, the same update increments the sequence and extends
+the counter's `expires_at` to the maximum of its current and requested values;
+an out-of-order shorter TTL can never move it backward. A non-expiring
+checkpoint atomically changes `retention_mode` to `permanent` and removes
+`expires_at`. That mode is dominant, so a later concurrent TTL write cannot
+restore expiration. Legacy counters with a sequence but no expiration are
+treated as permanent. Counter metadata therefore cannot expire while any
+retained permanent checkpoint could still need its sequence. Retries and failed
+inserts may leave sequence gaps; ordering never assumes contiguity.
+`get_latest()` sorts by descending sequence and checkpoint ID.
 
 `previous_checkpoint_id` is copied unchanged to `parent_checkpoint_id`.
 Parents are not required to exist at save or load time. This permits branched

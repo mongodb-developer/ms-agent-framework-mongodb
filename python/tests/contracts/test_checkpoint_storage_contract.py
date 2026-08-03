@@ -36,7 +36,14 @@ def test_checkpoint_storage_contract_matches_public_surface() -> None:
     assert contract["pagination"]["maximum_page_size"] == defaults.max_page_size
     assert contract["pagination"]["inherited_lists"] == "all_records_via_bounded_pages"
     assert contract["retention"]["counter_expiration_is_refreshed"]
+    assert contract["retention"]["counter_expiration_update"] == "atomic_max"
+    assert contract["retention"]["permanent_checkpoint_disables_counter_expiration"]
     assert contract["retention"]["authorized_clear_run_deletes_counter"]
+    assert contract["canonical_mappings"] == {
+        "dict_order": "insensitive",
+        "ordered_dict_order": "sensitive_with_type_tag",
+        "unsupported_subclass": "reject_with_migration_guidance",
+    }
     assert [item["name"] for item in contract["indexes"]] == [
         "checkpoint_scope_identity",
         "checkpoint_scope_sequence",
