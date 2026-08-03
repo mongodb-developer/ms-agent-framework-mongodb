@@ -27,6 +27,15 @@ namespace MongoDB.AgentFramework;
 /// agent-defined. See <see cref="Internal.Persistence.IAgentSessionCodec"/> for the seam that would let a future
 /// package version add a dedicated adapter without changing this store's public methods or its BSON schema.
 /// </para>
+/// <para>
+/// This build only supports the resolved <c>Microsoft.Agents.AI.Abstractions</c> assembly versions in
+/// <c>[<see cref="MinimumSupportedFrameworkAssemblyVersion"/>, <see cref="MaximumSupportedFrameworkAssemblyVersionExclusive"/>)</c>;
+/// every constructor validates the resolved assembly version and throws <see cref="MongoDBConfigurationException"/>
+/// for any other version rather than risk silently writing an envelope an unverified framework version would
+/// deserialize incompatibly. Stored documents also carry explicit <c>schema_version</c>/<c>framework_version</c>
+/// markers; a document written by an unsupported version is never read, updated, or deleted -- see
+/// docs/development/persistence/dotnet-session-store-migration.md for the required manual remediation.
+/// </para>
 /// </remarks>
 public sealed class MongoDBAgentSessionStore : IAsyncDisposable
 {
@@ -36,6 +45,18 @@ public sealed class MongoDBAgentSessionStore : IAsyncDisposable
     /// <summary>The internal Agent Framework JSON envelope compatibility marker (not the NuGet package version).</summary>
     public const int FrameworkSerializationVersion = 1;
 
+    /// <summary>
+    /// The minimum resolved <c>Microsoft.Agents.AI.Abstractions</c> assembly version this build has verified
+    /// (inclusive). See docs/development/persistence/dotnet-contract-research.md.
+    /// </summary>
+    internal static readonly Version MinimumSupportedFrameworkAssemblyVersion = new(1, 13, 0, 0);
+
+    /// <summary>
+    /// The upper bound (exclusive) of the resolved <c>Microsoft.Agents.AI.Abstractions</c> assembly version this
+    /// build has verified. See docs/development/persistence/dotnet-contract-research.md.
+    /// </summary>
+    internal static readonly Version MaximumSupportedFrameworkAssemblyVersionExclusive = new(1, 17, 0, 0);
+
     private readonly IMongoCollection<BsonDocument> _collection;
     private readonly MongoDBAgentSessionStoreOptions _options;
     private readonly OwnedResource<IMongoClient>? _client;
@@ -44,9 +65,24 @@ public sealed class MongoDBAgentSessionStore : IAsyncDisposable
     public MongoDBAgentSessionStore(
         IMongoCollection<BsonDocument> collection,
         MongoDBAgentSessionStoreOptions options)
+        : this(collection, options, DefaultResolvedFrameworkAssemblyVersionProvider)
+    {
+    }
+
+    /// <summary>
+    /// Test-only seam allowing the resolved framework assembly version to be injected instead of inspected from
+    /// the loaded <see cref="AIAgent"/> assembly, so unsupported-version rejection is unit-testable without
+    /// loading multiple real assembly versions side by side.
+    /// </summary>
+    internal MongoDBAgentSessionStore(
+        IMongoCollection<BsonDocument> collection,
+        MongoDBAgentSessionStoreOptions options,
+        Func<Version> resolvedFrameworkAssemblyVersionProvider)
     {
         ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(resolvedFrameworkAssemblyVersionProvider);
         options.Validate();
+        ValidateResolvedFrameworkAssemblyVersion(resolvedFrameworkAssemblyVersionProvider());
         _options = options with
         {
             TenantId = options.TenantId?.Trim(),
@@ -89,26 +125,118 @@ public sealed class MongoDBAgentSessionStore : IAsyncDisposable
         string databaseName,
         string collectionName,
         MongoDBAgentSessionStoreOptions options)
-        : this(
-            MongoClientFactory.FromConnectionString(connectionString),
-            databaseName,
-            collectionName,
-            options)
+        : this(connectionString, databaseName, collectionName, options, clientFactory: null)
+    {
+    }
+
+    /// <summary>
+    /// Test-only seam mirroring <see cref="MongoClientFactory.FromConnectionString"/>'s existing
+    /// <c>clientFactory</c> override. It exists solely so tests can substitute the underlying
+    /// <see cref="IMongoClient"/> and prove that a construction failure occurring after the owned client is
+    /// created (for example resolving the database/collection) still disposes it; it is internal because it is
+    /// not part of the public surface.
+    /// </summary>
+    internal MongoDBAgentSessionStore(
+        string connectionString,
+        string databaseName,
+        string collectionName,
+        MongoDBAgentSessionStoreOptions options,
+        Func<string, IMongoClient>? clientFactory)
+        : this(connectionString, databaseName, collectionName, options, clientFactory,
+              DefaultResolvedFrameworkAssemblyVersionProvider)
+    {
+    }
+
+    /// <summary>Test-only seam additionally allowing the resolved framework assembly version to be injected.</summary>
+    internal MongoDBAgentSessionStore(
+        string connectionString,
+        string databaseName,
+        string collectionName,
+        MongoDBAgentSessionStoreOptions options,
+        Func<string, IMongoClient>? clientFactory,
+        Func<Version> resolvedFrameworkAssemblyVersionProvider)
+        : this(Connect(
+            connectionString, databaseName, collectionName, options, clientFactory,
+            resolvedFrameworkAssemblyVersionProvider))
     {
     }
 
     private MongoDBAgentSessionStore(
-        OwnedResource<IMongoClient> client,
+        (OwnedResource<IMongoClient> Client,
+         IMongoCollection<BsonDocument> Collection,
+         MongoDBAgentSessionStoreOptions Options,
+         Func<Version> VersionProvider) connected)
+        : this(connected.Collection, connected.Options, connected.VersionProvider)
+    {
+        _client = connected.Client;
+    }
+
+    /// <summary>
+    /// Validates every constructor argument that does not require a MongoDB client -- options and the resolved
+    /// framework assembly version -- entirely before creating an owned client. If this validated first and a
+    /// chained constructor validated those requirements afterward instead, an invalid option or unsupported
+    /// framework version would throw only after <see cref="MongoClientFactory.FromConnectionString"/> had already
+    /// created a client, and since no <see cref="MongoDBAgentSessionStore"/> instance would ever exist to dispose
+    /// it, that client would leak. Resolving the database/collection can still throw after the client exists (a
+    /// real network-dependent step); this method disposes the client itself in that case, since it runs before
+    /// any instance exists either.
+    /// </summary>
+    private static (OwnedResource<IMongoClient> Client,
+        IMongoCollection<BsonDocument> Collection,
+        MongoDBAgentSessionStoreOptions Options,
+        Func<Version> VersionProvider) Connect(
+        string connectionString,
         string databaseName,
         string collectionName,
-        MongoDBAgentSessionStoreOptions options)
-        : this(client.Value, databaseName, collectionName, options)
+        MongoDBAgentSessionStoreOptions options,
+        Func<string, IMongoClient>? clientFactory,
+        Func<Version> resolvedFrameworkAssemblyVersionProvider)
     {
-        _client = client;
+        ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(resolvedFrameworkAssemblyVersionProvider);
+        options.Validate();
+        ValidateResolvedFrameworkAssemblyVersion(resolvedFrameworkAssemblyVersionProvider());
+        string validDatabaseName = MongoDBAgentSessionStoreOptions.RequireText(databaseName, nameof(databaseName));
+        string validCollectionName =
+            MongoDBAgentSessionStoreOptions.RequireText(collectionName, nameof(collectionName));
+
+        OwnedResource<IMongoClient> client = MongoClientFactory.FromConnectionString(connectionString, clientFactory);
+        try
+        {
+            IMongoCollection<BsonDocument> collection = client.Value
+                .GetDatabase(validDatabaseName)
+                .GetCollection<BsonDocument>(validCollectionName);
+            return (client, collection, options, resolvedFrameworkAssemblyVersionProvider);
+        }
+        catch
+        {
+            client.DisposeAsync().AsTask().GetAwaiter().GetResult();
+            throw;
+        }
     }
 
     /// <summary>Gets whether this store owns its MongoDB client.</summary>
     public bool OwnsClient => _client?.OwnsValue is true;
+
+    private static Version DefaultResolvedFrameworkAssemblyVersionProvider() =>
+        typeof(AIAgent).Assembly.GetName().Version
+            ?? throw new MongoDBConfigurationException(
+                "Unable to determine the resolved Microsoft.Agents.AI.Abstractions assembly version.");
+
+    private static void ValidateResolvedFrameworkAssemblyVersion(Version resolvedVersion)
+    {
+        if (resolvedVersion < MinimumSupportedFrameworkAssemblyVersion ||
+            resolvedVersion >= MaximumSupportedFrameworkAssemblyVersionExclusive)
+        {
+            throw new MongoDBConfigurationException(
+                $"MongoDBAgentSessionStore has verified Microsoft.Agents.AI.Abstractions " +
+                $"[{MinimumSupportedFrameworkAssemblyVersion},{MaximumSupportedFrameworkAssemblyVersionExclusive}) " +
+                $"only (see docs/development/persistence/dotnet-contract-research.md), but the resolved " +
+                $"assembly reports version {resolvedVersion}. Pin a verified " +
+                "Microsoft.Agents.AI.Abstractions version, or re-run the compatibility verification in that " +
+                "document and widen this range, before using this version.");
+        }
+    }
 
     /// <summary>Loads the authorized session snapshot, or <see langword="null"/> if absent.</summary>
     public async Task<MongoDBAgentSessionRecord?> GetAsync(

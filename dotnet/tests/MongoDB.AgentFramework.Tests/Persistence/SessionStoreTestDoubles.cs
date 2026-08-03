@@ -29,6 +29,53 @@ internal sealed class SessionCollectionState
     }
 }
 
+internal sealed class SessionFakeMongoClientState
+{
+    public Exception? GetDatabaseException { get; set; }
+
+    public int DisposeCount { get; set; }
+}
+
+/// <summary>
+/// A minimal <see cref="IMongoClient"/> test double supporting only the members exercised by
+/// <see cref="MongoDBAgentSessionStore"/>'s owned-client construction path (<c>GetDatabase</c> and
+/// <c>Dispose</c>), used to prove the owned client is disposed if a later validation/connection step fails
+/// during construction.
+/// </summary>
+internal class SessionFakeMongoClientProxy : DispatchProxy
+{
+    public SessionFakeMongoClientState State { get; set; } = null!;
+
+    protected override object? Invoke(MethodInfo? targetMethod, object?[]? args)
+    {
+        string method = targetMethod!.Name;
+        if (method == "GetDatabase")
+        {
+            if (State.GetDatabaseException is not null)
+            {
+                throw State.GetDatabaseException;
+            }
+
+            throw new NotSupportedException("Fake client requires a configured GetDatabaseException.");
+        }
+
+        if (method == "Dispose")
+        {
+            State.DisposeCount++;
+            return null;
+        }
+
+        throw new NotSupportedException($"Unexpected client call: {targetMethod}");
+    }
+
+    public static IMongoClient Create(SessionFakeMongoClientState state)
+    {
+        var client = DispatchProxy.Create<IMongoClient, SessionFakeMongoClientProxy>();
+        ((SessionFakeMongoClientProxy)(object)client).State = state;
+        return client;
+    }
+}
+
 internal class SessionCollectionProxy : DispatchProxy
 {
     public SessionCollectionState State { get; set; } = null!;
