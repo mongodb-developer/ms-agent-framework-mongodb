@@ -74,6 +74,7 @@ class IncrementalIngestor:
         self._collection = collection
         self._embedding_generator = embedding_generator
         self._sample_prefix = sample_prefix
+        self._prefix_upper_bound = _exclusive_prefix_upper_bound(sample_prefix)
         self._vector_dimensions = vector_dimensions
         if not embedding_model.strip():
             raise ValueError("embedding_model must be a non-empty caller-provided identifier.")
@@ -129,7 +130,7 @@ class IncrementalIngestor:
             {
                 self._id_field: {
                     "$gte": self._sample_prefix,
-                    "$lt": f"{self._sample_prefix}\uffff",
+                    "$lt": self._prefix_upper_bound,
                 }
             },
             collation=_SIMPLE_COLLATION,
@@ -241,6 +242,7 @@ class MongoDBDocumentLoader:
             raise ValueError("page_size must be an integer from 1 through 1000.")
         self._collection = collection
         self._sample_prefix = sample_prefix
+        self._prefix_upper_bound = _exclusive_prefix_upper_bound(sample_prefix)
         self._page_size = page_size
         self._source_id_field = _validated_field(source_id_field, "source_id_field")
         self._content_field = _validated_field(content_field, "content_field")
@@ -266,7 +268,7 @@ class MongoDBDocumentLoader:
         while True:
             bounds = {
                 "$gte": self._sample_prefix,
-                "$lt": f"{self._sample_prefix}\uffff",
+                "$lt": self._prefix_upper_bound,
             }
             if last_source_id is not None:
                 bounds["$gt"] = last_source_id
@@ -293,13 +295,13 @@ class MongoDBDocumentLoader:
                 last_source_id = source_id
 
     async def _validate_unique_source_ids(self) -> None:
-        duplicate_cursor = self._collection.aggregate(
+        duplicate_cursor = await self._collection.aggregate(
             [
                 {
                     "$match": {
                         self._source_id_field: {
                             "$gte": self._sample_prefix,
-                            "$lt": f"{self._sample_prefix}\uffff",
+                            "$lt": self._prefix_upper_bound,
                         }
                     }
                 },
@@ -318,6 +320,22 @@ class MongoDBDocumentLoader:
             raise IngestionDataError(
                 "Source contains a duplicate source ID within the sample prefix."
             )
+
+
+def _exclusive_prefix_upper_bound(prefix: str) -> str:
+    try:
+        prefix.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError("sample_prefix must contain valid Unicode scalar values.") from exc
+    for index in range(len(prefix) - 1, -1, -1):
+        code_point = ord(prefix[index])
+        if code_point == 0x10FFFF:
+            continue
+        successor = code_point + 1
+        if 0xD800 <= successor <= 0xDFFF:
+            successor = 0xE000
+        return f"{prefix[:index]}{chr(successor)}"
+    raise ValueError("sample_prefix has no exclusive Unicode successor.")
 
 
 def _validated_field(value: str, name: str) -> str:

@@ -82,6 +82,14 @@ collection default cannot broaden a range. The loader projects configured fields
 and accepts no caller or model BSON. Page and embedding/write batch sizes are
 independently bounded to 1–1000.
 
+The exclusive upper bound increments the rightmost Unicode scalar value that has
+a successor and truncates any maximum-value suffix. It skips the surrogate range,
+whose values are invalid in UTF-8, and rejects prefixes containing surrogate code
+units or having no successor. UTF-8 preserves Unicode scalar ordering, so the
+bound includes supplementary characters and remains exclusive of the next
+non-prefixed value. The required ASCII `sample-`/`test-` prefix guarantees a
+successor even when the caller's suffix ends in `U+10FFFF`.
+
 Before the loader yields its first record, a structured `$match`/`$group`
 aggregate checks source-ID uniqueness under the same binary collation and limits
 its result to one duplicate. `IngestionDataError` then aborts before embedding or
@@ -104,11 +112,17 @@ range on the validated output prefix; choose a unique prefix for every test run.
 ## Verification
 
 `python/tests/unit/test_ingestion_samples.py` uses source, target, and embedding
-boundary fakes. It covers paging/projection, binary collation, mapping, field validation,
-deterministic IDs, changed/unchanged behavior, model refresh, batch dimensions,
-bounded batches, tombstones, cleanup isolation, duplicate IDs, cancellation, and
-required environment configuration. The `page_size=1` duplicate regression proves
-the preflight fails before embedding or target writes. No credentialed integration test is needed
+boundary fakes. The aggregate fake is async, matching PyMongo's
+`AsyncCollection.aggregate()` contract. The sample awaits `aggregate`,
+`delete_many`, `bulk_write`, cursor `to_list`, provider operations, and client
+close; `find` and cursor option builders remain synchronous as required by the
+driver. Tests cover paging/projection, binary collation, supplementary and
+maximum Unicode bounds, mapping, field validation, deterministic IDs,
+changed/unchanged behavior, model refresh, batch dimensions, bounded batches,
+tombstones, cleanup isolation, duplicate IDs, cancellation, and required
+environment configuration. The `page_size=1` supplementary-character duplicate
+regression proves the preflight fails before embedding or target writes. No
+credentialed integration test is needed
 for this sample-only seam; existing RAG integration suites validate real index
 inspection and runtime retrieval.
 

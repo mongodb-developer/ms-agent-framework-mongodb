@@ -66,7 +66,7 @@ class SourceCollection:
         ]
         return SourceCursor(documents, self.collations)
 
-    def aggregate(
+    async def aggregate(
         self,
         pipeline: list[dict[str, Any]],
         *,
@@ -122,6 +122,22 @@ async def test_loader_pages_only_prefixed_documents_into_neutral_records() -> No
                 "attributes": {},
                 "tenant": "production",
             },
+            {
+                "source_key": "sample-test-\U0001f600",
+                "body": "supplementary",
+                "heading": "Emoji",
+                "source_url": "https://example.invalid/emoji",
+                "attributes": {"section": 3},
+                "tenant": "sample-tenant",
+            },
+            {
+                "source_key": "sample-test.",
+                "body": "must not cross successor boundary",
+                "heading": "Successor",
+                "source_url": "https://example.invalid/successor",
+                "attributes": {},
+                "tenant": "production",
+            },
         ]
     )
     loader = MongoDBDocumentLoader(
@@ -155,9 +171,18 @@ async def test_loader_pages_only_prefixed_documents_into_neutral_records() -> No
             metadata={"section": 2},
             tenant_id="sample-tenant",
         ),
+        IngestionDocument(
+            source_id="sample-test-\U0001f600",
+            content="supplementary",
+            title="Emoji",
+            url="https://example.invalid/emoji",
+            metadata={"section": 3},
+            tenant_id="sample-tenant",
+        ),
     ]
-    assert len(collection.reads) == 3
+    assert len(collection.reads) == 4
     assert [collation.document for collation in collection.collations] == [
+        {"locale": "simple"},
         {"locale": "simple"},
         {"locale": "simple"},
         {"locale": "simple"},
@@ -184,6 +209,7 @@ async def test_loader_pages_only_prefixed_documents_into_neutral_records() -> No
     ("option", "value"),
     [
         ("sample_prefix", "production-"),
+        ("sample_prefix", "sample-invalid-\ud800"),
         ("page_size", 0),
         ("page_size", 1001),
         ("source_id_field", "$where"),
@@ -424,6 +450,8 @@ async def test_incremental_ingestion_handles_tombstones_and_targeted_cleanup() -
     await ingestor.ingest(documents(item))
     target.documents["production-record"] = {"content_hash": "preserve"}
     target.documents["TEST-ingest-cleanup-casefold"] = {"content_hash": "preserve"}
+    target.documents["test-ingest-cleanup-\U0001f600"] = {"content_hash": "remove"}
+    target.documents["test-ingest-cleanup."] = {"content_hash": "preserve"}
 
     removal = await ingestor.ingest(
         documents(
@@ -442,12 +470,32 @@ async def test_incremental_ingestion_handles_tombstones_and_targeted_cleanup() -
     cleaned = await ingestor.cleanup()
 
     assert (removal.deleted, removal.upserted) == (1, 0)
-    assert cleaned == 1
+    assert cleaned == 2
     assert target.documents == {
         "production-record": {"content_hash": "preserve"},
         "TEST-ingest-cleanup-casefold": {"content_hash": "preserve"},
+        "test-ingest-cleanup.": {"content_hash": "preserve"},
     }
     assert [collation.document for collation in target.cleanup_collations] == [{"locale": "simple"}]
+
+
+@pytest.mark.asyncio
+async def test_cleanup_successor_carries_a_maximum_unicode_suffix() -> None:
+    prefix = "test-max-\U0010ffff"
+    target = TargetCollection()
+    target.documents[f"{prefix}-owned"] = {"content_hash": "remove"}
+    target.documents["test-max."] = {"content_hash": "preserve"}
+    ingestor = IncrementalIngestor(
+        target,
+        Embeddings(),
+        sample_prefix=prefix,
+        vector_dimensions=3,
+    )
+
+    cleaned = await ingestor.cleanup()
+
+    assert cleaned == 1
+    assert target.documents == {"test-max.": {"content_hash": "preserve"}}
 
 
 @pytest.mark.asyncio
@@ -455,7 +503,7 @@ async def test_loader_rejects_duplicate_source_ids_before_any_ingestion_write() 
     source = SourceCollection(
         [
             {
-                "source_key": "test-duplicate-a",
+                "source_key": "test-duplicate-\U0001f600",
                 "body": "first",
                 "heading": "First",
                 "source_url": "https://example.invalid/first",
@@ -463,7 +511,7 @@ async def test_loader_rejects_duplicate_source_ids_before_any_ingestion_write() 
                 "tenant": "test-tenant",
             },
             {
-                "source_key": "test-duplicate-a",
+                "source_key": "test-duplicate-\U0001f600",
                 "body": "second",
                 "heading": "Second",
                 "source_url": "https://example.invalid/second",

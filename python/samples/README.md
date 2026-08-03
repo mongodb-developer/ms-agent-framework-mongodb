@@ -58,8 +58,11 @@ Scanned 3; upserted 2; unchanged 1; deleted 0.
 ```
 
 Pages and batches are limited to 1–1000. Cancellation propagates immediately.
-Every sample-prefix range uses MongoDB's `simple` binary collation, regardless of
-the collection default. Before yielding any record, the loader runs a bounded
+Every sample-prefix range uses MongoDB's `simple` binary collation and the
+exclusive Unicode successor of the prefix, regardless of the collection default.
+This includes IDs containing supplementary characters such as emoji; a fixed
+`prefix + U+FFFF` sentinel is not used. Prefixes with invalid Unicode scalar
+values fail configuration. Before yielding any record, the loader runs a bounded
 duplicate-ID aggregate and raises `IngestionDataError` if uniqueness would be
 ambiguous; therefore page boundaries cannot silently select one duplicate or
 allow an ingestion write first.
