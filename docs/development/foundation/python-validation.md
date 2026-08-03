@@ -80,6 +80,7 @@ The package currently exports:
 | `MongoDBEmbeddingError` | Invalid embedding output or translated generator failure |
 | `MongoDBCapabilityError` | Unsupported server, deployment, driver, or mode capability |
 | `MongoDBMappingError` | Stored or retrieved data cannot be mapped safely |
+| `MongoDBSerializationError` | Mapping subtype for values whose lossless serialized identity cannot be canonicalized |
 
 Later slices extend the taxonomy for index, filter, retrieval, persistence, timeout, and
 cancellation behavior. Direct APIs surface these errors; only documented Agent Framework adapter

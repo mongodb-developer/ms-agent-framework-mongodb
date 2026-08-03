@@ -5,6 +5,7 @@
   "canonical_mappings": {
     "dict_order": "insensitive",
     "ordered_dict_order": "sensitive_with_type_tag",
+    "instance_state_beyond_entries": "reject_with_serialization_error",
     "unsupported_subclass": "reject_with_migration_guidance"
   },
   "payload_versions": ["1.0"],
@@ -33,7 +34,9 @@
     "lineage_gaps_are_valid": true,
     "counter_expiration_is_refreshed": true,
     "counter_expiration_update": "atomic_max",
+    "missing_counter_recovery": "atomic_max_of_counter_and_retained_sequence",
     "permanent_checkpoint_disables_counter_expiration": true,
+    "ttl_deletion_order_dependency": false,
     "authorized_clear_run_deletes_counter": true
   }
 }

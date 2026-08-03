@@ -36,6 +36,7 @@ from agent_framework_mongodb import (
     MongoDBIndexMismatchError,
     MongoDBIndexMissingError,
     MongoDBMappingError,
+    MongoDBSerializationError,
     MongoDBTransientPersistenceError,
     MongoDBTransientRetrievalError,
 )
@@ -66,6 +67,9 @@ def evaluate_update_expression(expression: object, document: dict[str, Any]) -> 
     if "$add" in operators:
         values = evaluate_update_expression(operators["$add"], document)
         return sum(cast(list[int], values))
+    if "$max" in operators:
+        values = evaluate_update_expression(operators["$max"], document)
+        return max(cast(list[int], values))
     if "$ifNull" in operators:
         values = cast(
             list[object],
@@ -158,13 +162,23 @@ class FakeCollection:
         query: dict[str, Any],
         *,
         sort: list[tuple[str, int]] | None = None,
+        projection: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         if self.fail_reads:
             raise ConnectionFailure("private-host.invalid")
         matches = [document for document in self.documents if matches_query(document, query)]
         if sort:
             matches = FakeCursor(matches).sort(sort).documents
-        return copy.deepcopy(matches[0]) if matches else None
+        if not matches:
+            return None
+        result = copy.deepcopy(matches[0])
+        if projection is not None:
+            result = {
+                key: value
+                for key, value in result.items()
+                if projection.get(key, projection.get("_id", key == "_id"))
+            }
+        return result
 
     def find(self, query: dict[str, Any]) -> FakeCursor:
         if self.fail_reads:
@@ -288,6 +302,16 @@ class ApprovalResponse:
 
 class UnsupportedMapping(dict[str, int]):
     pass
+
+
+class StatefulMapping(dict[str, int]):
+    pass
+
+
+class SlottedStatefulMapping(dict[str, int]):
+    __slots__ = ("label",)
+
+    label: str
 
 
 class ApprovalExecutor(Executor):
@@ -528,6 +552,48 @@ async def test_unsupported_mapping_subclass_has_stable_migration_guidance() -> N
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mapping_type",
+    [OrderedDict, StatefulMapping, SlottedStatefulMapping],
+)
+async def test_mapping_instance_state_is_rejected_before_persistence(
+    mapping_type: type[Any],
+) -> None:
+    collection = FakeCollection()
+    type_key = f"{mapping_type.__module__}:{mapping_type.__qualname__}"
+    storage = MongoDBCheckpointStorage(
+        cast(Any, collection),
+        options=options(allowed_checkpoint_types=(type_key,)),
+    )
+    first = checkpoint(f"stateful-{mapping_type.__name__}")
+    first_mapping = mapping_type([("alpha", 1), ("beta", 2)])
+    first_mapping.label = "first"
+    first.state["mapping"] = first_mapping
+    second = copy.deepcopy(first)
+    second.state["mapping"].label = "second"
+
+    with pytest.raises(MongoDBSerializationError, match="mapping instance state.*migrate"):
+        await storage.save(first)
+    with pytest.raises(MongoDBSerializationError, match="mapping instance state.*migrate"):
+        await storage.save(second)
+    assert collection.documents == []
+
+
+@pytest.mark.asyncio
+async def test_stateless_allowlisted_mapping_subclass_remains_supported() -> None:
+    collection = FakeCollection()
+    type_key = f"{StatefulMapping.__module__}:{StatefulMapping.__qualname__}"
+    storage = MongoDBCheckpointStorage(
+        cast(Any, collection),
+        options=options(allowed_checkpoint_types=(type_key,)),
+    )
+    valid = checkpoint("stateless-mapping")
+    valid.state["mapping"] = StatefulMapping(alpha=1)
+
+    assert await storage.save(valid) == "stateless-mapping"
+
+
+@pytest.mark.asyncio
 async def test_concurrent_saves_have_unique_monotonic_sequence_order() -> None:
     collection = FakeCollection()
     storage = MongoDBCheckpointStorage(
@@ -546,6 +612,53 @@ async def test_concurrent_saves_have_unique_monotonic_sequence_order() -> None:
     latest = await storage.get_latest(workflow_name="approval-workflow")
     assert latest is not None
     assert latest.checkpoint_id == listed[-1].checkpoint_id
+
+
+@pytest.mark.asyncio
+async def test_missing_counter_recovers_from_retained_max_sequence() -> None:
+    collection = FakeCollection()
+    storage = MongoDBCheckpointStorage(
+        cast(Any, collection),
+        options=options(ttl=timedelta(hours=1)),
+    )
+    for index in range(3):
+        await storage.save(checkpoint(f"retained-{index}"))
+    collection.documents = checkpoint_documents(collection)
+
+    await storage.save(checkpoint("recovered"))
+
+    sequences = {
+        item["checkpoint_id"]: item["sequence"] for item in checkpoint_documents(collection)
+    }
+    assert sequences["recovered"] == 4
+
+
+@pytest.mark.asyncio
+async def test_concurrent_missing_counter_recovery_remains_unique_and_monotonic() -> None:
+    collection = FakeCollection()
+    first = MongoDBCheckpointStorage(
+        cast(Any, collection),
+        options=options(ttl=timedelta(hours=1)),
+    )
+    second = MongoDBCheckpointStorage(
+        cast(Any, collection),
+        options=options(ttl=timedelta(hours=1)),
+    )
+    for index in range(3):
+        await first.save(checkpoint(f"retained-concurrent-{index}"))
+    collection.documents = checkpoint_documents(collection)
+
+    await asyncio.gather(
+        first.save(checkpoint("recovered-first")),
+        second.save(checkpoint("recovered-second")),
+    )
+
+    recovered = [
+        item["sequence"]
+        for item in checkpoint_documents(collection)
+        if item["checkpoint_id"].startswith("recovered-")
+    ]
+    assert sorted(recovered) == [4, 5]
 
 
 @pytest.mark.asyncio

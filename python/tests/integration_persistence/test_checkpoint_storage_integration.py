@@ -1,3 +1,4 @@
+import asyncio
 import os
 import uuid
 from dataclasses import dataclass
@@ -9,6 +10,7 @@ from agent_framework import (
     Executor,
     Workflow,
     WorkflowBuilder,
+    WorkflowCheckpoint,
     WorkflowContext,
     handler,
     response_handler,
@@ -152,6 +154,45 @@ async def test_checkpoint_storage_resumption_lineage_order_isolation_and_cleanup
 
         with pytest.raises(MongoDBCheckpointNotFoundError):
             await second.load(latest.checkpoint_id)
+
+        checkpoint_scope = {
+            "_kind": "workflow_checkpoint",
+            "tenant_id": first.options.tenant_id,
+            "application_id": first.options.application_id,
+            "workflow_name": first.options.workflow_name,
+            "session_id": first.options.session_id,
+        }
+        retained = await collection.find_one(checkpoint_scope, sort=[("sequence", -1)])
+        assert retained is not None
+        retained_max = retained["sequence"]
+        counter_scope = {
+            **checkpoint_scope,
+            "_kind": "workflow_checkpoint_counter",
+        }
+        assert (await collection.delete_one(counter_scope)).deleted_count == 1
+        recovered_checkpoints: list[WorkflowCheckpoint] = []
+        for suffix in ("one", "two"):
+            recovered_payload = latest.to_dict()
+            recovered_payload["checkpoint_id"] = f"{prefix}-recovered-{suffix}"
+            recovered_checkpoints.append(WorkflowCheckpoint.from_dict(recovered_payload))
+        await asyncio.gather(*(first.save(item) for item in recovered_checkpoints))
+        recovered_documents = (
+            await collection.find(
+                {
+                    **checkpoint_scope,
+                    "checkpoint_id": {
+                        "$in": [item.checkpoint_id for item in recovered_checkpoints],
+                    },
+                }
+            )
+            .sort("sequence", 1)
+            .to_list(length=2)
+        )
+        assert [item["sequence"] for item in recovered_documents] == [
+            retained_max + 1,
+            retained_max + 2,
+        ]
+
         checkpoint_ids = await first.list_checkpoint_ids(workflow_name="deployment-approval")
         assert len(checkpoint_ids) > first.options.page_size
         cleared = await first.clear_run()

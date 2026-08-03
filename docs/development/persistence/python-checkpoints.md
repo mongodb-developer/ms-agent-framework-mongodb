@@ -89,9 +89,14 @@ logical representation of the public checkpoint dictionary rather than pickle
 bytes. Exact `dict` values are explicitly order-insensitive because their public
 checkpoint meaning is key/value state. `OrderedDict` carries its fully qualified
 type and entry sequence, so a reversed order conflicts; allowlisted/framework
-mapping subclasses also carry concrete type and sequence. Other mapping
-subclasses fail with stable migration guidance rather than being silently
-flattened. Sets are stably ordered, scalar and collection types carry explicit
+mapping subclasses also carry concrete type and sequence. `OrderedDict` and
+allowlisted mapping instances are accepted only when their lossless pickle
+reduction contains no instance state beyond entries. Attributes, assigned slots,
+constructor state such as a `defaultdict` factory, list state, or a custom state
+setter raise `MongoDBSerializationError` before sequence allocation, with
+migration guidance to a plain `dict` or stateless `OrderedDict`. Other mapping
+subclasses fail with stable guidance rather than being silently flattened. Sets
+are stably ordered, scalar and collection types carry explicit
 tags, and framework/application dataclasses or public `to_dict` values carry
 stable type identities. The same logical checkpoint therefore hashes
 identically across processes and `PYTHONHASHSEED` values without discarding
@@ -110,7 +115,11 @@ loading. Python/.NET physical checkpoint interoperability is not claimed.
 
 A separate, scoped counter document uses an atomic aggregation-pipeline upsert.
 Concurrent saves therefore receive unique, positive, monotonic sequences. When
-TTL is configured, the same update increments the sequence and extends
+allocating, storage first reads the greatest retained checkpoint sequence in the
+exact authorized scope. The atomic upsert computes the allocation from the
+maximum of that observed value and the current counter before adding the batch
+count. Concurrent recovery after a missing counter therefore cannot reset or
+collide with retained sequences. When TTL is configured, the same update extends
 the counter's `expires_at` to the maximum of its current and requested values;
 an out-of-order shorter TTL can never move it backward. A non-expiring
 checkpoint atomically changes `retention_mode` to `permanent` and removes
@@ -157,7 +166,10 @@ Construction, save, load, and workflow hooks never mutate indexes.
 The scoped prefix is `scope_discriminator`, `workflow_name`, and `session_id`.
 Identity, sequence, lineage, and checkpoint TTL indexes have a checkpoint-only
 partial filter, so the internal counter cannot collide with checkpoint
-uniqueness. The counter TTL index has a counter-only partial filter.
+uniqueness. The separate counter TTL index has a counter-only partial filter.
+MongoDB may process the two TTL indexes in either order; correctness never relies
+on the counter outliving checkpoints because allocation recovers from the indexed
+retained maximum.
 
 Runtime privileges are find, insert, atomic update/upsert for the sequence
 counter, and targeted delete on the checkpoint collection. Provisioning also
@@ -167,10 +179,11 @@ requires `createIndex`; validation requires index-list access.
 
 Missing authorized records raise `MongoDBCheckpointNotFoundError`, which is both
 an integration retrieval error and the framework's
-`WorkflowCheckpointException`. Configuration, mapping, concurrency,
-authorization, transient retrieval, transient persistence, and other MongoDB
-failures use the package's stable categories while preserving driver exceptions
-as `__cause__`. `asyncio.CancelledError` is never caught.
+`WorkflowCheckpointException`. Noncanonical lossless serialization raises
+`MongoDBSerializationError`, a mapping-error subtype. Configuration, mapping,
+concurrency, authorization, transient retrieval, transient persistence, and
+other MongoDB failures use the package's stable categories while preserving
+driver exceptions as `__cause__`. `asyncio.CancelledError` is never caught.
 
 Injected clients and collections remain caller-owned. A storage created from a
 connection string owns its PyMongo `AsyncMongoClient`; `close()` and the async
@@ -183,9 +196,10 @@ collection/database names, filters, driver messages, hosts, and credentials.
 ## Verification
 
 Public serialization, actual workflow pause/resume, cross-process canonical
-idempotency, conflict, lineage, concurrent sequence, complete inherited listing,
-bounded pagination, latest, scope cleanup, counter TTL, TTL-gap, compatibility,
-index, cancellation, error, and ownership tests are in
+idempotency, stateful-mapping rejection, conflict, lineage, concurrent sequence,
+missing-counter recovery, complete inherited listing, bounded pagination, latest,
+scope cleanup, counter TTL, TTL-gap, compatibility, index, cancellation, error,
+and ownership tests are in
 `python/tests/unit/test_checkpoint_storage.py`. Language-neutral outcomes are in
 `python/tests/contracts/fixtures/checkpoint_storage_contract.json`.
 Credential-gated real-deployment coverage is in

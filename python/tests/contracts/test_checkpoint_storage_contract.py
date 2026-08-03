@@ -37,11 +37,17 @@ def test_checkpoint_storage_contract_matches_public_surface() -> None:
     assert contract["pagination"]["inherited_lists"] == "all_records_via_bounded_pages"
     assert contract["retention"]["counter_expiration_is_refreshed"]
     assert contract["retention"]["counter_expiration_update"] == "atomic_max"
+    assert (
+        contract["retention"]["missing_counter_recovery"]
+        == "atomic_max_of_counter_and_retained_sequence"
+    )
     assert contract["retention"]["permanent_checkpoint_disables_counter_expiration"]
+    assert not contract["retention"]["ttl_deletion_order_dependency"]
     assert contract["retention"]["authorized_clear_run_deletes_counter"]
     assert contract["canonical_mappings"] == {
         "dict_order": "insensitive",
         "ordered_dict_order": "sensitive_with_type_tag",
+        "instance_state_beyond_entries": "reject_with_serialization_error",
         "unsupported_subclass": "reject_with_migration_guidance",
     }
     assert [item["name"] for item in contract["indexes"]] == [

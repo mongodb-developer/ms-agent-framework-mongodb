@@ -49,6 +49,7 @@ from ..errors import (
     MongoDBMappingError,
     MongoDBPersistenceError,
     MongoDBRetrievalError,
+    MongoDBSerializationError,
     MongoDBTransientPersistenceError,
     MongoDBTransientRetrievalError,
 )
@@ -447,7 +448,18 @@ class MongoDBCheckpointStorage(CheckpointStorage):
         now: datetime,
         expires_at: datetime | None,
     ) -> int:
-        update = _counter_update_pipeline(now=now, expires_at=expires_at)
+        retained = await self._find_one(
+            self._partition(self.options.workflow_name),
+            sort=[("sequence", DESCENDING)],
+            projection={"sequence": True, "_id": False},
+        )
+        retained_max_sequence = _document_sequence(retained) if retained is not None else 0
+        update = _counter_update_pipeline(
+            now=now,
+            expires_at=expires_at,
+            retained_max_sequence=retained_max_sequence,
+            batch_count=1,
+        )
         try:
             counter = await self.collection.find_one_and_update(
                 self._counter_identity(),
@@ -468,9 +480,10 @@ class MongoDBCheckpointStorage(CheckpointStorage):
         query: MongoDocument,
         *,
         sort: list[tuple[str, int]] | None = None,
+        projection: MongoDocument | None = None,
     ) -> MongoDocument | None:
         try:
-            return await self.collection.find_one(query, sort=sort)
+            return await self.collection.find_one(query, sort=sort, projection=projection)
         except PyMongoError as exc:
             raise _translate_mongo_error(exc, "retrieval") from exc
 
@@ -849,6 +862,7 @@ def _canonical_checkpoint_value(
             pairs.sort(key=lambda pair: _canonical_sort_key(pair[0]))
             return {"type": "mapping", "items": pairs}
         if type(value) is OrderedDict:
+            _reject_mapping_instance_state(cast(object, value))
             ordered_mapping = cast(Mapping[object, object], value)
             return {
                 "type": "ordered_mapping",
@@ -883,6 +897,7 @@ def _canonical_checkpoint_value(
                     "or register a lossless ordered mapping type in "
                     "allowed_checkpoint_types."
                 )
+            _reject_mapping_instance_state(mapping_object)
             ordered_mapping = cast(Mapping[object, object], value)
             return {
                 "type": "ordered_mapping",
@@ -1013,9 +1028,21 @@ def _counter_update_pipeline(
     *,
     now: datetime,
     expires_at: datetime | None,
+    retained_max_sequence: int,
+    batch_count: int,
 ) -> list[MongoDocument]:
     common: MongoDocument = {
-        "sequence": {"$add": [{"$ifNull": ["$sequence", 0]}, 1]},
+        "sequence": {
+            "$add": [
+                {
+                    "$max": [
+                        {"$ifNull": ["$sequence", 0]},
+                        retained_max_sequence,
+                    ]
+                },
+                batch_count,
+            ]
+        },
         "created_at": {"$ifNull": ["$created_at", now]},
     }
     if expires_at is None:
@@ -1072,6 +1099,43 @@ def _counter_update_pipeline(
             }
         },
     ]
+
+
+def _reject_mapping_instance_state(value: object) -> None:
+    try:
+        reduction = value.__reduce_ex__(pickle.HIGHEST_PROTOCOL)
+    except (AttributeError, TypeError, pickle.PickleError) as exc:
+        raise MongoDBSerializationError(
+            "Checkpoint mapping instance state cannot be verified losslessly; "
+            "migrate it to a plain dict or stateless OrderedDict."
+        ) from exc
+    if not isinstance(reduction, tuple) or len(reduction) < 5:
+        raise MongoDBSerializationError(
+            "Checkpoint mapping instance state uses unsupported serialization; "
+            "migrate it to a plain dict or stateless OrderedDict."
+        )
+
+    reducer, arguments, state, list_iterator, _ = reduction[:5]
+    state_setter = reduction[5] if len(reduction) > 5 else None
+    mapping_type = type(value)
+    if mapping_type is OrderedDict:
+        stateless_reduction = reducer is OrderedDict and arguments == ()
+    else:
+        stateless_reduction = (
+            getattr(reducer, "__module__", None) == "copyreg"
+            and getattr(reducer, "__name__", None) == "__newobj__"
+            and arguments == (mapping_type,)
+        )
+    if (
+        state is not None
+        or list_iterator is not None
+        or state_setter is not None
+        or not stateless_reduction
+    ):
+        raise MongoDBSerializationError(
+            "Checkpoint mapping instance state beyond entries is not canonical; "
+            "migrate it to a plain dict or stateless OrderedDict."
+        )
 
 
 def _encode_cursor(sequence: int, checkpoint_id: str) -> str:
