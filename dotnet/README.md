@@ -350,7 +350,8 @@ Optional variables are `MONGODB_CHECKPOINT_COLLECTION`,
 `MONGODB_CHECKPOINT_WORKFLOW_ID`, `MONGODB_CHECKPOINT_TENANT_ID`, and
 `MONGODB_CHECKPOINT_SESSION_ID`. Set `MONGODB_CHECKPOINT_CLEAR=true` only when
 the sample's checkpoints should be removed. The MongoDB principal needs
-collection read/write privileges, plus index-management privileges to run
+collection read/write privileges (including `update`/`findAndModify` for the
+sequence-counter document), plus index-management privileges to run
 `EnsureIndexesAsync`, and the target deployment must support multi-document
 transactions (a replica set, sharded cluster, or `mongos`). No Python
 Workflow Checkpoint Store exists yet; see the

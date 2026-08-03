@@ -242,9 +242,12 @@ required `doc_type` isolation (for example a hand-created or legacy index)
 fails validation with `MongoDBIndexMismatchException` rather than being
 silently accepted. Neither index is ever created implicitly by construction,
 saves, or retrieval; provisioning is always an explicit, separate call.
-Runtime privileges are find, insert, and scoped delete, plus transaction
-usage (a replica set, sharded cluster, or `mongos` deployment); provisioning
-additionally needs index-management privileges.
+Runtime privileges are find, insert, scoped delete, and update/`findAndModify`
+(the latter required by `AllocateSequenceAsync`'s `FindOneAndUpdateAsync` with
+`$inc` against the per-session sequence-counter document, upserted inside the
+same transaction as the checkpoint insert), plus transaction usage (a replica
+set, sharded cluster, or `mongos` deployment); provisioning additionally needs
+index-management privileges.
 
 Continuation tokens are `Base64Url(payload) + "." + Base64Url(signature)`,
 where `payload` is length-prefixed binary (`[1-byte format version]
