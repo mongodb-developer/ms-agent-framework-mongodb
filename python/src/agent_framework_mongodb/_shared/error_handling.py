@@ -6,8 +6,10 @@ from collections.abc import Mapping
 from typing import Literal, cast
 
 from pymongo.errors import (
+    ConfigurationError,
     ConnectionFailure,
     ExecutionTimeout,
+    InvalidName,
     NetworkTimeout,
     OperationFailure,
     PyMongoError,
@@ -84,6 +86,8 @@ def translate_pymongo_error(
     """Translate all PyMongo failures by structured type/code/label only."""
     code, code_name = _structured_identity(error)
     label = _feature_label(feature)
+    if isinstance(error, (ConfigurationError, InvalidName)):
+        return MongoDBConfigurationError(f"MongoDB rejected the configured {label} operation.")
     if code in _AUTHORIZATION_CODES or code_name in _AUTHORIZATION_NAMES:
         return MongoDBAuthorizationError("MongoDB authentication or authorization failed.")
     if code == 27 or code_name in _INDEX_MISSING_NAMES:

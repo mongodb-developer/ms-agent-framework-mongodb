@@ -7,8 +7,12 @@ import functools
 import logging
 import time
 from collections.abc import Callable, Collection, Coroutine
-from types import CoroutineType
-from typing import Any, ParamSpec, TypeVar, cast
+from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar, cast
+
+if TYPE_CHECKING:
+    from types import CoroutineType as _CoroutineType
+else:
+    _CoroutineType = Coroutine
 
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
@@ -76,13 +80,13 @@ def instrument(
     result_count: Callable[[tuple[object, ...], dict[str, object], object], int] | None = None,
 ) -> Callable[
     [Callable[_P, Coroutine[Any, Any, _T]]],
-    Callable[_P, CoroutineType[Any, Any, _T]],
+    Callable[_P, _CoroutineType[Any, Any, _T]],
 ]:
     """Instrument one async public seam with an approved attribute allowlist."""
 
     def decorate(
         function: Callable[_P, Coroutine[Any, Any, _T]],
-    ) -> Callable[_P, CoroutineType[Any, Any, _T]]:
+    ) -> Callable[_P, _CoroutineType[Any, Any, _T]]:
         @functools.wraps(function)
         async def observed(*args: _P.args, **kwargs: _P.kwargs) -> _T:
             started = time.monotonic()
@@ -151,7 +155,7 @@ def instrument(
                 )
                 return result
 
-        return cast(Callable[_P, CoroutineType[Any, Any, _T]], observed)
+        return cast(Callable[_P, _CoroutineType[Any, Any, _T]], observed)
 
     return decorate
 

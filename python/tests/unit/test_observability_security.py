@@ -8,8 +8,9 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from agent_framework import AgentSession
 from opentelemetry import trace
-from pymongo.errors import NetworkTimeout, OperationFailure
+from pymongo.errors import ConfigurationError, InvalidName, NetworkTimeout, OperationFailure
 
 from agent_framework_mongodb import (
     MongoDBAuthorizationError,
@@ -30,13 +31,23 @@ from agent_framework_mongodb import (
 
 
 class _Collection:
-    def __init__(self, error: BaseException | None = None) -> None:
-        self.error = error
+    def __init__(
+        self,
+        read_error: BaseException | None = None,
+        write_error: BaseException | None = None,
+    ) -> None:
+        self.read_error = read_error
+        self.write_error = write_error
 
     async def find_one(self, query: dict[str, Any]) -> None:
         del query
-        if self.error is not None:
-            raise self.error
+        if self.read_error is not None:
+            raise self.read_error
+
+    async def insert_one(self, document: dict[str, Any]) -> None:
+        del document
+        if self.write_error is not None:
+            raise self.write_error
 
 
 class _Span:
@@ -122,7 +133,7 @@ async def test_failure_telemetry_is_redacted_and_authorization_propagates(
 ) -> None:
     caplog.set_level(logging.WARNING, logger="agent_framework_mongodb")
     error = OperationFailure(
-        "mongodb://credential@private-host.invalid/sensitive-database",
+        "credential private-host.invalid sensitive-database",
         code=13,
     )
 
@@ -166,6 +177,29 @@ async def test_public_driver_errors_use_stable_integration_categories(
     assert raised.value.__cause__ is driver_error
     assert _log_field(caplog.records[-1], "error_category") == category
     assert _log_field(caplog.records[-1], "result_count") == 0
+
+
+@pytest.mark.parametrize("error_type", [ConfigurationError, InvalidName])
+@pytest.mark.parametrize("operation", ["retrieval", "persistence"])
+async def test_native_driver_configuration_errors_propagate_in_all_direct_contexts(
+    error_type: type[ConfigurationError],
+    operation: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    driver_error = error_type("secret")
+    collection = _Collection(
+        read_error=driver_error if operation == "retrieval" else None,
+        write_error=driver_error if operation == "persistence" else None,
+    )
+
+    with pytest.raises(MongoDBConfigurationError) as raised:
+        if operation == "retrieval":
+            await _store(collection).get("session")
+        else:
+            await _store(collection).create("session", AgentSession())
+
+    assert raised.value.__cause__ is driver_error
+    assert _log_field(caplog.records[-1], "error_category") == "configuration"
 
 
 async def test_cancellation_is_logged_without_suppression(
