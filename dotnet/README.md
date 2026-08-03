@@ -217,6 +217,115 @@ and the
 [.NET Session Store migration guide](../docs/development/persistence/dotnet-session-store-migration.md).
 
 
+## Workflow Checkpoint Store
+
+`Microsoft.Agents.AI.Workflows` (verified 1.13.0 through 1.16.0; see
+[contract verification](../docs/development/persistence/dotnet-checkpoint-contract-research.md))
+publishes a real public checkpoint-storage extension point,
+`Microsoft.Agents.AI.Workflows.Checkpointing.JsonCheckpointStore`, and
+`MongoDBCheckpointStore` derives from it directly and implements all three
+required abstract hooks. Every constructor validates the resolved
+`Microsoft.Agents.AI.Workflows` assembly version against the verified range
+`[1.13.0, 1.17.0)` and fails closed (`MongoDBConfigurationException`) for any
+other resolved version, and the `PackageReference` itself is pinned to that
+same range.
+
+```csharp
+await using var store = new MongoDBCheckpointStore(
+    collection,
+    new MongoDBCheckpointStoreOptions
+    {
+        WorkflowId = "my-workflow",
+        DefaultExpiration = TimeSpan.FromDays(30),
+    });
+
+await store.EnsureIndexesAsync();
+
+// CheckpointManager.CreateJson accepts MongoDBCheckpointStore as a real
+// ICheckpointStore<JsonElement> -- a drop-in JsonCheckpointStore.
+CheckpointManager manager = CheckpointManager.CreateJson(store);
+
+CheckpointInfo root = await store.CreateCheckpointAsync("run-7", payload);
+CheckpointInfo next = await store.CreateCheckpointAsync("run-7", nextPayload, root);
+
+// Explicit, cancellable facade with a caller-supplied checkpoint id:
+MongoDBCheckpointRecord saved = await store.SaveCheckpointAsync(
+    "run-7", "checkpoint-42", payload, parentCheckpointId: root.CheckpointId);
+
+MongoDBCheckpointRecord? latest = await store.GetLatestCheckpointAsync("run-7");
+MongoDBCheckpointPage page = await store.ListCheckpointsAsync("run-7", limit: 100);
+await store.DeleteCheckpointAsync("run-7", "checkpoint-42");
+```
+
+Checkpoints are **immutable historical records** stored in a collection and
+document `doc_type` kept entirely separate from Session Store's session
+documents. A canonical tenant (optional)/workflow (required) authorization
+scope is applied to every query before any sort, limit, or delete. Each
+checkpoint carries a monotonically, atomically allocated `sequence` number
+that establishes commit order independent of wall-clock timestamps --
+`GetLatestCheckpointAsync` and pagination always order by `sequence`, never
+`created_at`. The exact framework-produced checkpoint JSON payload is stored
+as the serializer's exact UTF-8 bytes wrapped verbatim in a BSON `Binary`
+field, never re-parsed through `BsonDocument`, so unusual numeric literals
+round-trip byte-for-byte.
+
+Saving under an already-used checkpoint identifier with identical payload
+bytes and identical parent lineage converges (idempotent retry, no new
+sequence allocated, `expires_at` never extended); saving with a *different*
+payload or a *different* parent throws `MongoDBConcurrencyException` -- a
+real conflict against an immutable record is never silently overwritten.
+Branched lineage (multiple children of the same parent) is fully supported
+and independently retrievable. `ListCheckpointsAsync` is bounded per call and
+returns an opaque, scoped, versioned, tamper-rejecting continuation token for
+the next page; a token from a different tenant/workflow scope, or one that
+has been altered, is rejected with `MongoDBConfigurationException` rather
+than silently returning wrong-scope or skipped data.
+
+The raw framework hooks (`CreateCheckpointAsync`, `RetrieveCheckpointAsync`,
+`RetrieveIndexAsync`) accept no `CancellationToken` -- a real, verified
+`JsonCheckpointStore` contract constraint, not a design choice -- so
+`MongoDBCheckpointStore` additionally exposes a richer, explicitly
+cancellable facade (`SaveCheckpointAsync`, `LoadCheckpointAsync`,
+`GetLatestCheckpointAsync`, `ListCheckpointsAsync`, `DeleteCheckpointAsync`)
+sharing the same internal storage core. `RetrieveCheckpointAsync` throws
+`KeyNotFoundException` when a checkpoint is absent (matching
+`ICheckpointManager`'s documented convention); `LoadCheckpointAsync` instead
+returns `null`.
+
+Every save/load/delete filter also requires the stored document's
+`schema_version` to match this build's supported constant. A scoped
+checkpoint that exists but carries an incompatible marker is detected
+read-only, before any mutation is attempted, and raises a migration
+exception; see the
+[.NET Workflow Checkpoint Store migration guide](../docs/development/persistence/dotnet-checkpoint-store-migration.md)
+for the required manual remediation (there is no automated migration).
+
+Injected clients, databases, and collections remain caller-owned; only a
+client created by the connection-string constructor is disposed by the
+store, including when a later construction step fails after the client was
+created.
+
+Run the sample after setting `MONGODB_URI` and `MONGODB_DATABASE`:
+
+```powershell
+dotnet run --project samples\WorkflowCheckpointResumeQuickstart\WorkflowCheckpointResumeQuickstart.csproj
+```
+
+Optional variables are `MONGODB_CHECKPOINT_COLLECTION`,
+`MONGODB_CHECKPOINT_WORKFLOW_ID`, `MONGODB_CHECKPOINT_TENANT_ID`, and
+`MONGODB_CHECKPOINT_SESSION_ID`. Set `MONGODB_CHECKPOINT_CLEAR=true` only when
+the sample's checkpoints should be removed. The MongoDB principal needs
+collection read/write privileges, plus index-management privileges to run
+`EnsureIndexesAsync`. No Python Workflow Checkpoint Store exists yet; see the
+[implementation map](../docs/spec/implementation-map.md) for cross-language
+sequencing. See the
+[.NET Workflow Checkpoint Store developer guide](../docs/development/persistence/dotnet-checkpoint-store.md),
+the
+[.NET Workflow Checkpoint Store contract verification](../docs/development/persistence/dotnet-checkpoint-contract-research.md),
+and the
+[.NET Workflow Checkpoint Store migration guide](../docs/development/persistence/dotnet-checkpoint-store-migration.md).
+
+
 ## RAG contracts, typed filters, Vector Search (ANN/ENN), FullText, and HybridRrf
 
 `MongoDBSearchMode` (`VectorAnn`, `VectorEnn`, `FullText`, `HybridRrf`), the bounded typed `MongoDBRAGFilter` AST,
