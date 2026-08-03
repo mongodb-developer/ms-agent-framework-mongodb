@@ -230,6 +230,117 @@ public sealed class MongoDBRAGIndexManagerTests
     }
 
     [Fact]
+    public async Task CreateVectorSucceedsWhenTheIndexIsMissing()
+    {
+        var state = new RAGCollectionState();
+        MongoDBRAGIndexManager manager = CreateVectorManager(state);
+
+        MongoDBIndexInfo info = await manager.CreateVectorSearchIndexAsync();
+
+        Assert.NotNull(state.CreatedSearchIndex);
+        Assert.Equal("facade_vector", info.Name);
+        Assert.Equal(MongoDBIndexStatus.Ready, info.Status);
+    }
+
+    [Fact]
+    public async Task CreateVectorFailsImmediatelyWhenTheIndexAlreadyExistsWithoutAttemptingTheDriverCall()
+    {
+        var state = new RAGCollectionState
+        {
+            SearchIndexes = [RAGIndexFixtures.ValidVectorIndex("facade_vector")],
+        };
+        MongoDBRAGIndexManager manager = CreateVectorManager(state);
+
+        // Create-only pre-checks existence before ever calling CreateOneAsync: an explicit create-only caller is
+        // told something was already there rather than silently proceeding (unlike the idempotent Ensure path).
+        await Assert.ThrowsAsync<MongoDBIndexAlreadyExistsException>(() => manager.CreateVectorSearchIndexAsync());
+
+        Assert.Equal(0, state.CreateOneCallCount);
+    }
+
+    [Fact]
+    public async Task CreateSearchFailsWhenAConcurrentCallerWinsTheCreateRace()
+    {
+        var state = new RAGCollectionState
+        {
+            CreateException = RAGIndexFixtures.CommandException(68, "index already exists"),
+        };
+        state.SearchIndexSnapshots.Enqueue([]);
+        MongoDBRAGIndexManager manager = CreateSearchManager(state);
+
+        // The pre-check found nothing, but a rival caller won the create race in between: the driver call itself
+        // reports "already exists", which create-only must still surface (never silently swallowed the way
+        // Ensure's idempotent create is).
+        await Assert.ThrowsAsync<MongoDBIndexAlreadyExistsException>(() => manager.CreateSearchIndexAsync());
+
+        Assert.Equal(1, state.CreateOneCallCount);
+    }
+
+    [Fact]
+    public async Task CreateHybridCreatesBothIndexesAndRequiresBothDefinitions()
+    {
+        MongoDBRAGIndexManager vectorOnly = CreateVectorManager(new RAGCollectionState());
+        await Assert.ThrowsAsync<MongoDBConfigurationException>(() => vectorOnly.CreateHybridAsync());
+
+        var state = new RAGCollectionState();
+        MongoDBRAGIndexManager manager = CreateHybridManager(state);
+
+        await manager.CreateHybridAsync();
+
+        IReadOnlyList<MongoDBIndexInfo> indexes = await manager.ListIndexesAsync();
+        Assert.Equal(2, indexes.Count);
+    }
+
+    [Fact]
+    public async Task EnsureVectorThrowsMismatchWhenARivalConcurrentCreateWonWithAnIncompatibleDefinition()
+    {
+        var state = new RAGCollectionState
+        {
+            CreateException = RAGIndexFixtures.CommandException(68, "index already exists"),
+        };
+        state.SearchIndexSnapshots.Enqueue([]);
+        state.SearchIndexSnapshots.Enqueue([RAGIndexFixtures.ValidVectorIndex("facade_vector", dimensions: 99)]);
+        MongoDBRAGIndexManager manager = CreateVectorManager(state);
+
+        // Unlike EnsureIsIdempotentWhenAConcurrentCallerAlreadyCreatedTheIndex (a compatible rival wins), here the
+        // rival concurrent creator won with an *incompatible* definition (different dimensions); Ensure's
+        // mandatory post-create re-inspection must still catch this rather than silently accepting the race.
+        await Assert.ThrowsAsync<MongoDBIndexMismatchException>(() => manager.EnsureVectorSearchIndexAsync());
+    }
+
+    [Fact]
+    public async Task EnsureSearchUpdatesWhenExistingIndexDoesNotMatchDefinition()
+    {
+        var state = new RAGCollectionState();
+        state.SearchIndexSnapshots.Enqueue(
+            [RAGIndexFixtures.ValidSearchIndex("facade_search", textFieldNames: ["other_text"])]);
+        state.SearchIndexSnapshots.Enqueue([RAGIndexFixtures.ValidSearchIndex("facade_search")]);
+        MongoDBRAGIndexManager manager = CreateSearchManager(state);
+
+        MongoDBIndexInfo info = await manager.EnsureSearchIndexAsync();
+
+        Assert.Equal(1, state.UpdateCallCount);
+        Assert.Equal("facade_search", state.UpdatedIndexName);
+        Assert.Null(state.CreatedSearchIndex);
+        Assert.Equal(MongoDBIndexStatus.Ready, info.Status);
+    }
+
+    [Fact]
+    public async Task EnsureSearchThrowsMismatchWhenTheIndexStillDoesNotMatchAfterUpdating()
+    {
+        var state = new RAGCollectionState
+        {
+            SearchIndexes = [RAGIndexFixtures.ValidSearchIndex("facade_search", textFieldNames: ["other_text"])],
+        };
+        MongoDBRAGIndexManager manager = CreateSearchManager(state);
+
+        await Assert.ThrowsAsync<MongoDBIndexMismatchException>(() => manager.EnsureSearchIndexAsync());
+
+        Assert.Equal(1, state.UpdateCallCount);
+        Assert.Null(state.CreatedSearchIndex);
+    }
+
+    [Fact]
     public async Task EnsureIsIdempotentWhenAConcurrentCallerAlreadyCreatedTheIndex()
     {
         var state = new RAGCollectionState
@@ -243,6 +354,40 @@ public sealed class MongoDBRAGIndexManagerTests
         MongoDBIndexInfo info = await manager.EnsureVectorSearchIndexAsync();
 
         Assert.Equal(MongoDBIndexStatus.Ready, info.Status);
+    }
+
+    [Fact]
+    public async Task EnsureVectorUpdatesWhenExistingIndexDoesNotMatchDefinition()
+    {
+        var state = new RAGCollectionState();
+        state.SearchIndexSnapshots.Enqueue([RAGIndexFixtures.ValidVectorIndex("facade_vector", dimensions: 99)]);
+        state.SearchIndexSnapshots.Enqueue([RAGIndexFixtures.ValidVectorIndex("facade_vector")]);
+        MongoDBRAGIndexManager manager = CreateVectorManager(state);
+
+        MongoDBIndexInfo info = await manager.EnsureVectorSearchIndexAsync();
+
+        Assert.Equal(1, state.UpdateCallCount);
+        Assert.Equal("facade_vector", state.UpdatedIndexName);
+        Assert.Null(state.CreatedSearchIndex);
+        Assert.Equal(MongoDBIndexStatus.Ready, info.Status);
+    }
+
+    [Fact]
+    public async Task EnsureVectorThrowsMismatchWhenTheIndexStillDoesNotMatchAfterUpdating()
+    {
+        // The fake update below does not actually change the server-side definition (unlike a real deployment),
+        // so the mandatory post-update re-inspection still observes the same mismatched index -- proving Ensure's
+        // final validation is not skipped just because an update was attempted.
+        var state = new RAGCollectionState
+        {
+            SearchIndexes = [RAGIndexFixtures.ValidVectorIndex("facade_vector", dimensions: 99)],
+        };
+        MongoDBRAGIndexManager manager = CreateVectorManager(state);
+
+        await Assert.ThrowsAsync<MongoDBIndexMismatchException>(() => manager.EnsureVectorSearchIndexAsync());
+
+        Assert.Equal(1, state.UpdateCallCount);
+        Assert.Null(state.CreatedSearchIndex);
     }
 
     [Fact]
@@ -306,11 +451,11 @@ public sealed class MongoDBRAGIndexManagerTests
     public async Task EnsureWithWaitUntilReadyPollsThroughBuildingToReady()
     {
         var state = new RAGCollectionState();
-        state.SearchIndexSnapshots.Enqueue([]);
-        state.SearchIndexSnapshots.Enqueue([]);
         BsonDocument building = RAGIndexFixtures.ValidVectorIndex("facade_vector");
         building["status"] = "BUILDING";
         building["queryable"] = false;
+        state.SearchIndexSnapshots.Enqueue([]);
+        state.SearchIndexSnapshots.Enqueue([building]);
         state.SearchIndexSnapshots.Enqueue([building]);
         state.SearchIndexSnapshots.Enqueue([RAGIndexFixtures.ValidVectorIndex("facade_vector")]);
         MongoDBRAGIndexManager manager = CreateVectorManager(state);

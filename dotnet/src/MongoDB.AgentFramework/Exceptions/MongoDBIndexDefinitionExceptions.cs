@@ -45,3 +45,26 @@ public sealed class MongoDBIndexFailedException : MongoDBIndexException
     {
     }
 }
+
+/// <summary>
+/// Raised by an explicit, create-only index operation (for example a facade's <c>Create*Async</c>) when the named
+/// index already exists. Unlike the idempotent <c>Ensure*Async</c> reconciliation operation -- which treats a
+/// concurrent creator reaching the same end state as a successful no-op -- a create-only operation is
+/// intentionally not idempotent: docs/spec/features/index-management.md lists <c>create index</c> and
+/// <c>ensure expected definition</c> as distinct operations, and a caller that explicitly asked to create must be
+/// told when there was already something there instead of silently proceeding.
+/// </summary>
+public sealed class MongoDBIndexAlreadyExistsException : MongoDBIndexException
+{
+    /// <summary>Initializes an index-already-exists exception.</summary>
+    public MongoDBIndexAlreadyExistsException(string message)
+        : base(message)
+    {
+    }
+
+    /// <summary>Initializes an index-already-exists exception while preserving its underlying cause.</summary>
+    public MongoDBIndexAlreadyExistsException(string message, Exception innerException)
+        : base(message, innerException)
+    {
+    }
+}

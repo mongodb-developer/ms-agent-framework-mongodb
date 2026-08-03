@@ -67,14 +67,30 @@ public sealed class MongoDBMemoryIndexManager : IAsyncDisposable
         string databaseName,
         string collectionName,
         MongoDBVectorSearchIndexDefinition definition)
-        : this(ConnectClient(connectionString, databaseName, collectionName), definition)
+        : this(connectionString, databaseName, collectionName, definition, clientFactory: null)
+    {
+    }
+
+    /// <summary>
+    /// Test-only seam mirroring <see cref="MongoClientFactory.FromConnectionString"/>'s existing
+    /// <c>clientFactory</c> override. It exists solely so tests can substitute the underlying
+    /// <see cref="IMongoClient"/> and prove that a construction failure occurring after the owned client is
+    /// created (for example resolving the database/collection) still disposes it; it is internal because it is
+    /// not part of the public surface.
+    /// </summary>
+    internal MongoDBMemoryIndexManager(
+        string connectionString,
+        string databaseName,
+        string collectionName,
+        MongoDBVectorSearchIndexDefinition definition,
+        Func<string, IMongoClient>? clientFactory)
+        : this(Connect(connectionString, databaseName, collectionName, definition, clientFactory))
     {
     }
 
     private MongoDBMemoryIndexManager(
-        (OwnedResource<IMongoClient> Client, IMongoCollection<BsonDocument> Collection) connected,
-        MongoDBVectorSearchIndexDefinition definition)
-        : this(connected.Collection, definition)
+        (OwnedResource<IMongoClient> Client, IMongoCollection<BsonDocument> Collection, MongoDBVectorSearchIndexDefinition Definition) connected)
+        : this(connected.Collection, connected.Definition)
     {
         _client = connected.Client;
     }
@@ -121,16 +137,51 @@ public sealed class MongoDBMemoryIndexManager : IAsyncDisposable
     }
 
     /// <summary>
-    /// Creates the configured index if missing, and optionally waits for it to become queryable. A concurrent
-    /// caller's create racing this one is treated as a successful no-op (idempotent Ensure): the desired end state
-    /// was already achieved. Never retries a definitively wrong (mismatched) definition automatically.
+    /// Creates the configured index. Fails immediately if it already exists (docs/spec/features/index-management.md
+    /// lists <c>create index</c> as distinct from <c>ensure expected definition</c>): unlike
+    /// <see cref="EnsureIndexAsync"/>, a caller that explicitly asked to create-only is told when there was
+    /// already something there instead of silently proceeding. After creation (including if a concurrent creator
+    /// won a race to create the same index first), this re-inspects the index and validates it actually matches
+    /// <see cref="Definition"/> before returning.
+    /// </summary>
+    /// <param name="cancellationToken">A token used to cancel creation.</param>
+    /// <exception cref="MongoDBIndexAlreadyExistsException">The configured index already exists.</exception>
+    /// <exception cref="MongoDBIndexMismatchException">The created index does not match <see cref="Definition"/>.</exception>
+    /// <exception cref="MongoDBIndexFailedException">The created index reports a terminal build failure.</exception>
+    /// <exception cref="MongoDBIndexPrivilegeException">The connected identity lacks index-creation privileges.</exception>
+    public async Task<MongoDBIndexInfo> CreateIndexAsync(CancellationToken cancellationToken = default)
+    {
+        BsonDocument index = await MongoDBSearchIndexes.CreateOnlyAsync(
+            _collection.SearchIndexes,
+            Definition.IndexName,
+            SearchIndexType.VectorSearch,
+            VectorSearchIndexEquivalence.BuildDefinition(Definition),
+            index => Validate(index, requireReady: false),
+            MapAlreadyExistsException,
+            MapCreateException,
+            MapInspectionException,
+            cancellationToken).ConfigureAwait(false);
+        return ToIndexInfo(index);
+    }
+
+    /// <summary>
+    /// Creates the configured index if missing, or updates it if an existing index does not match
+    /// <see cref="Definition"/> (docs/spec/features/index-management.md's <c>ensure expected definition</c>
+    /// operation: explicit create/update plus optional bounded polling), then optionally waits for it to become
+    /// queryable. A concurrent caller's create racing this one to the same end state is a successful no-op. This
+    /// never treats a terminal <c>Failed</c> build as something to automatically repair -- see
+    /// <see cref="MongoDBIndexFailedException"/> -- and, regardless of <paramref name="waitUntilReady"/>, always
+    /// re-inspects and validates the index's final state after any create/update attempt (including a create that
+    /// raced a concurrent caller to an "already exists" no-op), so a rival concurrent caller having created an
+    /// incompatible definition is still caught rather than silently accepted.
     /// </summary>
     /// <param name="waitUntilReady">When <see langword="true"/>, polls with bounded exponential backoff until queryable.</param>
     /// <param name="timeout">The bounded polling deadline. Defaults to 60 seconds.</param>
     /// <param name="pollInterval">The initial polling interval, doubling up to a 30-second cap. Defaults to 1 second.</param>
-    /// <param name="cancellationToken">A token used to cancel creation and polling.</param>
-    /// <exception cref="MongoDBIndexMismatchException">An existing index does not match <see cref="Definition"/>.</exception>
-    /// <exception cref="MongoDBIndexPrivilegeException">The connected identity lacks index-creation privileges.</exception>
+    /// <param name="cancellationToken">A token used to cancel creation, update, and polling.</param>
+    /// <exception cref="MongoDBIndexMismatchException">The final index still does not match <see cref="Definition"/>.</exception>
+    /// <exception cref="MongoDBIndexFailedException">The index reports a terminal build failure.</exception>
+    /// <exception cref="MongoDBIndexPrivilegeException">The connected identity lacks index-creation/update privileges.</exception>
     /// <exception cref="MongoDBTimeoutException"><paramref name="waitUntilReady"/> is <see langword="true"/> and the deadline elapsed before the index became queryable.</exception>
     public async Task<MongoDBIndexInfo> EnsureIndexAsync(
         bool waitUntilReady = false,
@@ -138,28 +189,21 @@ public sealed class MongoDBMemoryIndexManager : IAsyncDisposable
         TimeSpan? pollInterval = null,
         CancellationToken cancellationToken = default)
     {
-        BsonDocument? index = await FindAsync(cancellationToken).ConfigureAwait(false);
-        if (index is null)
-        {
-            await MongoDBSearchIndexes.CreateAsync(
-                _collection.SearchIndexes,
-                new CreateSearchIndexModel(
-                    Definition.IndexName,
-                    SearchIndexType.VectorSearch,
-                    VectorSearchIndexEquivalence.BuildDefinition(Definition)),
-                MapCreateException,
-                cancellationToken).ConfigureAwait(false);
-        }
-        else
-        {
-            Validate(index, requireReady: false);
-        }
+        BsonDocument index = await MongoDBSearchIndexes.EnsureAsync(
+            _collection.SearchIndexes,
+            Definition.IndexName,
+            SearchIndexType.VectorSearch,
+            VectorSearchIndexEquivalence.BuildDefinition(Definition),
+            index => VectorSearchIndexEquivalence.Compare(MongoDBSearchIndexes.GetDefinition(index), Definition).IsCompatible,
+            index => Validate(index, requireReady: false),
+            MapCreateException,
+            MapUpdateException,
+            MapInspectionException,
+            cancellationToken).ConfigureAwait(false);
 
         return waitUntilReady
             ? await WaitUntilReadyAsync(timeout, pollInterval, cancellationToken).ConfigureAwait(false)
-            : await GetIndexAsync(cancellationToken).ConfigureAwait(false) ??
-              throw new MongoDBIndexMissingException(
-                  $"Vector Search index '{Definition.IndexName}' was created but could not be re-inspected.");
+            : ToIndexInfo(index);
     }
 
     /// <summary>
@@ -266,6 +310,16 @@ public sealed class MongoDBMemoryIndexManager : IAsyncDisposable
                 $"Not authorized to create Vector Search index '{Definition.IndexName}'.", exception)
             : new MongoDBPersistenceException("MongoDB Memory index creation failed.", exception);
 
+    private Exception MapAlreadyExistsException(Exception? raceException) =>
+        raceException is null
+            ? new MongoDBIndexAlreadyExistsException(
+                $"Vector Search index '{Definition.IndexName}' already exists; use UpdateIndexAsync or " +
+                "EnsureIndexAsync instead.")
+            : new MongoDBIndexAlreadyExistsException(
+                $"Vector Search index '{Definition.IndexName}' already exists; use UpdateIndexAsync or " +
+                "EnsureIndexAsync instead.",
+                raceException);
+
     private Exception MapUpdateException(MongoException exception) =>
         MongoDBSearchIndexes.IsUnauthorized(exception)
             ? new MongoDBIndexPrivilegeException(
@@ -281,11 +335,12 @@ public sealed class MongoDBMemoryIndexManager : IAsyncDisposable
     private static (OwnedResource<IMongoClient> Client, IMongoCollection<BsonDocument> Collection) ConnectClient(
         string connectionString,
         string databaseName,
-        string collectionName)
+        string collectionName,
+        Func<string, IMongoClient>? clientFactory)
     {
         string validDatabaseName = RequireText(databaseName, nameof(databaseName));
         string validCollectionName = RequireText(collectionName, nameof(collectionName));
-        OwnedResource<IMongoClient> client = MongoClientFactory.FromConnectionString(connectionString);
+        OwnedResource<IMongoClient> client = MongoClientFactory.FromConnectionString(connectionString, clientFactory);
         try
         {
             IMongoCollection<BsonDocument> collection = client.Value
@@ -298,6 +353,30 @@ public sealed class MongoDBMemoryIndexManager : IAsyncDisposable
             client.DisposeAsync().AsTask().GetAwaiter().GetResult();
             throw;
         }
+    }
+
+    /// <summary>
+    /// Validates every constructor argument that does not require a MongoDB client -- including
+    /// <paramref name="definition"/> -- entirely before creating an owned client. If this validated first and a
+    /// chained constructor validated <paramref name="definition"/> afterward instead, a null/invalid
+    /// <paramref name="definition"/> would throw only after <see cref="MongoClientFactory.FromConnectionString"/>
+    /// had already created a client, and since no <see cref="MongoDBMemoryIndexManager"/> instance would ever
+    /// exist to dispose it, that client would leak. Resolving the database/collection can still throw after the
+    /// client exists (a real network-dependent step); <see cref="ConnectClient"/> disposes the client itself in
+    /// that case, since it runs before any instance exists either.
+    /// </summary>
+    private static (OwnedResource<IMongoClient> Client, IMongoCollection<BsonDocument> Collection, MongoDBVectorSearchIndexDefinition Definition) Connect(
+        string connectionString,
+        string databaseName,
+        string collectionName,
+        MongoDBVectorSearchIndexDefinition definition,
+        Func<string, IMongoClient>? clientFactory)
+    {
+        MongoDBVectorSearchIndexDefinition validDefinition =
+            definition ?? throw new ArgumentNullException(nameof(definition));
+        (OwnedResource<IMongoClient> client, IMongoCollection<BsonDocument> collection) =
+            ConnectClient(connectionString, databaseName, collectionName, clientFactory);
+        return (client, collection, validDefinition);
     }
 
     private static string RequireText(string value, string name)

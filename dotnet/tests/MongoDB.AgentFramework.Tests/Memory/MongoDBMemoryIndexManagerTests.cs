@@ -189,6 +189,73 @@ public sealed class MongoDBMemoryIndexManagerTests
     }
 
     [Fact]
+    public async Task CreateSucceedsWhenTheIndexIsMissing()
+    {
+        var state = new MemoryCollectionState();
+        MongoDBMemoryIndexManager manager = CreateManager(state);
+
+        MongoDBIndexInfo info = await manager.CreateIndexAsync();
+
+        Assert.NotNull(state.CreatedSearchIndex);
+        Assert.Equal("facade_vector", info.Name);
+        Assert.Equal(MongoDBIndexStatus.Ready, info.Status);
+    }
+
+    [Fact]
+    public async Task CreateFailsImmediatelyWhenTheIndexAlreadyExistsWithoutAttemptingTheDriverCall()
+    {
+        var state = new MemoryCollectionState
+        {
+            SearchIndexes = [MemoryIndexFixtures.ValidVectorIndex("facade_vector", "embedding", 3)],
+        };
+        MongoDBMemoryIndexManager manager = CreateManager(state);
+
+        // Create-only pre-checks existence before ever calling CreateOneAsync: an explicit create-only caller is
+        // told something was already there rather than silently proceeding (unlike the idempotent Ensure path).
+        await Assert.ThrowsAsync<MongoDBIndexAlreadyExistsException>(() => manager.CreateIndexAsync());
+
+        Assert.Equal(0, state.CreateOneCallCount);
+    }
+
+    [Fact]
+    public async Task CreateFailsWhenAConcurrentCallerWinsTheCreateRace()
+    {
+        var state = new MemoryCollectionState
+        {
+            CreateException = MemoryIndexFixtures.CommandException(
+                68, "IndexAlreadyExists", "Index already exists"),
+        };
+        state.SearchIndexSnapshots.Enqueue([]);
+        MongoDBMemoryIndexManager manager = CreateManager(state);
+
+        // The pre-check found nothing, but a rival caller won the create race in between: the driver call itself
+        // reports "already exists", which create-only must still surface (never silently swallowed the way
+        // Ensure's idempotent create is).
+        await Assert.ThrowsAsync<MongoDBIndexAlreadyExistsException>(() => manager.CreateIndexAsync());
+
+        Assert.Equal(1, state.CreateOneCallCount);
+    }
+
+    [Fact]
+    public async Task EnsureThrowsMismatchWhenARivalConcurrentCreateWonWithAnIncompatibleDefinition()
+    {
+        var state = new MemoryCollectionState
+        {
+            CreateException = MemoryIndexFixtures.CommandException(
+                68, "IndexAlreadyExists", "Index already exists"),
+        };
+        state.SearchIndexSnapshots.Enqueue([]);
+        state.SearchIndexSnapshots.Enqueue(
+            [MemoryIndexFixtures.ValidVectorIndex("facade_vector", "embedding", 99)]);
+        MongoDBMemoryIndexManager manager = CreateManager(state);
+
+        // Unlike EnsureIsIdempotentWhenAConcurrentCallerAlreadyCreatedTheIndex (a compatible rival wins), here the
+        // rival concurrent creator won with an *incompatible* definition (different dimensions); Ensure's
+        // mandatory post-create re-inspection must still catch this rather than silently accepting the race.
+        await Assert.ThrowsAsync<MongoDBIndexMismatchException>(() => manager.EnsureIndexAsync());
+    }
+
+    [Fact]
     public async Task EnsureSurfacesPrivilegeErrorTightlyOnCreateFailure()
     {
         var state = new MemoryCollectionState
@@ -213,8 +280,28 @@ public sealed class MongoDBMemoryIndexManagerTests
     }
 
     [Fact]
-    public async Task EnsureThrowsMismatchWhenExistingIndexDoesNotMatchDefinition()
+    public async Task EnsureUpdatesWhenExistingIndexDoesNotMatchDefinition()
     {
+        var state = new MemoryCollectionState();
+        state.SearchIndexSnapshots.Enqueue([MemoryIndexFixtures.ValidVectorIndex("facade_vector", "embedding", 99)]);
+        state.SearchIndexSnapshots.Enqueue([MemoryIndexFixtures.ValidVectorIndex("facade_vector", "embedding", 3)]);
+        MongoDBMemoryIndexManager manager = CreateManager(state);
+
+        MongoDBIndexInfo info = await manager.EnsureIndexAsync();
+
+        Assert.Equal(1, state.UpdateCallCount);
+        Assert.Equal("facade_vector", state.UpdatedIndexName);
+        Assert.NotNull(state.UpdatedDefinition);
+        Assert.Null(state.CreatedSearchIndex);
+        Assert.Equal(MongoDBIndexStatus.Ready, info.Status);
+    }
+
+    [Fact]
+    public async Task EnsureThrowsMismatchWhenTheIndexStillDoesNotMatchAfterUpdating()
+    {
+        // The fake update below does not actually change the server-side definition (unlike a real deployment),
+        // so the mandatory post-update re-inspection still observes the same mismatched index -- proving Ensure's
+        // final validation is not skipped just because an update was attempted.
         var state = new MemoryCollectionState
         {
             SearchIndexes = [MemoryIndexFixtures.ValidVectorIndex("facade_vector", "embedding", 99)],
@@ -222,6 +309,8 @@ public sealed class MongoDBMemoryIndexManagerTests
         MongoDBMemoryIndexManager manager = CreateManager(state);
 
         await Assert.ThrowsAsync<MongoDBIndexMismatchException>(() => manager.EnsureIndexAsync());
+
+        Assert.Equal(1, state.UpdateCallCount);
         Assert.Null(state.CreatedSearchIndex);
     }
 
@@ -229,10 +318,11 @@ public sealed class MongoDBMemoryIndexManagerTests
     public async Task EnsureWithWaitUntilReadyPollsThroughBuildingToReady()
     {
         var state = new MemoryCollectionState();
+        BsonDocument building = MemoryIndexFixtures.ValidVectorIndex(
+            "facade_vector", "embedding", 3, status: "BUILDING", queryable: false);
         state.SearchIndexSnapshots.Enqueue([]);
-        state.SearchIndexSnapshots.Enqueue([]);
-        state.SearchIndexSnapshots.Enqueue(
-            [MemoryIndexFixtures.ValidVectorIndex("facade_vector", "embedding", 3, status: "BUILDING", queryable: false)]);
+        state.SearchIndexSnapshots.Enqueue([building]);
+        state.SearchIndexSnapshots.Enqueue([building]);
         state.SearchIndexSnapshots.Enqueue([MemoryIndexFixtures.ValidVectorIndex("facade_vector", "embedding", 3)]);
         MongoDBMemoryIndexManager manager = CreateManager(state);
 
