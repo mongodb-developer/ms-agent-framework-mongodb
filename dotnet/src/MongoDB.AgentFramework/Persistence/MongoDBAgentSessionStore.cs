@@ -490,6 +490,20 @@ public sealed class MongoDBAgentSessionStore : IAsyncDisposable
                         "Use SetAsync with the current version to update it.",
                         exception);
                 }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (MongoDBIntegrationException)
+                {
+                    throw;
+                }
+                catch (MongoException exception)
+                {
+                    throw new MongoDBPersistenceException(
+                        "MongoDB Session Store persistence failed.",
+                        exception);
+                }
 
                 return await ToRecordAsync(candidate, codec, token).ConfigureAwait(false);
             },
@@ -597,7 +611,24 @@ public sealed class MongoDBAgentSessionStore : IAsyncDisposable
                         throw IncompatibleSchemaException();
                     }
 
+                    throw new MongoDBConcurrencyException(
+                        "A concurrent write raced this unconditional upsert at the same authorized identity. " +
+                        "Reload the current session and retry.",
+                        exception);
+                }
+                catch (OperationCanceledException)
+                {
                     throw;
+                }
+                catch (MongoDBIntegrationException)
+                {
+                    throw;
+                }
+                catch (MongoException exception)
+                {
+                    throw new MongoDBPersistenceException(
+                        "MongoDB Session Store persistence failed.",
+                        exception);
                 }
 
                 if (result is not null)
@@ -680,8 +711,27 @@ public sealed class MongoDBAgentSessionStore : IAsyncDisposable
                     filter &= Builders<BsonDocument>.Filter.Eq("version", expected);
                 }
 
-                DeleteResult result = await _collection.DeleteOneAsync(filter, token)
-                    .ConfigureAwait(false);
+                DeleteResult result;
+                try
+                {
+                    result = await _collection.DeleteOneAsync(filter, token)
+                        .ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (MongoDBIntegrationException)
+                {
+                    throw;
+                }
+                catch (MongoException exception)
+                {
+                    throw new MongoDBPersistenceException(
+                        "MongoDB Session Store persistence failed.",
+                        exception);
+                }
+
                 if (!result.IsAcknowledged)
                 {
                     throw new MongoDBPersistenceException(

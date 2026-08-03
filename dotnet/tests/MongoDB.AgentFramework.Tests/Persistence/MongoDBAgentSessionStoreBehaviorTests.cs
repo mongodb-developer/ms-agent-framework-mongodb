@@ -1,7 +1,12 @@
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
 using MongoDB.Bson;
+using MongoDB.Driver;
+using MongoDB.Driver.Core.Clusters;
+using MongoDB.Driver.Core.Connections;
+using MongoDB.Driver.Core.Servers;
 using System.Globalization;
+using System.Net;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
@@ -664,6 +669,54 @@ public sealed class MongoDBAgentSessionStoreBehaviorTests
     /// A settable fake clock used to prove default-expiration retry-convergence behavior across elapsed time
     /// without a real sleep: <see cref="Read"/> is passed as the store's injected "now" provider.
     /// </summary>
+    private static MongoConnectionException ConnectionFailure() =>
+        new(
+            new ConnectionId(new ServerId(new ClusterId(), new DnsEndPoint("localhost", 27017))),
+            "simulated connection failure");
+
+    // ---------------------------------------------------------------------------------------------------
+    // A raw driver MongoException must never leak from a write path: every non-cancellation MongoException
+    // (other than the specific duplicate-key/concurrency races each write path already interprets) is wrapped
+    // as a stable MongoDBPersistenceException that preserves the original as InnerException, matching every
+    // read path's existing MongoDBRetrievalException wrapping.
+    // ---------------------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task CreateAsync_WhenInsertFailsWithNonDuplicateKeyMongoException_WrapsAsPersistenceExceptionPreservingInner()
+    {
+        var state = new SessionCollectionState { InsertException = ConnectionFailure() };
+        var store = CreateStore(state);
+
+        MongoDBPersistenceException thrown = await Assert.ThrowsAsync<MongoDBPersistenceException>(
+            () => store.CreateAsync("session-wrap-1", new TestSession(), new FakeSessionAgent()));
+
+        Assert.IsType<MongoConnectionException>(thrown.InnerException);
+    }
+
+    [Fact]
+    public async Task SetAsync_WhenUpdateFailsWithMongoException_WrapsAsPersistenceExceptionPreservingInner()
+    {
+        var state = new SessionCollectionState { UpdateException = ConnectionFailure() };
+        var store = CreateStore(state);
+
+        MongoDBPersistenceException thrown = await Assert.ThrowsAsync<MongoDBPersistenceException>(
+            () => store.SetAsync("session-wrap-2", new TestSession(), new FakeSessionAgent()));
+
+        Assert.IsType<MongoConnectionException>(thrown.InnerException);
+    }
+
+    [Fact]
+    public async Task DeleteAsync_WhenDeleteFailsWithMongoException_WrapsAsPersistenceExceptionPreservingInner()
+    {
+        var state = new SessionCollectionState { DeleteException = ConnectionFailure() };
+        var store = CreateStore(state);
+
+        MongoDBPersistenceException thrown = await Assert.ThrowsAsync<MongoDBPersistenceException>(
+            () => store.DeleteAsync("session-wrap-3"));
+
+        Assert.IsType<MongoConnectionException>(thrown.InnerException);
+    }
+
     private sealed class MutableClock(DateTimeOffset initial)
     {
         public DateTimeOffset Now { get; set; } = initial;

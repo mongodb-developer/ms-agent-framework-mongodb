@@ -217,11 +217,12 @@ public sealed class MongoDBAgentSessionStoreTelemetryTests
         using var scope = new TelemetryTestScope();
         MongoDBAgentSessionStore store = CreateStore(state, logger: logger);
 
-        await Assert.ThrowsAsync<MongoConnectionException>(
+        await Assert.ThrowsAsync<MongoDBPersistenceException>(
             () => store.CreateAsync("session-6", new TestSession(), new FakeSessionAgent()));
 
         Activity activity = Assert.Single(activities.StoppedUnder(scope));
         Assert.Equal(MongoDBTelemetryOutcome.Failed, activity.GetTagItem("outcome"));
+        Assert.Equal("persistence", activity.GetTagItem("error_category"));
         foreach (KeyValuePair<string, string?> tag in activity.TagObjects.Select(
             t => new KeyValuePair<string, string?>(t.Key, t.Value?.ToString())))
         {
