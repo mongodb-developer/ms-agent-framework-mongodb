@@ -1,6 +1,9 @@
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using MongoDB.AgentFramework.Internal;
+using MongoDB.AgentFramework.Internal.Observability;
 using MongoDB.Bson;
 using MongoDB.Bson.IO;
 using MongoDB.Driver;
@@ -26,6 +29,7 @@ public sealed class MongoDBChatHistoryProvider : ChatHistoryProvider, IAsyncDisp
     private readonly IMongoCollection<BsonDocument> _collection;
     private readonly MongoDBChatHistoryProviderOptions _options;
     private readonly OwnedResource<IMongoClient>? _client;
+    private readonly ILogger<MongoDBChatHistoryProvider> _logger;
     private readonly object _retryLock = new();
     private readonly RetryState _directRetryState = new();
     private readonly HashSet<string> _activeRetryAttempts = [];
@@ -33,8 +37,9 @@ public sealed class MongoDBChatHistoryProvider : ChatHistoryProvider, IAsyncDisp
     /// <summary>Creates a provider over an injected collection, which remains caller-owned.</summary>
     public MongoDBChatHistoryProvider(
         IMongoCollection<BsonDocument> collection,
-        MongoDBChatHistoryProviderOptions options)
-        : this(collection, new ValidatedOptions<MongoDBChatHistoryProviderOptions>(PrepareOptions(options)))
+        MongoDBChatHistoryProviderOptions options,
+        ILogger<MongoDBChatHistoryProvider>? logger = null)
+        : this(collection, new ValidatedOptions<MongoDBChatHistoryProviderOptions>(PrepareOptions(options)), logger)
     {
     }
 
@@ -47,7 +52,8 @@ public sealed class MongoDBChatHistoryProvider : ChatHistoryProvider, IAsyncDisp
     /// </summary>
     private MongoDBChatHistoryProvider(
         IMongoCollection<BsonDocument> collection,
-        ValidatedOptions<MongoDBChatHistoryProviderOptions> options)
+        ValidatedOptions<MongoDBChatHistoryProviderOptions> options,
+        ILogger<MongoDBChatHistoryProvider>? logger)
         : base(
             options.Value.ProvideOutputMessageFilter,
             options.Value.StoreInputRequestMessageFilter,
@@ -55,17 +61,20 @@ public sealed class MongoDBChatHistoryProvider : ChatHistoryProvider, IAsyncDisp
     {
         _options = options.Value;
         _collection = collection ?? throw new ArgumentNullException(nameof(collection));
+        _logger = logger ?? NullLogger<MongoDBChatHistoryProvider>.Instance;
     }
 
     /// <summary>Creates a provider over an injected database, which remains caller-owned.</summary>
     public MongoDBChatHistoryProvider(
         IMongoDatabase database,
         string collectionName,
-        MongoDBChatHistoryProviderOptions options)
+        MongoDBChatHistoryProviderOptions options,
+        ILogger<MongoDBChatHistoryProvider>? logger = null)
         : this(
             (database ?? throw new ArgumentNullException(nameof(database))).GetCollection<BsonDocument>(
                 MongoDBChatHistoryProviderOptions.RequireText(collectionName, nameof(collectionName))),
-            options)
+            options,
+            logger)
     {
     }
 
@@ -74,12 +83,14 @@ public sealed class MongoDBChatHistoryProvider : ChatHistoryProvider, IAsyncDisp
         IMongoClient client,
         string databaseName,
         string collectionName,
-        MongoDBChatHistoryProviderOptions options)
+        MongoDBChatHistoryProviderOptions options,
+        ILogger<MongoDBChatHistoryProvider>? logger = null)
         : this(
             (client ?? throw new ArgumentNullException(nameof(client))).GetDatabase(
                 MongoDBChatHistoryProviderOptions.RequireText(databaseName, nameof(databaseName))),
             collectionName,
-            options)
+            options,
+            logger)
     {
     }
 
@@ -88,8 +99,9 @@ public sealed class MongoDBChatHistoryProvider : ChatHistoryProvider, IAsyncDisp
         string connectionString,
         string databaseName,
         string collectionName,
-        MongoDBChatHistoryProviderOptions options)
-        : this(connectionString, databaseName, collectionName, options, clientFactory: null)
+        MongoDBChatHistoryProviderOptions options,
+        ILogger<MongoDBChatHistoryProvider>? logger = null)
+        : this(connectionString, databaseName, collectionName, options, clientFactory: null, logger)
     {
     }
 
@@ -104,16 +116,18 @@ public sealed class MongoDBChatHistoryProvider : ChatHistoryProvider, IAsyncDisp
         string databaseName,
         string collectionName,
         MongoDBChatHistoryProviderOptions options,
-        Func<string, IMongoClient>? clientFactory)
-        : this(Connect(connectionString, databaseName, collectionName, options, clientFactory))
+        Func<string, IMongoClient>? clientFactory,
+        ILogger<MongoDBChatHistoryProvider>? logger = null)
+        : this(Connect(connectionString, databaseName, collectionName, options, clientFactory), logger)
     {
     }
 
     private MongoDBChatHistoryProvider(
         (OwnedResource<IMongoClient> Client,
          IMongoCollection<BsonDocument> Collection,
-         MongoDBChatHistoryProviderOptions Options) connected)
-        : this(connected.Collection, new ValidatedOptions<MongoDBChatHistoryProviderOptions>(connected.Options))
+         MongoDBChatHistoryProviderOptions Options) connected,
+        ILogger<MongoDBChatHistoryProvider>? logger)
+        : this(connected.Collection, new ValidatedOptions<MongoDBChatHistoryProviderOptions>(connected.Options), logger)
     {
         _client = connected.Client;
     }
@@ -180,9 +194,24 @@ public sealed class MongoDBChatHistoryProvider : ChatHistoryProvider, IAsyncDisp
     public override IReadOnlyList<string> StateKeys => ProviderStateKeys;
 
     /// <summary>Loads the latest authorized messages in chronological order.</summary>
-    public async Task<IReadOnlyList<ChatMessage>> GetMessagesAsync(
+    public Task<IReadOnlyList<ChatMessage>> GetMessagesAsync(
         string sessionId,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        MongoDBTelemetry.TrackAsync(
+            _logger,
+            MongoDBTelemetryFeature.History,
+            MongoDBTelemetryOperation.Load,
+            mode: null,
+            () => GetMessagesInnerAsync(sessionId, cancellationToken),
+            static messages => new MongoDBTelemetryResult(
+                messages.Count > 0 ? MongoDBTelemetryOutcome.Success : MongoDBTelemetryOutcome.Empty,
+                messages.Count,
+                CandidateBucket: null),
+            cancellationToken);
+
+    private async Task<IReadOnlyList<ChatMessage>> GetMessagesInnerAsync(
+        string sessionId,
+        CancellationToken cancellationToken)
     {
         BsonDocument scope = SessionScope(sessionId);
         cancellationToken.ThrowIfCancellationRequested();
@@ -245,7 +274,24 @@ public sealed class MongoDBChatHistoryProvider : ChatHistoryProvider, IAsyncDisp
         CancellationToken cancellationToken = default) =>
         SaveMessagesCoreAsync(sessionId, messages, sessionState: null, cancellationToken);
 
-    private async Task SaveMessagesCoreAsync(
+    private Task SaveMessagesCoreAsync(
+        string sessionId,
+        IEnumerable<ChatMessage> messages,
+        AgentSessionStateBag? sessionState,
+        CancellationToken cancellationToken) =>
+        MongoDBTelemetry.TrackAsync(
+            _logger,
+            MongoDBTelemetryFeature.History,
+            MongoDBTelemetryOperation.Persist,
+            mode: null,
+            () => SaveMessagesCoreInnerAsync(sessionId, messages, sessionState, cancellationToken),
+            static count => new MongoDBTelemetryResult(
+                count > 0 ? MongoDBTelemetryOutcome.Success : MongoDBTelemetryOutcome.Empty,
+                count,
+                CandidateBucket: null),
+            cancellationToken);
+
+    private async Task<int> SaveMessagesCoreInnerAsync(
         string sessionId,
         IEnumerable<ChatMessage> messages,
         AgentSessionStateBag? sessionState,
@@ -257,7 +303,7 @@ public sealed class MongoDBChatHistoryProvider : ChatHistoryProvider, IAsyncDisp
         ChatMessage[] batch = messages.ToArray();
         if (batch.Length == 0)
         {
-            return;
+            return 0;
         }
 
         RetryAttempt? retryAttempt = null;
@@ -414,6 +460,7 @@ public sealed class MongoDBChatHistoryProvider : ChatHistoryProvider, IAsyncDisp
                 "MongoDB History persistence deadline exceeded.",
                 cancellationToken).ConfigureAwait(false);
             FinishRetryAttempt(retryAttempt, sessionState, retryableFailure: false);
+            return batch.Length;
         }
         catch (OperationCanceledException)
         {
@@ -440,9 +487,24 @@ public sealed class MongoDBChatHistoryProvider : ChatHistoryProvider, IAsyncDisp
     }
 
     /// <summary>Clears only the authorized session and resets its sequence allocator.</summary>
-    public async Task<long> ClearMessagesAsync(
+    public Task<long> ClearMessagesAsync(
         string sessionId,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        MongoDBTelemetry.TrackAsync(
+            _logger,
+            MongoDBTelemetryFeature.History,
+            MongoDBTelemetryOperation.Delete,
+            mode: null,
+            () => ClearMessagesInnerAsync(sessionId, cancellationToken),
+            static count => new MongoDBTelemetryResult(
+                count > 0 ? MongoDBTelemetryOutcome.Success : MongoDBTelemetryOutcome.Empty,
+                (int)Math.Min(count, int.MaxValue),
+                CandidateBucket: null),
+            cancellationToken);
+
+    private async Task<long> ClearMessagesInnerAsync(
+        string sessionId,
+        CancellationToken cancellationToken)
     {
         BsonDocument scope = SessionScope(sessionId);
         cancellationToken.ThrowIfCancellationRequested();
@@ -492,8 +554,19 @@ public sealed class MongoDBChatHistoryProvider : ChatHistoryProvider, IAsyncDisp
     }
 
     /// <summary>Explicitly provisions required regular and optional TTL indexes.</summary>
-    public async Task<IReadOnlyList<string>> EnsureIndexesAsync(
-        CancellationToken cancellationToken = default)
+    public Task<IReadOnlyList<string>> EnsureIndexesAsync(
+        CancellationToken cancellationToken = default) =>
+        MongoDBTelemetry.TrackAsync(
+            _logger,
+            MongoDBTelemetryFeature.History,
+            MongoDBTelemetryOperation.EnsureIndex,
+            mode: null,
+            () => EnsureIndexesInnerAsync(cancellationToken),
+            static _ => new MongoDBTelemetryResult(MongoDBTelemetryOutcome.Success, null, null),
+            cancellationToken);
+
+    private async Task<IReadOnlyList<string>> EnsureIndexesInnerAsync(
+        CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var scopeKeys = new BsonDocument
@@ -559,7 +632,17 @@ public sealed class MongoDBChatHistoryProvider : ChatHistoryProvider, IAsyncDisp
     }
 
     /// <summary>Validates required regular indexes without mutating MongoDB.</summary>
-    public async Task ValidateIndexesAsync(CancellationToken cancellationToken = default)
+    public Task ValidateIndexesAsync(CancellationToken cancellationToken = default) =>
+        MongoDBTelemetry.TrackAsync(
+            _logger,
+            MongoDBTelemetryFeature.History,
+            MongoDBTelemetryOperation.ValidateIndex,
+            mode: null,
+            () => ValidateIndexesInnerAsync(cancellationToken),
+            static () => new MongoDBTelemetryResult(MongoDBTelemetryOutcome.Success, null, null),
+            cancellationToken);
+
+    private async Task ValidateIndexesInnerAsync(CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         try
