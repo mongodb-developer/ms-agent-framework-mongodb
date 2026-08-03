@@ -12,8 +12,9 @@ using MongoDB.Driver;
 // docs/development/rag/dotnet-rag-vector-search.md and docs/development/rag/dotnet-rag-full-text-search.md), so
 // the target collection and indexes must already exist. Set MONGODB_RAG_VECTOR_INDEX to a Vector Search index
 // (3-dimension, cosine) defined over the "embedding" field of the target collection before running this sample.
-// Set MONGODB_RAG_SEARCH_INDEX to a Search index defined over the "text" field to also see the FullText demo;
-// that section is skipped when the variable is unset since this sample cannot provision the index itself.
+// Set MONGODB_RAG_SEARCH_INDEX to a Search index defined over the "text" field to also see the FullText and
+// HybridRrf demos; those sections are skipped when the variable is unset since this sample cannot provision the
+// index itself. HybridRrf additionally requires a MongoDB 8.0+ deployment ($rankFusion support).
 string uri = Environment.GetEnvironmentVariable("MONGODB_URI")
     ?? throw new InvalidOperationException("Set MONGODB_URI.");
 string databaseName = Environment.GetEnvironmentVariable("MONGODB_DATABASE")
@@ -117,12 +118,54 @@ if (searchIndexName is not null)
     {
         Console.WriteLine($"  [{result.Score:F3}] {result.Text} (source: {result.SourceName ?? "n/a"})");
     }
+
+    Console.WriteLine();
+    Console.WriteLine("HybridRrf SearchAsync results (native $rankFusion over both indexes):");
+    var hybridOptions = new MongoDBRAGProviderOptions
+    {
+        SearchMode = MongoDBSearchMode.HybridRrf,
+        VectorIndexName = vectorIndexName,
+        SearchIndexName = searchIndexName,
+        SearchTextFieldNames = ["text"],
+        TopK = 3,
+        MandatoryFilter = MongoDBRAGFilter.Equal("tenant_id", "quickstart"),
+    };
+    await using var hybridProvider = new MongoDBRAGProvider(
+        client,
+        databaseName,
+        collectionName,
+        embeddingGenerator,
+        vectorDimensions: 3,
+        hybridOptions);
+
+    // Same rationale as the FullText demo above: poll boundedly so newly (re-)seeded documents are guaranteed
+    // searchable through both of Hybrid's input branches before this sample prints its output.
+    IReadOnlyList<MongoDBRAGResult> hybridResults;
+    try
+    {
+        hybridResults = await PollUntilSearchableAsync(
+            hybridProvider,
+            "What color do widgets ship in?",
+            "quickstart-chunk-1",
+            timeout: TimeSpan.FromSeconds(30),
+            pollInterval: TimeSpan.FromSeconds(1));
+    }
+    catch (TimeoutException ex)
+    {
+        Console.WriteLine($"  {ex.Message}");
+        hybridResults = [];
+    }
+
+    foreach (MongoDBRAGResult result in hybridResults)
+    {
+        Console.WriteLine($"  [{result.Score:F3}] {result.Text} (source: {result.SourceName ?? "n/a"})");
+    }
 }
 else
 {
     Console.WriteLine();
-    Console.WriteLine("Skipping FullText demo: set MONGODB_RAG_SEARCH_INDEX to a Search index over " +
-        "the \"text\" field to see it.");
+    Console.WriteLine("Skipping FullText and HybridRrf demos: set MONGODB_RAG_SEARCH_INDEX to a Search index " +
+        "over the \"text\" field to see them.");
 }
 
 /// <summary>

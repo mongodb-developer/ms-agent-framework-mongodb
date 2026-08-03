@@ -155,6 +155,14 @@ public abstract class MongoDBRAGFilter
                     "A range filter requires a minimum, a maximum, or both.");
             }
 
+            if (minimum is not null && maximum is not null &&
+                BsonValueCategories.Of(minimum) != BsonValueCategories.Of(maximum))
+            {
+                throw new MongoDBConfigurationException(
+                    "A range filter's minimum and maximum must be the same value category (for example both " +
+                    "numeric or both date); mixed-category bounds are not supported.");
+            }
+
             Minimum = minimum;
             Maximum = maximum;
             MinimumInclusive = minimumInclusive;

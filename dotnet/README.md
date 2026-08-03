@@ -117,7 +117,7 @@ Optional variables are `MONGODB_HISTORY_COLLECTION`,
 sample's authorized session should be removed. See the
 [.NET Chat History developer guide](../docs/development/history/dotnet-history.md).
 
-## RAG contracts, typed filters, Vector Search (ANN/ENN), and FullText
+## RAG contracts, typed filters, Vector Search (ANN/ENN), FullText, and HybridRrf
 
 `MongoDBSearchMode` (`VectorAnn`, `VectorEnn`, `FullText`, `HybridRrf`), the bounded typed `MongoDBRAGFilter` AST,
 the immutable `MongoDBRAGResult`, and `MongoDBRAGProviderOptions` are available under
@@ -126,12 +126,15 @@ the immutable `MongoDBRAGResult`, and `MongoDBRAGProviderOptions` are available 
 completely translatable into a `$vectorSearch` match filter or a `$search` compound filter through the internal
 `RAGFilterTranslator`.
 
-`MongoDBRAGProvider` executes live `VectorAnn`/`VectorEnn`/`FullText` retrieval through `SearchAsync`, and
-`MongoDBRAGContextProvider` composes it as a before-invoke `AIContextProvider` that supplies retrieved chunks as
-attributed `ChatRole.Tool` context messages. `HybridRrf` is not yet implemented; selecting it throws
-`MongoDBCapabilityException`. `FullText` never requires or invokes an embedding generator: a dedicated constructor
-overload family (`MongoDBRAGProvider(database, collectionName, options, ...)`, and the matching collection/client/
-connection-string overloads) accepts no `embeddingGenerator`/`vectorDimensions` parameters at all.
+`MongoDBRAGProvider` executes live `VectorAnn`/`VectorEnn`/`FullText`/`HybridRrf` retrieval through `SearchAsync`,
+and `MongoDBRAGContextProvider` composes it as a before-invoke `AIContextProvider` that supplies retrieved chunks as
+attributed `ChatRole.Tool` context messages. `HybridRrf` uses MongoDB's native `$rankFusion` stage to combine a
+Vector Search ANN input and a Search text input (weighted reciprocal-rank fusion) and requires **both** an
+embedding generator/dimensions and Search index/field configuration; `ValidateHybridSearchCapabilityAsync` is an
+opt-in seam validating MongoDB 8.0+ and both indexes without ever being called implicitly by `SearchAsync`.
+`FullText` never requires or invokes an embedding generator: a dedicated constructor overload family
+(`MongoDBRAGProvider(database, collectionName, options, ...)`, and the matching collection/client/connection-string
+overloads) accepts no `embeddingGenerator`/`vectorDimensions` parameters at all.
 
 ```csharp
 MongoDBRAGFilter filter = MongoDBRAGFilter.And(
@@ -170,21 +173,39 @@ var fullTextOptions = new MongoDBRAGProviderOptions
 
 await using var fullTextRag = new MongoDBRAGProvider(database, "knowledge_chunks", fullTextOptions);
 IReadOnlyList<MongoDBRAGResult> fullTextResults = await fullTextRag.SearchAsync("What color do widgets ship in?");
+
+// HybridRrf: native $rankFusion over both a Vector Search input and a Search input; requires both an embedding
+// generator/dimensions and Search index/field configuration.
+var hybridOptions = new MongoDBRAGProviderOptions
+{
+    SearchMode = MongoDBSearchMode.HybridRrf,
+    VectorIndexName = "knowledge_vector_index",
+    SearchIndexName = "knowledge_search_index",
+    SearchTextFieldNames = ["text"],
+    TopK = 5,
+    MandatoryFilter = filter,
+};
+
+await using var hybridRag = new MongoDBRAGProvider(
+    database, "knowledge_chunks", embeddingGenerator, vectorDimensions: 1536, hybridOptions);
+IReadOnlyList<MongoDBRAGResult> hybridResults = await hybridRag.SearchAsync("What color do widgets ship in?");
 ```
 
-This slice does not provision Vector Search or Search indexes; the target index must already exist. Injected
+This slice does not provision Vector Search or Search indexes; the target index/indexes must already exist. Injected
 clients/databases/collections/embedding generators remain caller-owned; only a client created by the
 connection-string constructor is disposed by the provider.
 
 Run the sample after setting `MONGODB_URI`, `MONGODB_DATABASE`, and a pre-provisioned Vector Search index
 (`MONGODB_RAG_VECTOR_INDEX`, optionally `MONGODB_RAG_COLLECTION`). Additionally set `MONGODB_RAG_SEARCH_INDEX` to a
-pre-provisioned Search index to also see the FullText demonstration (skipped otherwise):
+pre-provisioned Search index to also see the FullText and HybridRrf demonstrations (both skipped otherwise;
+HybridRrf additionally requires a MongoDB 8.0+ deployment):
 
 ```powershell
 dotnet run --project samples\RAGQuickstart\RAGQuickstart.csproj
 ```
 
 See the [.NET RAG contracts developer guide](../docs/development/rag/dotnet-rag.md), the
-[.NET Vector RAG developer guide](../docs/development/rag/dotnet-rag-vector-search.md), and the
-[.NET FullText RAG developer guide](../docs/development/rag/dotnet-rag-full-text-search.md) for the full public
+[.NET Vector RAG developer guide](../docs/development/rag/dotnet-rag-vector-search.md), the
+[.NET FullText RAG developer guide](../docs/development/rag/dotnet-rag-full-text-search.md), and the
+[.NET HybridRrf RAG developer guide](../docs/development/rag/dotnet-rag-hybrid-rrf.md) for the full public
 surface, pipeline shape, and deferred work.

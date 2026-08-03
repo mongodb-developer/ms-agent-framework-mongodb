@@ -292,4 +292,175 @@ public sealed class MongoDBRAGProviderOptionsTests
 
         Assert.Same(filter, copy.MandatoryFilter);
     }
+
+    [Theory]
+    [InlineData(MongoDBSearchMode.VectorAnn)]
+    [InlineData(MongoDBSearchMode.VectorEnn)]
+    [InlineData(MongoDBSearchMode.FullText)]
+    public void NonHybridModesForbidVectorCandidateLimit(MongoDBSearchMode mode)
+    {
+        var options = new MongoDBRAGProviderOptions
+        {
+            SearchMode = mode,
+            VectorCandidateLimit = 50,
+        };
+
+        Assert.Throws<MongoDBConfigurationException>(options.Validate);
+    }
+
+    [Theory]
+    [InlineData(MongoDBSearchMode.VectorAnn)]
+    [InlineData(MongoDBSearchMode.VectorEnn)]
+    [InlineData(MongoDBSearchMode.FullText)]
+    public void NonHybridModesForbidTextCandidateLimit(MongoDBSearchMode mode)
+    {
+        var options = new MongoDBRAGProviderOptions
+        {
+            SearchMode = mode,
+            TextCandidateLimit = 50,
+        };
+
+        Assert.Throws<MongoDBConfigurationException>(options.Validate);
+    }
+
+    [Theory]
+    [InlineData(MongoDBSearchMode.VectorAnn)]
+    [InlineData(MongoDBSearchMode.VectorEnn)]
+    [InlineData(MongoDBSearchMode.FullText)]
+    public void NonHybridModesForbidIncludeScoreDetails(MongoDBSearchMode mode)
+    {
+        var options = new MongoDBRAGProviderOptions
+        {
+            SearchMode = mode,
+            IncludeScoreDetails = true,
+        };
+
+        Assert.Throws<MongoDBConfigurationException>(options.Validate);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    [InlineData(MongoDBRAGProviderOptions.MaxNumCandidates + 1)]
+    public void HybridVectorCandidateLimitMustBeBounded(int limit)
+    {
+        var options = new MongoDBRAGProviderOptions
+        {
+            SearchMode = MongoDBSearchMode.HybridRrf,
+            VectorCandidateLimit = limit,
+        };
+
+        Assert.Throws<MongoDBConfigurationException>(options.Validate);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    [InlineData(MongoDBRAGProviderOptions.MaxNumCandidates + 1)]
+    public void HybridTextCandidateLimitMustBeBounded(int limit)
+    {
+        var options = new MongoDBRAGProviderOptions
+        {
+            SearchMode = MongoDBSearchMode.HybridRrf,
+            TextCandidateLimit = limit,
+        };
+
+        Assert.Throws<MongoDBConfigurationException>(options.Validate);
+    }
+
+    [Fact]
+    public void HybridAcceptsExplicitCandidateLimitsAndScoreDetails()
+    {
+        var options = new MongoDBRAGProviderOptions
+        {
+            SearchMode = MongoDBSearchMode.HybridRrf,
+            VectorCandidateLimit = 100,
+            TextCandidateLimit = 100,
+            IncludeScoreDetails = true,
+        };
+
+        options.Validate();
+    }
+
+    [Fact]
+    public void HybridRejectsAnExplicitVectorCandidateLimitAboveTheDefaultNumCandidates()
+    {
+        // NumCandidates is left unset, so its effective value is the default over-fetch heuristic (100 for the
+        // default TopK of 5); $vectorSearch requires numCandidates >= limit, so a VectorCandidateLimit above that
+        // default must be rejected rather than silently sent to MongoDB as an invalid pipeline.
+        var options = new MongoDBRAGProviderOptions
+        {
+            SearchMode = MongoDBSearchMode.HybridRrf,
+            VectorCandidateLimit = 101,
+        };
+
+        Assert.Throws<MongoDBConfigurationException>(options.Validate);
+    }
+
+    [Fact]
+    public void HybridRejectsAnExplicitNumCandidatesBelowTheDefaultVectorCandidateLimit()
+    {
+        // VectorCandidateLimit is left unset (default 100), so an explicit NumCandidates below that default must
+        // be rejected even though NumCandidates alone satisfies the separate NumCandidates >= TopK check.
+        var options = new MongoDBRAGProviderOptions
+        {
+            SearchMode = MongoDBSearchMode.HybridRrf,
+            TopK = 5,
+            NumCandidates = 50,
+        };
+
+        Assert.Throws<MongoDBConfigurationException>(options.Validate);
+    }
+
+    [Fact]
+    public void HybridRejectsAnExplicitNumCandidatesBelowAnExplicitVectorCandidateLimit()
+    {
+        var options = new MongoDBRAGProviderOptions
+        {
+            SearchMode = MongoDBSearchMode.HybridRrf,
+            NumCandidates = 100,
+            VectorCandidateLimit = 150,
+        };
+
+        Assert.Throws<MongoDBConfigurationException>(options.Validate);
+    }
+
+    [Fact]
+    public void HybridAcceptsExplicitNumCandidatesEqualToTheExplicitVectorCandidateLimit()
+    {
+        var options = new MongoDBRAGProviderOptions
+        {
+            SearchMode = MongoDBSearchMode.HybridRrf,
+            NumCandidates = 150,
+            VectorCandidateLimit = 150,
+        };
+
+        options.Validate();
+    }
+
+    [Fact]
+    public void HybridAcceptsDefaultNumCandidatesAndVectorCandidateLimitTogether()
+    {
+        var options = new MongoDBRAGProviderOptions { SearchMode = MongoDBSearchMode.HybridRrf };
+
+        options.Validate();
+    }
+
+    [Fact]
+    public void CopyPreservesHybridCandidateLimitsAndScoreDetails()
+    {
+        var options = new MongoDBRAGProviderOptions
+        {
+            SearchMode = MongoDBSearchMode.HybridRrf,
+            VectorCandidateLimit = 42,
+            TextCandidateLimit = 84,
+            IncludeScoreDetails = true,
+        };
+
+        MongoDBRAGProviderOptions copy = options.Copy();
+
+        Assert.Equal(42, copy.VectorCandidateLimit);
+        Assert.Equal(84, copy.TextCandidateLimit);
+        Assert.True(copy.IncludeScoreDetails);
+    }
 }

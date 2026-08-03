@@ -12,6 +12,14 @@ internal static class FieldPath
     /// </summary>
     internal const string ReservedScoreAlias = "_ragScore";
 
+    /// <summary>
+    /// The reserved alias <see cref="MongoDBSearchMode.HybridRrf"/>'s pipeline uses to carry <c>$rankFusion</c>'s
+    /// optional <c>scoreDetails</c> diagnostic metadata under, when
+    /// <see cref="MongoDBRAGProviderOptions.IncludeScoreDetails"/> is enabled. Shares <see cref="Validate"/>'s
+    /// collision guard with <see cref="ReservedScoreAlias"/> for the same reason.
+    /// </summary>
+    internal const string ReservedScoreDetailsAlias = "_ragScoreDetails";
+
     public static string Validate(string path, string optionName = "field path")
     {
         if (string.IsNullOrEmpty(path))
@@ -46,10 +54,12 @@ internal static class FieldPath
                 $"{optionName} must not use positional array syntax.");
         }
 
-        if (segments.Contains(ReservedScoreAlias, StringComparer.Ordinal))
+        if (segments.Contains(ReservedScoreAlias, StringComparer.Ordinal) ||
+            segments.Contains(ReservedScoreDetailsAlias, StringComparer.Ordinal))
         {
             throw new MongoDBConfigurationException(
-                $"{optionName} must not collide with reserved alias '{ReservedScoreAlias}'.");
+                $"{optionName} must not collide with reserved alias '{ReservedScoreAlias}' or " +
+                $"'{ReservedScoreDetailsAlias}'.");
         }
 
         return path;

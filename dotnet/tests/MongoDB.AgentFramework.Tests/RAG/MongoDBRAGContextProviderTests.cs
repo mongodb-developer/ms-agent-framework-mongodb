@@ -165,21 +165,6 @@ public sealed class MongoDBRAGContextProviderTests
     }
 
     [Fact]
-    public async Task CapabilityErrorsPropagateRatherThanFailingOpen()
-    {
-        var options = new MongoDBRAGProviderOptions { SearchMode = MongoDBSearchMode.HybridRrf };
-        MongoDBRAGProvider provider = CreateProvider(new RAGCollectionState(), options: options);
-        var contextProvider = new MongoDBRAGContextProvider(provider);
-
-        await Assert.ThrowsAsync<MongoDBCapabilityException>(() => contextProvider.InvokingAsync(
-            new AIContextProvider.InvokingContext(
-                new StubAgent(),
-                null,
-                new AIContext { Messages = [new ChatMessage(ChatRole.User, "query")] }),
-            default).AsTask());
-    }
-
-    [Fact]
     public async Task CancellationPropagatesRatherThanFailingOpen()
     {
         var embeddings = new RecordingEmbeddingGenerator { Delay = TimeSpan.FromSeconds(5) };
@@ -449,6 +434,43 @@ public sealed class MongoDBRAGContextProviderTests
         CitationAnnotation citation = Assert.IsType<CitationAnnotation>(Assert.Single(content.Annotations!));
         Assert.Equal("Catalog", citation.Title);
         Assert.Null(citation.Url);
+    }
+
+    [Fact]
+    public async Task HybridSearchWorksTransparentlyThroughTheContextAdapter()
+    {
+        var state = new RAGCollectionState
+        {
+            Results =
+            [
+                new BsonDocument
+                {
+                    { "_id", "chunk-1" },
+                    { "text", "Widgets ship in blue." },
+                    { "_ragScore", 0.031 },
+                    { "source", new BsonDocument { { "name", "Catalog" }, { "url", "https://example.test/c" } } },
+                },
+            ],
+            SearchIndexes = [RAGIndexFixtures.ValidVectorIndex(), RAGIndexFixtures.ValidSearchIndex()],
+        };
+        var options = new MongoDBRAGProviderOptions { SearchMode = MongoDBSearchMode.HybridRrf };
+        MongoDBRAGProvider provider = CreateProvider(state, options: options);
+        var contextProvider = new MongoDBRAGContextProvider(provider);
+
+        AIContext context = await contextProvider.InvokingAsync(
+            new AIContextProvider.InvokingContext(
+                new StubAgent(),
+                null,
+                new AIContext { Messages = [new ChatMessage(ChatRole.User, "what color are widgets")] }),
+            default);
+
+        ChatMessage message = Assert.Single(
+            context.Messages!,
+            candidate => candidate.AdditionalProperties?.ContainsKey("_rag_id") is true);
+        Assert.Equal("chunk-1", message.AdditionalProperties!["_rag_id"]);
+        Assert.Equal(0.031, message.AdditionalProperties!["_rag_score"]);
+        BsonDocument rankFusionStage = state.AggregateStages[0]["$rankFusion"].AsBsonDocument;
+        Assert.True(rankFusionStage.Contains("input"));
     }
 
     private static MongoDBRAGProvider CreateProvider(

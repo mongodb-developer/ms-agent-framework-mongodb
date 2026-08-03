@@ -10,11 +10,13 @@ namespace MongoDB.AgentFramework;
 
 /// <summary>
 /// Executes direct MongoDB RAG retrieval (<see cref="MongoDBSearchMode.VectorAnn"/>,
-/// <see cref="MongoDBSearchMode.VectorEnn"/>, and <see cref="MongoDBSearchMode.FullText"/> in this release) through
-/// the public <see cref="SearchAsync(string, CancellationToken)"/> seam. Authorization and multitenancy are
-/// expressed entirely through the immutable <see cref="MongoDBRAGProviderOptions.MandatoryFilter"/>, translated
-/// into every active retrieval branch; there is no separate scope/state concept as in
-/// <see cref="MongoDBMemoryProvider"/> because RAG retrieval is read-only and stateless per call.
+/// <see cref="MongoDBSearchMode.VectorEnn"/>, <see cref="MongoDBSearchMode.FullText"/>, and
+/// <see cref="MongoDBSearchMode.HybridRrf"/>) through the public
+/// <see cref="SearchAsync(string, CancellationToken)"/> seam. Authorization and multitenancy are expressed entirely
+/// through the immutable <see cref="MongoDBRAGProviderOptions.MandatoryFilter"/>, translated into every active
+/// retrieval branch, independently for each of <see cref="MongoDBSearchMode.HybridRrf"/>'s two input branches;
+/// there is no separate scope/state concept as in <see cref="MongoDBMemoryProvider"/> because RAG retrieval is
+/// read-only and stateless per call.
 /// </summary>
 public sealed class MongoDBRAGProvider : IAsyncDisposable
 {
@@ -25,6 +27,16 @@ public sealed class MongoDBRAGProvider : IAsyncDisposable
     /// </summary>
     private static readonly TimeSpan SearchIndexValidationCacheDuration = TimeSpan.FromSeconds(30);
 
+    /// <summary>
+    /// How long a successful <see cref="ValidateHybridSearchCapabilityAsync"/> result is trusted before the next
+    /// call re-inspects the server version and both indexes, mirroring
+    /// <see cref="SearchIndexValidationCacheDuration"/>'s "no forced extra round trip per query" design.
+    /// </summary>
+    private static readonly TimeSpan HybridCapabilityValidationCacheDuration = TimeSpan.FromSeconds(30);
+
+    /// <summary>The minimum MongoDB server major version that supports the <c>$rankFusion</c> aggregation stage.</summary>
+    private const int MinimumHybridServerMajorVersion = 8;
+
     private readonly IMongoCollection<BsonDocument> _collection;
     private readonly IEmbeddingGenerator<string, Embedding<float>>? _embeddingGenerator;
     private readonly MongoDBRAGProviderOptions _options;
@@ -32,6 +44,7 @@ public sealed class MongoDBRAGProvider : IAsyncDisposable
     private readonly OwnedResource<IMongoClient>? _client;
     private readonly ILogger<MongoDBRAGProvider> _logger;
     private (DateTimeOffset ValidatedAt, bool RequireReady)? _searchIndexValidation;
+    private (DateTimeOffset ValidatedAt, bool RequireReady)? _hybridCapabilityValidation;
 
     /// <summary>
     /// Test-only seam controlling the clock <see cref="ValidateSearchIndexAsync"/> uses for its bounded cache;
@@ -473,24 +486,124 @@ public sealed class MongoDBRAGProvider : IAsyncDisposable
     }
 
     /// <summary>
+    /// Validates the <see cref="MongoDBSearchMode.HybridRrf"/> capability matrix row: a MongoDB server new enough
+    /// to support the <c>$rankFusion</c> aggregation stage (major version 8+), both the Vector Search index used
+    /// by Hybrid's vector input branch and the Search index used by its text input branch, and -- when
+    /// <see cref="MongoDBRAGProviderOptions.MandatoryFilter"/> references any fields -- that every referenced
+    /// field is indexed compatibly with the operator it is used with in both branches. Unlike
+    /// <see cref="ValidateSearchIndexAsync"/>, <see cref="SearchAsync(string, CancellationToken)"/> calls this
+    /// method before every Hybrid aggregation (never silently downgrading a missing/incapable deployment into a
+    /// generic retrieval failure), but a successful result is cached for a bounded interval (see
+    /// <see cref="HybridCapabilityValidationCacheDuration"/>) so a query does not pay for the extra round trips on
+    /// every call; pass <paramref name="refresh"/><c>: true</c> to force a fresh check regardless of the cache.
+    /// A result is only cached when every mandatory-filter field could be statically verified -- a dynamic Search
+    /// mapping (see <see cref="IsDynamicMappingEnabled"/>) cannot be checked per field, so in that case (only when
+    /// the filter actually references fields) this method re-validates on every call rather than caching an
+    /// unverifiable authorization surface.
+    /// </summary>
+    /// <param name="requireReady">
+    /// When <c>true</c> (the default), also requires both indexes to report <c>READY</c>/queryable status. A
+    /// cached result only satisfies this when it was itself validated with <paramref name="requireReady"/>
+    /// <c>: true</c>, so a prior lenient check can never silently satisfy a later readiness-requiring one.
+    /// </param>
+    /// <param name="refresh">When <c>true</c>, bypasses the cache and re-inspects the server and both indexes.</param>
+    /// <param name="cancellationToken">A token used to cancel the check.</param>
+    /// <exception cref="MongoDBCapabilityException">
+    /// The configured <see cref="MongoDBRAGProviderOptions.SearchMode"/> is not <see cref="MongoDBSearchMode.HybridRrf"/>,
+    /// the connected server reports a major version below 8, or the deployment/driver could not be inspected.
+    /// </exception>
+    /// <exception cref="MongoDBIndexMissingException">The configured Vector Search or Search index does not exist.</exception>
+    /// <exception cref="MongoDBIndexMismatchException">
+    /// Either index does not match its required Hybrid definition (wrong type, dimension, or field mapping), or a
+    /// <see cref="MongoDBRAGProviderOptions.MandatoryFilter"/> field is not indexed compatibly with its operator
+    /// in either branch.
+    /// </exception>
+    /// <exception cref="MongoDBIndexNotReadyException">
+    /// <paramref name="requireReady"/> is <c>true</c> and either index is not queryable.
+    /// </exception>
+    public async Task ValidateHybridSearchCapabilityAsync(
+        bool requireReady = true,
+        bool refresh = false,
+        CancellationToken cancellationToken = default)
+    {
+        RequireHybridCapabilityMode();
+
+        if (!refresh &&
+            _hybridCapabilityValidation is { } cached &&
+            (cached.RequireReady || !requireReady) &&
+            TimeProvider.GetUtcNow() - cached.ValidatedAt < HybridCapabilityValidationCacheDuration)
+        {
+            return;
+        }
+
+        await RequireServerVersionAsync(cancellationToken).ConfigureAwait(false);
+
+        BsonDocument? vectorIndex = await FindVectorSearchIndexAsync(cancellationToken).ConfigureAwait(false);
+        if (vectorIndex is null)
+        {
+            throw new MongoDBIndexMissingException(
+                $"Vector Search index '{_options.VectorIndexName}' does not exist; create it explicitly.");
+        }
+
+        ValidateVectorSearchIndexDefinition(vectorIndex, requireReady);
+
+        BsonDocument? searchIndex = await FindSearchIndexAsync(cancellationToken).ConfigureAwait(false);
+        if (searchIndex is null)
+        {
+            throw new MongoDBIndexMissingException(
+                $"Search index '{_options.SearchIndexName}' does not exist; create it explicitly.");
+        }
+
+        ValidateSearchIndexDefinition(searchIndex, requireReady);
+
+        IReadOnlyList<FilterFieldReference> filterFields = RAGFilterFieldReferences.Enumerate(_options.MandatoryFilter);
+        ValidateVectorFilterFields(vectorIndex, filterFields);
+        bool searchFilterFieldsVerified = ValidateSearchFilterFields(searchIndex, filterFields);
+
+        // A dynamic Search mapping cannot be statically checked per referenced field (see
+        // ValidateSearchFilterFields), so a result covering unverified mandatory-filter fields is never cached:
+        // every call re-validates rather than silently trusting an unverifiable authorization surface. If a
+        // prior call had cached success (for example before the Search index's mapping became dynamic), that
+        // stale cache entry must be explicitly cleared here rather than left in place, or a later plain
+        // (non-refresh) call could still short-circuit on it and skip re-validating an authorization surface
+        // that is no longer statically verifiable.
+        _hybridCapabilityValidation = searchFilterFieldsVerified
+            ? (TimeProvider.GetUtcNow(), requireReady)
+            : null;
+    }
+
+    /// <summary>
     /// Searches with the configured retrieval strategy. The configured
     /// <see cref="MongoDBRAGProviderOptions.MandatoryFilter"/> is always translated and placed inside the active
-    /// retrieval stage; this is the sole supported authorization mechanism. Only
-    /// <see cref="MongoDBSearchMode.VectorAnn"/>, <see cref="MongoDBSearchMode.VectorEnn"/>, and
-    /// <see cref="MongoDBSearchMode.FullText"/> are implemented in this release.
+    /// retrieval stage(s) -- independently for each input branch of <see cref="MongoDBSearchMode.HybridRrf"/> --
+    /// this is the sole supported authorization mechanism.
     /// </summary>
     /// <param name="query">
     /// The natural-language query. Embedded through the caller-provided generator for
-    /// <see cref="MongoDBSearchMode.VectorAnn"/>/<see cref="MongoDBSearchMode.VectorEnn"/>; used as-is as the
-    /// <c>$search</c> text query for <see cref="MongoDBSearchMode.FullText"/>, which never invokes an embedding
-    /// generator.
+    /// <see cref="MongoDBSearchMode.VectorAnn"/>/<see cref="MongoDBSearchMode.VectorEnn"/>/
+    /// <see cref="MongoDBSearchMode.HybridRrf"/>; used as-is as the <c>$search</c> text query for
+    /// <see cref="MongoDBSearchMode.FullText"/> (and, in addition to embedding, for <see cref="MongoDBSearchMode.HybridRrf"/>'s
+    /// text input), which never invokes an embedding generator on its own.
     /// </param>
     /// <param name="cancellationToken">A token used to cancel the search.</param>
     /// <exception cref="MongoDBConfigurationException"><paramref name="query"/> is empty.</exception>
     /// <exception cref="MongoDBCapabilityException">
-    /// The configured <see cref="MongoDBRAGProviderOptions.SearchMode"/> is not yet implemented.
+    /// The configured <see cref="MongoDBRAGProviderOptions.SearchMode"/> is not implemented; for
+    /// <see cref="MongoDBSearchMode.HybridRrf"/>, also the capability-matrix failures described on
+    /// <see cref="ValidateHybridSearchCapabilityAsync"/>, or a recognized server response indicating
+    /// <c>$rankFusion</c> is unsupported/disabled by the connected deployment.
     /// </exception>
     /// <exception cref="MongoDBEmbeddingException">Embedding generation failed or returned invalid vectors.</exception>
+    /// <exception cref="MongoDBIndexMismatchException">
+    /// <see cref="MongoDBSearchMode.HybridRrf"/>'s Vector Search or Search index does not match its required
+    /// definition, including any configured <see cref="MongoDBRAGProviderOptions.MandatoryFilter"/> field.
+    /// </exception>
+    /// <exception cref="MongoDBIndexMissingException">
+    /// <see cref="MongoDBSearchMode.HybridRrf"/>'s configured Vector Search or Search index does not exist.
+    /// </exception>
+    /// <exception cref="MongoDBIndexNotReadyException">
+    /// <see cref="MongoDBSearchMode.HybridRrf"/>'s Vector Search or Search index is not queryable.
+    /// </exception>
     /// <exception cref="MongoDBMappingException">A retrieved document could not be mapped to a result.</exception>
     /// <exception cref="MongoDBRetrievalException">The retrieval pipeline failed.</exception>
     /// <exception cref="MongoDBTimeoutException"><see cref="MongoDBRAGProviderOptions.RetrievalTimeout"/> elapsed.</exception>
@@ -510,9 +623,23 @@ public sealed class MongoDBRAGProvider : IAsyncDisposable
         string validQuery = MongoDBRAGProviderOptions.RequireText(query, nameof(query));
         RequireSupportedMode();
 
-        BsonDocument[] stages = _options.SearchMode == MongoDBSearchMode.FullText
-            ? BuildFullTextSearchStages(validQuery)
-            : await BuildVectorSearchStagesAsync(validQuery, cancellationToken).ConfigureAwait(false);
+        // Unlike the analogous FullText ValidateSearchIndexAsync seam (which a caller must invoke explicitly),
+        // Hybrid's $rankFusion capability/field validation runs before every aggregation: an unsupported
+        // deployment or a mandatory-filter field that is not indexed compatibly must never silently reach
+        // MongoDB as a generic retrieval failure. The bounded cache (see ValidateHybridSearchCapabilityAsync)
+        // keeps this from costing a network round trip on every call.
+        if (_options.SearchMode == MongoDBSearchMode.HybridRrf)
+        {
+            await ValidateHybridSearchCapabilityAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
+        }
+
+        BsonDocument[] stages = _options.SearchMode switch
+        {
+            MongoDBSearchMode.FullText => BuildFullTextSearchStages(validQuery),
+            MongoDBSearchMode.HybridRrf =>
+                await BuildHybridSearchStagesAsync(validQuery, cancellationToken).ConfigureAwait(false),
+            _ => await BuildVectorSearchStagesAsync(validQuery, cancellationToken).ConfigureAwait(false),
+        };
 
         try
         {
@@ -531,11 +658,31 @@ public sealed class MongoDBRAGProvider : IAsyncDisposable
         {
             throw;
         }
+        catch (MongoCommandException exception)
+            when (_options.SearchMode == MongoDBSearchMode.HybridRrf && IsUnsupportedRankFusionError(exception))
+        {
+            throw new MongoDBCapabilityException(
+                "The connected MongoDB deployment rejected the $rankFusion aggregation stage used by " +
+                "HybridRrf; it may not support Hybrid search (MongoDB 8.0+ with $rankFusion enabled is " +
+                "required). Call ValidateHybridSearchCapabilityAsync for a full capability diagnosis.",
+                exception);
+        }
         catch (MongoException exception)
         {
             throw new MongoDBRetrievalException("MongoDB RAG retrieval failed.", exception);
         }
     }
+
+    /// <summary>
+    /// Recognizes a server command failure indicating the connected deployment does not support (or has
+    /// disabled) the <c>$rankFusion</c> aggregation stage: an "unrecognized pipeline stage"/"command not
+    /// supported" server error code, or an error message explicitly naming <c>rankFusion</c>. Anything else is a
+    /// generic <see cref="MongoDBRetrievalException"/>, matching every other mode.
+    /// </summary>
+    private static bool IsUnsupportedRankFusionError(MongoCommandException exception) =>
+        exception.Code is 40324 or 115 ||
+        (exception.ErrorMessage is { } message &&
+         message.Contains("rankfusion", StringComparison.OrdinalIgnoreCase));
 
     private async Task<BsonDocument[]> BuildVectorSearchStagesAsync(string query, CancellationToken cancellationToken)
     {
@@ -543,7 +690,7 @@ public sealed class MongoDBRAGProvider : IAsyncDisposable
         bool exact = _options.SearchMode == MongoDBSearchMode.VectorEnn;
         int? numCandidates = exact
             ? null
-            : _options.NumCandidates ?? DefaultNumCandidates(_options.TopK);
+            : _options.NumCandidates ?? MongoDBRAGProviderOptions.DefaultNumCandidates(_options.TopK);
         BsonDocument? filter = RAGFilterTranslator.TranslateVectorFilter(_options.MandatoryFilter);
         return RAGPipelineBuilder.BuildVectorSearchPipeline(
             _options.VectorIndexName,
@@ -566,15 +713,45 @@ public sealed class MongoDBRAGProvider : IAsyncDisposable
             filter);
     }
 
+    /// <summary>
+    /// Builds the <see cref="MongoDBSearchMode.HybridRrf"/> pipeline: the vector input always runs ANN (never ENN)
+    /// per rag.md's hybrid pipeline rules, and each input's mandatory filter is translated and placed
+    /// independently, matching the ordinary ANN/FullText translation used by their own single-mode pipelines.
+    /// </summary>
+    private async Task<BsonDocument[]> BuildHybridSearchStagesAsync(string query, CancellationToken cancellationToken)
+    {
+        float[] vector = (await EmbedAsync([query], cancellationToken).ConfigureAwait(false))[0];
+        int vectorNumCandidates = _options.NumCandidates ?? MongoDBRAGProviderOptions.DefaultNumCandidates(_options.TopK);
+        int vectorCandidateLimit = _options.VectorCandidateLimit ?? MongoDBRAGProviderOptions.DefaultNumCandidates(_options.TopK);
+        int textCandidateLimit = _options.TextCandidateLimit ?? MongoDBRAGProviderOptions.DefaultNumCandidates(_options.TopK);
+        BsonDocument? vectorFilter = RAGFilterTranslator.TranslateVectorFilter(_options.MandatoryFilter);
+        BsonArray? searchFilter = RAGFilterTranslator.TranslateSearchFilter(_options.MandatoryFilter);
+        return RAGPipelineBuilder.BuildHybridRankFusionPipeline(
+            _options.VectorIndexName,
+            _options.VectorFieldName,
+            vector,
+            vectorNumCandidates,
+            vectorCandidateLimit,
+            vectorFilter,
+            _options.SearchIndexName,
+            _options.SearchTextFieldNames,
+            query,
+            textCandidateLimit,
+            searchFilter,
+            _options.VectorWeight,
+            _options.TextWeight,
+            _options.IncludeScoreDetails,
+            _options.TopK);
+    }
+
     private void RequireSupportedMode()
     {
         if (_options.SearchMode is not
-            (MongoDBSearchMode.VectorAnn or MongoDBSearchMode.VectorEnn or MongoDBSearchMode.FullText))
+            (MongoDBSearchMode.VectorAnn or MongoDBSearchMode.VectorEnn or MongoDBSearchMode.FullText or
+             MongoDBSearchMode.HybridRrf))
         {
             throw new MongoDBCapabilityException(
-                $"Search mode '{_options.SearchMode}' is not yet implemented in this release; " +
-                $"supported modes: {MongoDBSearchMode.VectorAnn}, {MongoDBSearchMode.VectorEnn}, " +
-                $"{MongoDBSearchMode.FullText}.");
+                $"Search mode '{_options.SearchMode}' is not implemented.");
         }
     }
 
@@ -585,6 +762,176 @@ public sealed class MongoDBRAGProvider : IAsyncDisposable
             throw new MongoDBCapabilityException(
                 $"{nameof(ValidateSearchIndexAsync)} validates the Search index used by " +
                 $"'{MongoDBSearchMode.FullText}'; the configured search mode is '{_options.SearchMode}'.");
+        }
+    }
+
+    private void RequireHybridCapabilityMode()
+    {
+        if (_options.SearchMode != MongoDBSearchMode.HybridRrf)
+        {
+            throw new MongoDBCapabilityException(
+                $"{nameof(ValidateHybridSearchCapabilityAsync)} validates the MongoDB 8.0+ / index capability " +
+                $"required by '{MongoDBSearchMode.HybridRrf}'; the configured search mode is " +
+                $"'{_options.SearchMode}'.");
+        }
+    }
+
+    /// <summary>
+    /// Checks the connected server's <c>buildInfo</c> major version against
+    /// <see cref="MinimumHybridServerMajorVersion"/>, the minimum required for the <c>$rankFusion</c> aggregation
+    /// stage that <see cref="MongoDBSearchMode.HybridRrf"/> depends on.
+    /// </summary>
+    private async Task RequireServerVersionAsync(CancellationToken cancellationToken)
+    {
+        BsonDocument buildInfo;
+        try
+        {
+            buildInfo = await _collection.Database.RunCommandAsync<BsonDocument>(
+                new BsonDocument("buildInfo", 1),
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (MongoException exception)
+        {
+            throw new MongoDBCapabilityException(
+                "Unable to determine the connected MongoDB server version required by " +
+                $"'{MongoDBSearchMode.HybridRrf}''s $rankFusion stage.",
+                exception);
+        }
+
+        string version = buildInfo.GetValue("version", "").AsString;
+        if (ParseMajorVersion(version) is not { } major || major < MinimumHybridServerMajorVersion)
+        {
+            throw new MongoDBCapabilityException(
+                $"'{MongoDBSearchMode.HybridRrf}' requires MongoDB {MinimumHybridServerMajorVersion}.0+ ($rankFusion " +
+                $"support); the connected server reports version '{version}'.");
+        }
+    }
+
+    /// <summary>Parses the leading major-version component of a <c>buildInfo</c> version string, if present.</summary>
+    private static int? ParseMajorVersion(string version)
+    {
+        string majorPart = version.Split('.')[0];
+        return int.TryParse(majorPart, NumberStyles.Integer, CultureInfo.InvariantCulture, out int major)
+            ? major
+            : null;
+    }
+
+    private async Task<BsonDocument?> FindVectorSearchIndexAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            using IAsyncCursor<BsonDocument> cursor = await _collection.SearchIndexes.ListAsync(
+                _options.VectorIndexName,
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            while (await cursor.MoveNextAsync(cancellationToken).ConfigureAwait(false))
+            {
+                BsonDocument? match = cursor.Current.FirstOrDefault(
+                    index => index.GetValue("name", "").AsString == _options.VectorIndexName);
+                if (match is not null)
+                {
+                    return match;
+                }
+            }
+
+            return null;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (MongoException exception)
+        {
+            throw new MongoDBCapabilityException(
+                $"Unable to inspect Vector Search index '{_options.VectorIndexName}'; the deployment type or " +
+                "driver/server version may not support $listSearchIndexes.",
+                exception);
+        }
+    }
+
+    /// <summary>
+    /// Validates the Vector Search index used by Hybrid's vector input branch: index type, the configured vector
+    /// field's path and dimension, and (when <paramref name="requireReady"/>) readiness/queryability. Unlike
+    /// Memory's analogous check, similarity metric is not validated here because Hybrid's $rankFusion combines
+    /// rank order across branches rather than raw similarity scores, so a mismatched similarity metric does not
+    /// break correctness the way it would for a raw-score-based caller.
+    /// </summary>
+    private void ValidateVectorSearchIndexDefinition(BsonDocument index, bool requireReady)
+    {
+        if (!string.Equals(index.GetValue("type", "").AsString, "vectorSearch", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new MongoDBIndexMismatchException(
+                $"Vector Search index '{_options.VectorIndexName}' is not a Vector Search index (found type " +
+                $"'{index.GetValue("type", "").AsString}').");
+        }
+
+        BsonDocument definition = index.GetValue(
+            "latestDefinition",
+            index.GetValue("definition", new BsonDocument())).AsBsonDocument;
+        BsonDocument[] fields = definition.GetValue("fields", new BsonArray())
+            .AsBsonArray.Where(static value => value.IsBsonDocument)
+            .Select(static value => value.AsBsonDocument).ToArray();
+        BsonDocument? vectorField = fields.FirstOrDefault(
+            field => field.GetValue("type", "") == "vector" &&
+                     field.GetValue("path", "").AsString == _options.VectorFieldName);
+        if (vectorField is null)
+        {
+            throw new MongoDBIndexMismatchException(
+                $"Vector Search index '{_options.VectorIndexName}' does not map configured field " +
+                $"'{_options.VectorFieldName}' as type 'vector'.");
+        }
+
+        if (vectorField.GetValue("numDimensions", 0).ToInt32() != _vectorDimensions)
+        {
+            throw new MongoDBIndexMismatchException(
+                $"Vector Search index '{_options.VectorIndexName}' field '{_options.VectorFieldName}' has " +
+                $"{vectorField.GetValue("numDimensions", 0).ToInt32()} dimensions; expected {_vectorDimensions}.");
+        }
+
+        if (requireReady &&
+            (!string.Equals(index.GetValue("status", "").AsString, "READY", StringComparison.OrdinalIgnoreCase) ||
+             !index.GetValue("queryable", false).ToBoolean()))
+        {
+            throw new MongoDBIndexNotReadyException(
+                $"Vector Search index '{_options.VectorIndexName}' is not queryable.");
+        }
+    }
+
+    /// <summary>
+    /// Validates that every field referenced by <see cref="MongoDBRAGProviderOptions.MandatoryFilter"/> is
+    /// explicitly indexed as a Vector Search <c>type: "filter"</c> field (rag.md's field-path validation
+    /// requirement). Vector Search index field declarations have no "dynamic" equivalent -- every filterable
+    /// field must be declared -- so this is always fully and definitively checkable; there is no unverified case
+    /// on the vector side, unlike <see cref="ValidateSearchFilterFields"/>.
+    /// </summary>
+    private void ValidateVectorFilterFields(BsonDocument index, IReadOnlyList<FilterFieldReference> references)
+    {
+        if (references.Count == 0)
+        {
+            return;
+        }
+
+        BsonDocument definition = index.GetValue(
+            "latestDefinition",
+            index.GetValue("definition", new BsonDocument())).AsBsonDocument;
+        BsonDocument[] fields = definition.GetValue("fields", new BsonArray())
+            .AsBsonArray.Where(static value => value.IsBsonDocument)
+            .Select(static value => value.AsBsonDocument).ToArray();
+        foreach (FilterFieldReference reference in references)
+        {
+            bool isFilterField = fields.Any(
+                field => string.Equals(field.GetValue("type", "").AsString, "filter", StringComparison.OrdinalIgnoreCase) &&
+                          field.GetValue("path", "").AsString == reference.FieldPath);
+            if (!isFilterField)
+            {
+                throw new MongoDBIndexMismatchException(
+                    $"Vector Search index '{_options.VectorIndexName}' does not map mandatory-filter field " +
+                    $"'{reference.FieldPath}' as type 'filter'; every field referenced by MandatoryFilter must " +
+                    "be explicitly indexed as a Vector Search filter field.");
+            }
         }
     }
 
@@ -764,8 +1111,99 @@ public sealed class MongoDBRAGProvider : IAsyncDisposable
     private static bool IsTextCompatible(BsonDocument fieldMapping) =>
         fieldMapping.GetValue("type", "").AsString is "string" or "autocomplete" or "token";
 
-    private static int DefaultNumCandidates(int topK) =>
-        Math.Min(MongoDBRAGProviderOptions.MaxNumCandidates, Math.Max(topK * 10, 100));
+    /// <summary>
+    /// Validates that every field referenced by <see cref="MongoDBRAGProviderOptions.MandatoryFilter"/> is mapped
+    /// in the Search index compatibly with the operator category it is used with. Returns <c>true</c> when this
+    /// was fully and statically verified (including trivially, when <paramref name="references"/> is empty), and
+    /// <c>false</c> only when the mapping is dynamic (see <see cref="IsDynamicMappingEnabled"/>) and there are
+    /// references to check -- <c>listSearchIndexes</c> provides no per-field enumeration for a dynamic mapping, so
+    /// per-field compatibility cannot be statically confirmed in that case (a documented limitation, not a
+    /// validation gap). The caller must not cache a <c>false</c> result as success.
+    /// </summary>
+    private bool ValidateSearchFilterFields(BsonDocument index, IReadOnlyList<FilterFieldReference> references)
+    {
+        if (references.Count == 0)
+        {
+            return true;
+        }
+
+        BsonDocument definition = index.GetValue(
+            "latestDefinition",
+            index.GetValue("definition", new BsonDocument())).AsBsonDocument;
+        BsonDocument mappings = definition.GetValue("mappings", new BsonDocument()).AsBsonDocument;
+        if (IsDynamicMappingEnabled(mappings))
+        {
+            return false;
+        }
+
+        BsonDocument fields = mappings.GetValue("fields", new BsonDocument()).AsBsonDocument;
+        foreach (FilterFieldReference reference in references)
+        {
+            IReadOnlyList<BsonDocument> definitions = ResolveFieldMappingDefinitions(fields, reference.FieldPath);
+            if (definitions.Count == 0)
+            {
+                throw new MongoDBIndexMismatchException(
+                    $"Search index '{_options.SearchIndexName}' does not map mandatory-filter field " +
+                    $"'{reference.FieldPath}'.");
+            }
+
+            // Every individual value category referenced (a membership filter may reference more than one, for
+            // example a mixed string/number `in` list) must independently be satisfied by at least one mapping
+            // definition in the field's array -- possibly a different definition per category -- since a single
+            // definition covering one category does not imply it covers another.
+            foreach (FilterValueCategory valueCategory in BsonValueCategories.Flags(reference.ValueCategories))
+            {
+                if (!definitions.Any(d => IsFilterValueCategoryCompatible(d, reference.Category, valueCategory)))
+                {
+                    string types = string.Join(", ", definitions.Select(d => d.GetValue("type", "").AsString));
+                    throw new MongoDBIndexMismatchException(
+                        $"Search index '{_options.SearchIndexName}' maps mandatory-filter field " +
+                        $"'{reference.FieldPath}' to '{types}', which is not compatible with a " +
+                        $"{reference.Category} filter over a {valueCategory} value (for example a string " +
+                        "equality/membership value requires a 'token' mapping, not 'string').");
+                }
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Checks whether <paramref name="fieldMapping"/> is compatible with a single BSON value category used
+    /// against it under <paramref name="operatorCategory"/>. Exact-match (equality/membership) string values
+    /// require a <c>token</c> mapping -- never <c>string</c>, which is full-text analyzed and cannot support
+    /// exact matching -- while range comparisons require an orderable <c>number</c>/<c>date</c> (or their facet
+    /// equivalents) matching the value's own category.
+    /// </summary>
+    private static bool IsFilterValueCategoryCompatible(
+        BsonDocument fieldMapping,
+        FilterOperatorCategory operatorCategory,
+        FilterValueCategory valueCategory)
+    {
+        string type = fieldMapping.GetValue("type", "").AsString;
+        return operatorCategory switch
+        {
+            FilterOperatorCategory.Range => valueCategory switch
+            {
+                FilterValueCategory.Number => type is "number" or "numberFacet",
+                FilterValueCategory.Date => type is "date" or "dateFacet",
+                // Range filters can only ever produce Number or Date value categories (see
+                // RAGFilterFieldReferences.Collect), so this branch is structurally unreachable; retained as a
+                // defensive rejection rather than a silent pass.
+                _ => false,
+            },
+            _ => valueCategory switch
+            {
+                FilterValueCategory.String => type is "token",
+                FilterValueCategory.Boolean => type is "boolean",
+                FilterValueCategory.Number => type is "number",
+                FilterValueCategory.Date => type is "date",
+                FilterValueCategory.ObjectId => type is "objectId",
+                FilterValueCategory.Uuid => type is "uuid",
+                _ => false,
+            },
+        };
+    }
 
     private async Task<float[][]> EmbedAsync(
         IEnumerable<string> values,
@@ -814,6 +1252,12 @@ public sealed class MongoDBRAGProvider : IAsyncDisposable
         // Strip the internal reserved alias from a copy of the document before it becomes the public RawDocument;
         // MongoDBRAGResult deep-clones its input, so mutating this instance here does not affect the cursor.
         document.Remove(FieldPath.ReservedScoreAlias);
+        BsonDocument? scoreDetails = null;
+        if (document.TryGetValue(FieldPath.ReservedScoreDetailsAlias, out BsonValue? scoreDetailsValue))
+        {
+            scoreDetails = scoreDetailsValue.AsBsonDocument;
+            document.Remove(FieldPath.ReservedScoreDetailsAlias);
+        }
 
         BsonValue idValue = FieldPath.Resolve(document, _options.IdFieldName);
         string id = MapId(idValue);
@@ -846,7 +1290,8 @@ public sealed class MongoDBRAGProvider : IAsyncDisposable
             sourceName,
             sourceUrl,
             metadata,
-            document);
+            document,
+            scoreDetails);
     }
 
     /// <summary>

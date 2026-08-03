@@ -12,6 +12,7 @@ public sealed class FieldPathTests
     [InlineData("items.0.name")]
     [InlineData("items.$[].name")]
     [InlineData("metadata._ragScore")]
+    [InlineData("metadata._ragScoreDetails")]
     public void Validate_rejects_unsafe_paths(string path)
     {
         Assert.Throws<MongoDBConfigurationException>(() => FieldPath.Validate(path));

@@ -11,6 +11,7 @@ namespace MongoDB.AgentFramework;
 public sealed record MongoDBRAGResult
 {
     private readonly BsonDocument _rawDocument;
+    private readonly BsonDocument? _scoreDetails;
 
     /// <summary>Initializes an immutable, normalized RAG result.</summary>
     /// <param name="id">The document identifier mapped from the configured ID field.</param>
@@ -25,6 +26,14 @@ public sealed record MongoDBRAGResult
     /// snapshot on every access so a caller mutating a previously returned document cannot change this instance or
     /// any subsequent read either.
     /// </param>
+    /// <param name="scoreDetails">
+    /// The optional, MongoDB-native <c>$rankFusion</c> <c>scoreDetails</c> diagnostic document (populated only for
+    /// <see cref="MongoDBSearchMode.HybridRrf"/> when explicitly requested via
+    /// <see cref="MongoDBRAGProviderOptions.IncludeScoreDetails"/>). Its shape is not a MongoDB compatibility
+    /// guarantee, so it is exposed purely as an optional diagnostic payload distinct from <see cref="Score"/>. A
+    /// defensive deep clone is stored and a fresh deep-clone snapshot is returned on every <see cref="ScoreDetails"/>
+    /// access, matching <see cref="RawDocument"/>'s immutability semantics.
+    /// </param>
     public MongoDBRAGResult(
         string id,
         string text,
@@ -32,7 +41,8 @@ public sealed record MongoDBRAGResult
         string? sourceName = null,
         string? sourceUrl = null,
         IReadOnlyDictionary<string, BsonValue>? metadata = null,
-        BsonDocument? rawDocument = null)
+        BsonDocument? rawDocument = null,
+        BsonDocument? scoreDetails = null)
     {
         if (string.IsNullOrWhiteSpace(id))
         {
@@ -48,6 +58,7 @@ public sealed record MongoDBRAGResult
         SourceUrl = sourceUrl;
         Metadata = metadata is null ? ImmutableBsonMetadata.Empty : ImmutableBsonMetadata.CopyFrom(metadata);
         _rawDocument = rawDocument is null ? new BsonDocument() : (BsonDocument)rawDocument.DeepClone();
+        _scoreDetails = scoreDetails is null ? null : (BsonDocument)scoreDetails.DeepClone();
     }
 
     /// <summary>Gets the document identifier.</summary>
@@ -78,4 +89,11 @@ public sealed record MongoDBRAGResult
     /// any subsequently returned snapshot.
     /// </summary>
     public BsonDocument RawDocument => (BsonDocument)_rawDocument.DeepClone();
+
+    /// <summary>
+    /// Gets a fresh deep-clone snapshot of the optional MongoDB-native <c>$rankFusion</c> <c>scoreDetails</c>
+    /// diagnostic document, or <see langword="null"/> when not requested or not applicable. Each access returns an
+    /// independent copy, matching <see cref="RawDocument"/>'s immutability semantics.
+    /// </summary>
+    public BsonDocument? ScoreDetails => (BsonDocument?)_scoreDetails?.DeepClone();
 }
