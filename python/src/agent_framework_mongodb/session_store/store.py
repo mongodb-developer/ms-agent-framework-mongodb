@@ -6,7 +6,6 @@ import asyncio
 import hashlib
 import json
 import logging
-import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -17,25 +16,19 @@ from agent_framework import AgentSession, SessionStore
 from pymongo import ASCENDING, AsyncMongoClient
 from pymongo.asynchronous.collection import AsyncCollection
 from pymongo.errors import (
-    ConnectionFailure,
     DuplicateKeyError,
-    OperationFailure,
     PyMongoError,
-    ServerSelectionTimeoutError,
 )
 
 from .._shared.client import MongoClientHandle
+from .._shared.error_handling import OperationKind, translate_pymongo_error
+from .._shared.observability import instrument
 from ..errors import (
-    MongoDBAuthorizationError,
     MongoDBConcurrencyError,
     MongoDBConfigurationError,
     MongoDBIndexMismatchError,
     MongoDBIndexMissingError,
     MongoDBMappingError,
-    MongoDBPersistenceError,
-    MongoDBRetrievalError,
-    MongoDBTransientPersistenceError,
-    MongoDBTransientRetrievalError,
 )
 
 MongoDocument = dict[str, Any]
@@ -153,19 +146,16 @@ class MongoDBSessionStore(SessionStore):
         versioned = await self.get_versioned(session_id)
         return versioned.session if versioned is not None else None
 
+    @instrument("session_store", "load")
     async def get_versioned(self, session_id: str) -> MongoDBVersionedSession | None:
         """Load a snapshot with the version needed for compare-and-swap."""
-        started = time.monotonic()
         try:
             document = await self.collection.find_one(self._scope(session_id))
         except PyMongoError as exc:
-            _log_failure("load", started, _error_category(exc, "retrieval"))
             raise _translate_mongo_error(exc, "retrieval") from exc
         if document is None:
-            _log_success("load", started, 0)
             return None
         restored = _restore(document)
-        _log_success("load", started, 1)
         return restored
 
     async def set(self, session_id: str, session: AgentSession) -> None:
@@ -188,6 +178,7 @@ class MongoDBSessionStore(SessionStore):
             "MongoDB Session Store unconditional replacement could not resolve concurrent writes."
         )
 
+    @instrument("session_store", "persist")
     async def create(
         self,
         session_id: str,
@@ -213,7 +204,6 @@ class MongoDBSessionStore(SessionStore):
         }
         if effective_expiry is not None:
             document["expires_at"] = effective_expiry
-        started = time.monotonic()
         try:
             await self.collection.insert_one(document)
         except DuplicateKeyError:
@@ -231,11 +221,14 @@ class MongoDBSessionStore(SessionStore):
                 f"Session {session_id!r} already exists in the authorized scope."
             ) from None
         except PyMongoError as exc:
-            _log_failure("persist", started, _error_category(exc, "persistence"))
             raise _translate_mongo_error(exc, "persistence") from exc
-        _log_success("persist", started, 1)
         return 1
 
+    @instrument(
+        "session_store",
+        "persist",
+        result_count=lambda _arguments, _result: 1,
+    )
     async def compare_and_set(
         self,
         session_id: str,
@@ -281,7 +274,6 @@ class MongoDBSessionStore(SessionStore):
         }
         if effective_expiry is not None:
             replacement["expires_at"] = effective_expiry
-        started = time.monotonic()
         try:
             result = await self.collection.replace_one(
                 {**scope, "version": expected_version},
@@ -289,10 +281,8 @@ class MongoDBSessionStore(SessionStore):
                 upsert=False,
             )
         except PyMongoError as exc:
-            _log_failure("persist", started, _error_category(exc, "persistence"))
             raise _translate_mongo_error(exc, "persistence") from exc
         if result.matched_count == 1:
-            _log_success("persist", started, 1)
             return expected_version + 1
         winner = await self._read_after_conflict(scope)
         if winner is not None:
@@ -328,14 +318,12 @@ class MongoDBSessionStore(SessionStore):
             f"Session {session_id!r} is not at expected version {expected_version}."
         )
 
+    @instrument("session_store", "delete")
     async def _delete_one(self, query: MongoDocument) -> bool:
-        started = time.monotonic()
         try:
             result = await self.collection.delete_one(query)
         except PyMongoError as exc:
-            _log_failure("delete", started, _error_category(exc, "persistence"))
             raise _translate_mongo_error(exc, "persistence") from exc
-        _log_success("delete", started, result.deleted_count)
         return result.deleted_count == 1
 
     async def _read_after_conflict(self, scope: MongoDocument) -> MongoDocument | None:
@@ -356,6 +344,7 @@ class MongoDBSessionStore(SessionStore):
             return None
         return _to_bson_utc_milliseconds(now + self.options.ttl)
 
+    @instrument("indexing", "ensure_index")
     async def ensure_indexes(self) -> tuple[str, ...]:
         """Explicitly create regular scope, version, and expiration indexes."""
         partial = {
@@ -402,6 +391,7 @@ class MongoDBSessionStore(SessionStore):
         except PyMongoError as exc:
             raise _translate_mongo_error(exc, "persistence") from exc
 
+    @instrument("indexing", "validate_index")
     async def validate_indexes(self) -> None:
         """Validate required regular indexes without mutating MongoDB."""
         try:
@@ -578,48 +568,9 @@ def _validate_versions(document: MongoDocument) -> None:
         )
 
 
-def _translate_mongo_error(error: PyMongoError, operation: str) -> Exception:
-    if isinstance(error, OperationFailure) and error.code in {13, 18}:
-        return MongoDBAuthorizationError("MongoDB authorization failed.")
-    transient = isinstance(error, (ConnectionFailure, ServerSelectionTimeoutError))
-    if operation == "retrieval":
-        if transient:
-            return MongoDBTransientRetrievalError(
-                "MongoDB Session Store retrieval failed transiently."
-            )
-        return MongoDBRetrievalError("MongoDB Session Store retrieval failed.")
-    if transient:
-        return MongoDBTransientPersistenceError(
-            "MongoDB Session Store persistence failed transiently."
-        )
-    return MongoDBPersistenceError("MongoDB Session Store persistence failed.")
-
-
-def _error_category(error: PyMongoError, operation: str) -> str:
-    return _translate_mongo_error(error, operation).__class__.__name__
-
-
-def _log_success(operation: str, started: float, count: int) -> None:
-    _LOGGER.info(
-        "MongoDB Session Store operation completed",
-        extra={
-            "feature": "session_store",
-            "operation": operation,
-            "outcome": "success" if count else "empty",
-            "result_count": count,
-            "duration_ms": round((time.monotonic() - started) * 1000),
-        },
-    )
-
-
-def _log_failure(operation: str, started: float, category: str) -> None:
-    _LOGGER.warning(
-        "MongoDB Session Store operation failed",
-        extra={
-            "feature": "session_store",
-            "operation": operation,
-            "outcome": "failed",
-            "error_category": category,
-            "duration_ms": round((time.monotonic() - started) * 1000),
-        },
+def _translate_mongo_error(error: PyMongoError, operation: OperationKind) -> Exception:
+    return translate_pymongo_error(
+        error,
+        operation,
+        feature="session_store",
     )

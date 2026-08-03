@@ -37,3 +37,7 @@ This documentation explains the implemented system at the code level. The
 ## Ingestion samples
 
 - [Python sample ingestion](ingestion/python-sample-ingestion.md)
+
+## Operations and security
+
+- [Python observability and security](operations/python-observability-security.md)

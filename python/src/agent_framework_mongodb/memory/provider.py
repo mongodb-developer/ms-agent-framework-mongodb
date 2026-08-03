@@ -16,25 +16,21 @@ from typing import Any, ClassVar, cast
 from agent_framework import ContextProvider, Message, SupportsGetEmbeddings
 from pymongo import ASCENDING, AsyncMongoClient
 from pymongo.asynchronous.collection import AsyncCollection
-from pymongo.errors import BulkWriteError, ConnectionFailure, OperationFailure, PyMongoError
+from pymongo.errors import BulkWriteError, PyMongoError
 
 from .._shared.client import MongoClientHandle
 from .._shared.embeddings import normalize_embeddings, validate_dimensions
+from .._shared.error_handling import OperationKind, translate_pymongo_error
 from .._shared.field_paths import validate_field_path
 from .._shared.indexes import RegularIndexManager, VectorIndexDefinition, VectorIndexManager
+from .._shared.observability import instrument
 from ..errors import (
-    MongoDBAuthorizationError,
-    MongoDBCapabilityError,
     MongoDBConfigurationError,
     MongoDBEmbeddingError,
     MongoDBEmbeddingGenerationError,
-    MongoDBIndexMismatchError,
-    MongoDBIndexMissingError,
-    MongoDBIndexNotReadyError,
     MongoDBIntegrationError,
     MongoDBMappingError,
     MongoDBPersistenceError,
-    MongoDBRetrievalError,
     MongoDBTimeoutError,
     MongoDBTransientPersistenceError,
     MongoDBTransientRetrievalError,
@@ -207,6 +203,7 @@ class MongoDBMemoryContextProvider(ContextProvider):
         except Exception as exc:
             raise MongoDBEmbeddingGenerationError("Embedding generation failed.") from exc
 
+    @instrument("memory", "retrieve")
     async def search(
         self,
         query: str,
@@ -280,6 +277,7 @@ class MongoDBMemoryContextProvider(ContextProvider):
             raise _translate_mongo_error(exc, operation="retrieval") from exc
         return [_message_from_document(document) for document in documents]
 
+    @instrument("memory", "persist")
     async def store(
         self,
         messages: Sequence[Message],
@@ -468,10 +466,6 @@ class MongoDBMemoryContextProvider(ContextProvider):
         except asyncio.CancelledError:
             raise
         except (MongoDBTransientRetrievalError, MongoDBTimeoutError):
-            _LOGGER.warning(
-                "MongoDB Memory adapter operation failed",
-                extra={"feature": "memory", "operation": "retrieve", "outcome": "failed"},
-            )
             return
         if messages:
             context.extend_instructions(self.source_id, self.context_prompt)
@@ -509,11 +503,8 @@ class MongoDBMemoryContextProvider(ContextProvider):
         ):
             if self.persistence_fail_fast:
                 raise
-            _LOGGER.warning(
-                "MongoDB Memory adapter operation failed",
-                extra={"feature": "memory", "operation": "persist", "outcome": "failed"},
-            )
 
+    @instrument("memory", "delete")
     async def delete_memory(self, memory_id: str) -> int:
         """Delete one memory ID inside the configured authorization scope."""
         query = {
@@ -522,10 +513,12 @@ class MongoDBMemoryContextProvider(ContextProvider):
         }
         return await self._delete_many(query)
 
+    @instrument("memory", "delete")
     async def clear_session(self, session_id: str) -> int:
         """Delete one session inside the configured authorization scope."""
         return await self._delete_many(self._scope_filter(session_id=session_id))
 
+    @instrument("memory", "delete")
     async def clear_user(self) -> int:
         """Delete the configured user inside its application/agent scope."""
         if self.application_id is None and self.agent_id is None:
@@ -545,6 +538,7 @@ class MongoDBMemoryContextProvider(ContextProvider):
         except PyMongoError as exc:
             raise _translate_mongo_error(exc, operation="persistence") from exc
 
+    @instrument("memory", "list")
     async def list_metadata(
         self,
         *,
@@ -1071,80 +1065,9 @@ def _metadata_from_document(document: Mapping[str, Any]) -> MemoryMetadata:
 def _translate_mongo_error(
     error: PyMongoError,
     *,
-    operation: str,
+    operation: OperationKind,
 ) -> MongoDBIntegrationError:
-    code: int | None = None
-    code_name: str | None = None
-    if isinstance(error, OperationFailure):
-        code = error.code
-        details_value: object = error.details
-        if isinstance(details_value, Mapping):
-            details = cast(Mapping[str, object], details_value)
-            raw_code_name = details.get("codeName")
-            if isinstance(raw_code_name, str):
-                code_name = raw_code_name
-
-    if code in {13, 18} or code_name in {"Unauthorized", "AuthenticationFailed"}:
-        return MongoDBAuthorizationError("MongoDB authentication or authorization failed.")
-    if code == 27 or code_name in {"IndexNotFound", "SearchIndexNotFound"}:
-        return MongoDBIndexMissingError("The required MongoDB Memory index is missing.")
-    if code in {85, 86} or code_name in {"IndexOptionsConflict", "IndexKeySpecsConflict"}:
-        return MongoDBIndexMismatchError(
-            "The configured MongoDB Memory index definition does not match."
-        )
-    if code_name in {"SearchIndexNotReady", "IndexBuildAlreadyInProgress"}:
-        return MongoDBIndexNotReadyError("The required MongoDB Memory index is not ready.")
-    if code == 59 or code_name == "CommandNotFound":
-        return MongoDBCapabilityError("The required MongoDB capability is unavailable.")
-    if code in {2, 9, 14, 72} or code_name in {
-        "BadValue",
-        "FailedToParse",
-        "InvalidOptions",
-        "TypeMismatch",
-    }:
-        return MongoDBConfigurationError("MongoDB rejected the configured Memory operation.")
-
-    transient_codes = {
-        6,
-        7,
-        89,
-        91,
-        189,
-        262,
-        9001,
-        10107,
-        11600,
-        11602,
-        13435,
-        13436,
-    }
-    transient_names = {
-        "HostUnreachable",
-        "HostNotFound",
-        "NetworkTimeout",
-        "ShutdownInProgress",
-        "PrimarySteppedDown",
-        "ExceededTimeLimit",
-        "NotWritablePrimary",
-        "InterruptedAtShutdown",
-        "InterruptedDueToReplStateChange",
-        "NotPrimaryNoSecondaryOk",
-        "NotPrimaryOrSecondary",
-    }
-    is_transient = (
-        isinstance(error, ConnectionFailure)
-        or code in transient_codes
-        or code_name in transient_names
-        or error.has_error_label("RetryableReadError")
-        or error.has_error_label("RetryableWriteError")
-    )
-    if operation == "retrieval":
-        if is_transient:
-            return MongoDBTransientRetrievalError("MongoDB Memory retrieval failed transiently.")
-        return MongoDBRetrievalError("MongoDB Memory retrieval failed.")
-    if is_transient:
-        return MongoDBTransientPersistenceError("MongoDB Memory persistence failed transiently.")
-    return MongoDBPersistenceError("MongoDB Memory persistence failed.")
+    return translate_pymongo_error(error, operation, feature="memory")
 
 
 def _contains_only_expected_id_collisions(
