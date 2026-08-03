@@ -1,3 +1,5 @@
+using MongoDB.AgentFramework.Internal;
+
 namespace MongoDB.AgentFramework;
 
 /// <summary>
@@ -25,8 +27,9 @@ public sealed record MongoDBIndexComparison
         IReadOnlyList<string> mismatches,
         IReadOnlyList<string>? compatibleDifferences = null)
     {
-        Mismatches = mismatches ?? throw new ArgumentNullException(nameof(mismatches));
-        CompatibleDifferences = compatibleDifferences ?? [];
+        Mismatches = ImmutableCollections.Snapshot(
+            mismatches ?? throw new ArgumentNullException(nameof(mismatches)));
+        CompatibleDifferences = ImmutableCollections.Snapshot(compatibleDifferences);
     }
 
     /// <summary>Gets whether the index is compatible with the expected definition (no actionable mismatches).</summary>

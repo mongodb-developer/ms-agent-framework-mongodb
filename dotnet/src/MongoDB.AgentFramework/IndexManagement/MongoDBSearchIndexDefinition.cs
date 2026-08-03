@@ -39,7 +39,7 @@ public sealed record MongoDBSearchIndexDefinition
             FieldPath.Validate(field, nameof(textFieldNames));
         }
 
-        TextFieldNames = [.. textFieldNames];
+        TextFieldNames = ImmutableCollections.Snapshot(textFieldNames);
         MandatoryFilter = mandatoryFilter;
     }
 

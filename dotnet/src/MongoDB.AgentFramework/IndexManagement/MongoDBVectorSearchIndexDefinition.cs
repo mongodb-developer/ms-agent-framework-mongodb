@@ -48,7 +48,7 @@ public sealed record MongoDBVectorSearchIndexDefinition
             FieldPath.Validate(path, nameof(filterFieldPaths));
         }
 
-        FilterFieldPaths = filterFieldPaths is null ? [] : [.. filterFieldPaths];
+        FilterFieldPaths = ImmutableCollections.Snapshot(filterFieldPaths);
     }
 
     /// <summary>Gets the Vector Search index name.</summary>
