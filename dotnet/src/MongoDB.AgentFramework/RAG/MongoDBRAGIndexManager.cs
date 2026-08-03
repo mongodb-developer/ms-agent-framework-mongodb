@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using MongoDB.AgentFramework.Internal;
 using MongoDB.AgentFramework.Internal.IndexManagement;
 using MongoDB.Bson;
@@ -324,9 +325,15 @@ public sealed class MongoDBRAGIndexManager : IAsyncDisposable
     /// <summary>
     /// Creates both the configured Vector Search and Search indexes if missing, and optionally waits until both
     /// are queryable -- the combination <see cref="MongoDBSearchMode.HybridRrf"/> requires. Both
-    /// <see cref="VectorDefinition"/> and <see cref="SearchDefinition"/> must be configured.
+    /// <see cref="VectorDefinition"/> and <see cref="SearchDefinition"/> must be configured. When
+    /// <paramref name="waitUntilReady"/> is <see langword="true"/>, <paramref name="timeout"/> is one shared
+    /// monotonic deadline for both indexes' waits combined, not a full independent timeout applied to each: the
+    /// Vector Search index is waited on first against the full <paramref name="timeout"/>, and the Search index
+    /// is then waited on against only whatever budget remains, so this call's total wall-clock bound never
+    /// exceeds <paramref name="timeout"/> regardless of how the two indexes individually behave.
     /// </summary>
     /// <exception cref="MongoDBConfigurationException">Either definition is not configured.</exception>
+    /// <exception cref="MongoDBTimeoutException"><paramref name="waitUntilReady"/> is <see langword="true"/> and the shared deadline elapsed.</exception>
     public async Task EnsureHybridAsync(
         bool waitUntilReady = false,
         TimeSpan? timeout = null,
@@ -334,9 +341,40 @@ public sealed class MongoDBRAGIndexManager : IAsyncDisposable
         CancellationToken cancellationToken = default)
     {
         RequireHybridDefinitions();
-        await EnsureVectorSearchIndexAsync(waitUntilReady, timeout, pollInterval, cancellationToken)
+
+        if (!waitUntilReady)
+        {
+            // timeout/pollInterval only ever affect WaitUntilReadyAsync's polling; the create/update mutation
+            // itself is never time-bounded, so there is no shared-deadline concern to apply here.
+            await EnsureVectorSearchIndexAsync(waitUntilReady: false, timeout, pollInterval, cancellationToken)
+                .ConfigureAwait(false);
+            await EnsureSearchIndexAsync(waitUntilReady: false, timeout, pollInterval, cancellationToken)
+                .ConfigureAwait(false);
+            return;
+        }
+
+        TimeSpan overallTimeout = timeout ?? TimeSpan.FromSeconds(60);
+        Stopwatch elapsed = Stopwatch.StartNew();
+
+        await EnsureVectorSearchIndexAsync(waitUntilReady: true, overallTimeout, pollInterval, cancellationToken)
             .ConfigureAwait(false);
-        await EnsureSearchIndexAsync(waitUntilReady, timeout, pollInterval, cancellationToken)
+
+        TimeSpan remaining = overallTimeout - elapsed.Elapsed;
+        if (remaining <= TimeSpan.Zero)
+        {
+            // The Vector Search index's wait alone consumed the entire shared budget: the Search index cannot
+            // even be given a chance, since a non-positive timeout would otherwise flow into
+            // BoundedExponentialPolling.RunAsync and incorrectly be rejected as a configuration error rather
+            // than reported as the legitimate "shared Hybrid deadline elapsed" timeout it actually is.
+            MongoDBSearchIndexDefinition searchDefinition = RequireSearchDefinition();
+            throw new MongoDBTimeoutException(
+                $"Index '{searchDefinition.IndexName}' was not ready before timeout: the shared {overallTimeout} " +
+                "Hybrid deadline was already exhausted by the Vector Search index's wait.",
+                new TimeoutException(
+                    $"The shared {overallTimeout} Hybrid deadline elapsed before the Search index could be checked."));
+        }
+
+        await EnsureSearchIndexAsync(waitUntilReady: true, remaining, pollInterval, cancellationToken)
             .ConfigureAwait(false);
     }
 

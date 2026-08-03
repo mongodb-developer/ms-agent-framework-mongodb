@@ -333,6 +333,59 @@ public sealed class MongoDBRAGIndexManagerTests
     }
 
     [Fact]
+    public async Task EnsureHybridSharesOneOverallDeadlineAcrossBothIndexesInsteadOfDoublingIt()
+    {
+        // The Vector Search index transitions BUILDING -> BUILDING -> READY, consuming most of the shared
+        // 600ms budget via WaitUntilReadyAsync's exponential-backoff delays (~150ms then ~300ms, using the
+        // 150ms pollInterval). The Search index is (and stays) structurally compatible but perpetually
+        // BUILDING, so it can never itself become ready -- it must time out against whatever sliver of the
+        // 600ms shared deadline remains after the Vector Search index's wait, not a fresh, independent 600ms of
+        // its own. Before the fix, each Ensure*SearchIndexAsync call received the full 600ms independently, so
+        // the overall call would take close to 1200ms; the fix bounds it near 600ms total.
+        BsonDocument vectorBuilding = RAGIndexFixtures.ValidVectorIndex("facade_vector");
+        vectorBuilding["status"] = "BUILDING";
+        vectorBuilding["queryable"] = false;
+        BsonDocument vectorReady = RAGIndexFixtures.ValidVectorIndex("facade_vector");
+        BsonDocument searchBuilding = RAGIndexFixtures.ValidSearchIndex("facade_search");
+        searchBuilding["status"] = "BUILDING";
+        searchBuilding["queryable"] = false;
+
+        var state = new RAGCollectionState { SearchIndexes = [vectorBuilding, searchBuilding] };
+        // Every ListAsync call -- including the existence pre-check and mandatory re-inspect inside EnsureAsync,
+        // not just the wait loop's own inspections -- dequeues one snapshot when the queue is non-empty (both
+        // indexes share the same underlying "list search indexes" call); once the queue runs dry, the
+        // last-dequeued snapshot keeps being reused. So the first two entries below are consumed by the Vector
+        // Search index's existence check and mandatory re-inspect (both still BUILDING, which is fine: neither
+        // is a wait-loop retry), and only the following three are the wait loop's own attempts -- the Vector
+        // Search index becomes (and stays) READY on the third of those, while the Search index stays BUILDING
+        // forever.
+        state.SearchIndexSnapshots.Enqueue([vectorBuilding, searchBuilding]); // EnsureAsync's existence check (vector)
+        state.SearchIndexSnapshots.Enqueue([vectorBuilding, searchBuilding]); // EnsureAsync's mandatory re-inspect (vector)
+        state.SearchIndexSnapshots.Enqueue([vectorBuilding, searchBuilding]); // wait attempt 1 (vector)
+        state.SearchIndexSnapshots.Enqueue([vectorBuilding, searchBuilding]); // wait attempt 2 (vector)
+        state.SearchIndexSnapshots.Enqueue([vectorReady, searchBuilding]); // wait attempt 3 (vector) -> READY
+        MongoDBRAGIndexManager manager = CreateHybridManager(state);
+
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        MongoDBTimeoutException exception = await Assert.ThrowsAsync<MongoDBTimeoutException>(
+            () => manager.EnsureHybridAsync(
+                waitUntilReady: true,
+                timeout: TimeSpan.FromMilliseconds(600),
+                pollInterval: TimeSpan.FromMilliseconds(150)));
+        stopwatch.Stop();
+
+        Assert.Contains("facade_search", exception.Message);
+        // Fixed behavior: ~450ms for the Vector Search index's wait (two backoff delays: 150ms + 300ms) plus
+        // whatever sliver of the 600ms shared budget remains (~150ms) for the Search index's wait -> ~600ms
+        // total. Pre-fix behavior: the Search index would instead receive a second, independent 600ms budget on
+        // top of the Vector Search index's ~450ms -> ~1050ms total. 850ms comfortably separates the two while
+        // tolerating ordinary CI scheduling jitter.
+        Assert.True(
+            stopwatch.Elapsed < TimeSpan.FromMilliseconds(850),
+            $"Expected the shared deadline to bound total wall-clock time near the single {600}ms budget, but took {stopwatch.Elapsed}.");
+    }
+
+    [Fact]
     public async Task EnsureVectorThrowsMismatchWhenARivalConcurrentCreateWonWithAnIncompatibleDefinition()
     {
         var state = new RAGCollectionState
