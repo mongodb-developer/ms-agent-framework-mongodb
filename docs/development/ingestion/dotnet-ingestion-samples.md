@@ -51,12 +51,20 @@ an in-memory `FakeChunkStore` for offline tests):
    sourceId, index)` / `.ForParent(tenantId, sourceId)` hash the *canonical
    source identity* (tenant, source, positional index) with SHA-256 --
    never a random GUID or timestamp -- so re-ingesting identical content is
-   idempotent and produces byte-identical IDs every run.
-   `ContentHash.Compute(text)` (also SHA-256) is the per-record change
-   detector. `ParentDocumentIngestionPipeline`'s parent hash covers
-   `Title`+`Url`+`Content` (not just `Content`), so a title/URL-only edit is
-   still detected as a parent-record change even when no child chunk text
-   changes.
+   idempotent and produces byte-identical IDs every run. Fields are combined
+   via `CanonicalFraming.Frame(params string?[] fields)` -- a presence byte
+   plus a 4-byte big-endian UTF-8 byte-length prefix per field, not delimiter
+   concatenation -- so no combination of field values (including ones
+   containing embedded delimiter/control characters, or a field-boundary
+   shift such as `"ab"+"c"` vs. `"a"+"bc"`) can ever collide onto the same
+   ID/hash. `ContentHash.Compute(text)` (single-field SHA-256) is the
+   per-chunk change detector; `ContentHash.ComputeFramed(fields)` is the
+   same canonical framing applied to the parent hash.
+   `ParentDocumentIngestionPipeline`'s parent hash covers
+   `Title`+`Url`+`Content` (not just `Content`) via `ComputeFramed`, so a
+   title/URL-only edit -- even one that would collide under naive delimiter
+   concatenation -- is still detected as a parent-record change even when no
+   child chunk text changes.
 3. **Diff against what is stored.** `IChunkStore.GetExistingHashesAsync(
    tenantId, sourceId, ct)` returns only the current tenant+source scope's
    stored hashes; `IngestionDiffing.Diff` classifies every desired record as
@@ -73,11 +81,51 @@ an in-memory `FakeChunkStore` for offline tests):
    staleIds, ct)` removes only stale IDs *within that same tenant+source
    scope* -- a bare ID is never sufficient authorization to delete, and an
    empty `staleIds` list is a no-op rather than an issued query.
+   `MongoChunkStore.UpsertAsync`'s replace filter matches `_id` together
+   with `tenant_id`, `source_id`, and `record_type` -- never `_id` alone --
+   so even an accidental or hash-collision match on `_id` cannot silently
+   overwrite a record from a different tenant/source/record-type scope: the
+   filter simply won't match that other document, and the upsert instead
+   fails closed with a MongoDB duplicate-key error.
 
 `cancellationToken.ThrowIfCancellationRequested()` is checked before chunking
 and before every store/embed call, so cancellation propagates through read,
 embed, write, and delete without ever executing a partial step past the
 cancellation point.
+
+### Deleting a whole source and manifest reconciliation
+
+`IncrementalIngestionPipeline`'s stale-chunk cleanup (step 5 above) only ever
+removes IDs *within* a source that is still being actively re-ingested. A
+source that disappears from the corpus entirely -- its `SourceDocument` is
+simply no longer produced by the caller's crawl/read step -- would otherwise
+never be revisited by any pipeline, leaving its records to linger forever.
+Two additions on `IChunkStore` cover this:
+
+- `DeleteSourceAsync(tenantId, sourceId, ct) -> Task<int>` deletes **every**
+  record for one tenant+source scope. `MongoChunkStore`'s implementation
+  pages the deletion in bounded batches of at most `MaxBatchSize` (500)
+  rather than issuing one unbounded `DeleteManyAsync` -- each round trip
+  finds up to `MaxBatchSize` matching IDs (still scoped to `tenant_id` +
+  `source_id`), deletes just that page, and continues only while a full page
+  was found.
+- `ListSourceIdsAsync(tenantId, ct) -> Task<IReadOnlyList<string>>` lists
+  every distinct source ID currently stored for one tenant, via the driver's
+  `DistinctAsync` cursor.
+
+`SourceManifestReconciler(chunkStore).ReconcileAsync(tenantId,
+currentSourceIds, ct)` layers a reconciliation flow over both: it compares a
+caller-supplied manifest of currently known source IDs against every source
+ID actually stored for that tenant, and fully tombstones (`DeleteSourceAsync`)
+every stored source absent from the manifest. An empty `currentSourceIds` is
+a deliberate, valid "no sources currently observed" input (unlike
+`DeleteAsync`'s no-op guard on an empty ID list, since this method's caller
+explicitly opts into reconciliation). Cancellation is checked before each
+disappeared source is deleted, so cancellation halts before any further
+deletion executes; deletion is always scoped to the given `tenantId`, so
+another tenant's same-named source is never touched. The result is a
+`SourceReconciliationResult(DisappearedSourceIds, RecordsDeleted)`.
+`IncrementalIngestionQuickstart`'s "Run 4" demonstrates this flow end-to-end.
 
 ### Batch embedding validation (`BatchEmbedder`)
 
@@ -124,43 +172,57 @@ query is ever issued:
    enforces is reused rather than re-implemented.
 2. **Bounded, de-duplicated parent hydration.** `ParentDocumentRetriever(
    childSearcher, parentLookup, tenantId, maxParents = 10,
-   parentIdMetadataFieldName = "parent_id")` reads each child result's
-   `parent_id` metadata (populated only if the searcher's own
-   `MetadataFieldNames` includes that field path), keeps only the first
-   (best-scoring, since child results already arrive ordered by score)
-   child per distinct parent ID, stops collecting distinct parent IDs at
-   `maxParents`, then issues exactly **one** `IParentLookup.FindParentsAsync(
-   parentIds, tenantId, ct)` call (`MongoParentLookup`, a plain `$in`/
-   `tenant_id` query against `record_type == "parent"`) -- never one lookup
-   per child, never an unbounded fan-out, and never a caller-suppliable
-   pipeline callback. A parent absent from the tenant-scoped lookup result
-   (deleted, or excluded by the lookup's own tenant enforcement) is silently
-   omitted rather than surfaced as a partial/unauthorized result; a child
-   missing its parent linkage is skipped the same way. Each
-   `ParentSearchResult` carries the best child's score/ID alongside the
-   parent's own source attribution (falling back to the child's source
-   fields only if the parent record does not carry them), so downstream
-   consumers can still cite the origin.
+   parentIdMetadataFieldName = "parent_id", contextBounding = null)` reads
+   each child result's `parent_id` metadata (populated only if the
+   searcher's own `MetadataFieldNames` includes that field path), keeps
+   only the first (best-scoring, since child results already arrive
+   ordered by score) child per distinct parent ID, stops collecting
+   distinct parent IDs at `maxParents`, then issues exactly **one**
+   `IParentLookup.FindParentsAsync(parentIds, tenantId, ct)` call
+   (`MongoParentLookup`, a plain `$in`/`tenant_id` query against
+   `record_type == "parent"`) -- never one lookup per child, never an
+   unbounded fan-out, and never a caller-suppliable pipeline callback. A
+   parent absent from the tenant-scoped lookup result (deleted, or excluded
+   by the lookup's own tenant enforcement) is silently omitted rather than
+   surfaced as a partial/unauthorized result; a child missing its parent
+   linkage is skipped the same way. Each `ParentSearchResult` carries the
+   best child's score/ID alongside the parent's own source attribution
+   (falling back to the child's source fields only if the parent record
+   does not carry them), so downstream consumers can still cite the origin.
+   A final bounding pass then applies `ParentContextBoundingOptions`
+   (`MaxCharactersPerParent`, default 2000; `MaxTotalContextCharacters`,
+   default 8000) -- a documented, dependency-free character-count proxy for
+   a token budget, not an actual tokenizer -- strictly *after* order,
+   de-duplication, and source attribution are fully finalized: only each
+   result's `Content` may be truncated (via `BoundedTextTruncation.Truncate`,
+   which never splits a trailing UTF-16 surrogate pair), and once the
+   running total budget is exhausted, remaining lower-ranked parents are
+   omitted entirely rather than included empty. Both bounds are validated
+   positive eagerly at construction.
 
 ## Tenant isolation
 
 Every store operation (`GetExistingHashesAsync`, `UpsertAsync`'s per-record
-`TenantId`, `DeleteAsync`, `MongoParentLookup.FindParentsAsync`) takes or
-carries an explicit `tenantId`/`(tenantId, sourceId)` scope; `MongoChunkStore`
-and `MongoParentLookup` place it inside the MongoDB filter alongside
+`TenantId`, `DeleteAsync`, `DeleteSourceAsync`, `ListSourceIdsAsync`,
+`MongoParentLookup.FindParentsAsync`) takes or carries an explicit
+`tenantId`/`(tenantId, sourceId)` scope; `MongoChunkStore` and
+`MongoParentLookup` place it inside the MongoDB filter alongside
 `record_type`, never relying on a bare document ID as an authorization
-boundary. `ParentDocumentRetrieverTests` and
-`IncrementalIngestionPipelineTests` both assert cross-tenant records are
-never hydrated/deleted by another tenant's ingestion run.
+boundary. `ParentDocumentRetrieverTests`, `IncrementalIngestionPipelineTests`,
+`FakeChunkStoreTests`, and `SourceManifestReconcilerTests` all assert
+cross-tenant records are never hydrated/deleted/reconciled-away by another
+tenant's operations.
 
 ## Verification
 
 Offline, deterministic unit tests are under
-`dotnet/tests/IngestionSamples.Tests/` (62 tests, no network access):
+`dotnet/tests/IngestionSamples.Tests/` (110 tests, no network access):
 
-- `DeterministicIdTests`, `ContentHashTests` -- stability, distinctness by
-  index/tenant/source, parent-vs-chunk distinctness, empty/negative-argument
-  validation.
+- `DeterministicIdTests`, `ContentHashTests`, `CanonicalFramingTests` --
+  stability, distinctness by index/tenant/source, parent-vs-chunk
+  distinctness, empty/negative-argument validation, and collision-tuple
+  regressions proving field-boundary shifts (including ones containing
+  embedded delimiter/control characters) never produce the same ID/hash.
 - `ChunkingOptionsTests`, `DocumentChunkerTests` -- default validity,
   non-positive window/negative overlap/overlap>=window rejection, no
   empty/duplicate chunks, determinism, full-content coverage.
@@ -176,15 +238,32 @@ Offline, deterministic unit tests are under
   propagates before any store call, invalid document rejected.
 - `ParentDocumentIngestionPipelineTests` -- parent unembedded + children
   embedded, parent-only content (title) change detected with no child chunk
-  change, only changed children re-embedded (not the parent), stale
-  children deleted within scope, cancellation propagation.
+  change (including a field-boundary-shift regression that would collide
+  under naive delimiter concatenation), only changed children re-embedded
+  (not the parent), stale children deleted within scope, cancellation
+  propagation.
+- `FakeChunkStoreTests` -- the same-scope-safety guard `MongoChunkStore`'s
+  upsert filter enforces (rejecting an `_id` collision across a different
+  tenant/source/record-type while still allowing same-scope replacement),
+  plus `DeleteSourceAsync`/`ListSourceIdsAsync` tenant+source isolation and
+  cancellation.
+- `SourceManifestReconcilerTests` -- disappeared sources fully tombstoned,
+  present sources and other tenants' same-named sources untouched,
+  cancellation halts before any deletion, constructor/argument validation.
 - `ParentDocumentRetrieverTests` (using `FakeChildChunkSearcher`/
   `FakeParentLookup`) -- ordered hydration by best child score,
   de-duplication of multiple children sharing a parent, fan-out bounded to
   `maxParents` before lookup is issued, orphan children skipped, parents
   absent from the authorized lookup omitted, cross-tenant parent never
   hydrated, no lookup call when no children match, cancellation
-  propagation, constructor validation.
+  propagation, constructor validation, invalid context-bounding rejection,
+  oversized single-parent truncation, multi-parent truncation once the
+  total budget is exhausted (order preserved), surrogate-pair-safe
+  truncation.
+- `BoundedTextTruncationTests`, `ParentContextBoundingOptionsTests` --
+  within-bound no-op, oversized truncation, non-positive bound -> empty,
+  null-text rejection, surrogate-pair safety on both sides of the cut,
+  bounds validation.
 
 Credential-gated integration tests (skip cleanly, not a failure, without
 `MONGODB_URI`/`MONGODB_DATABASE`; each uses its own private
@@ -193,7 +272,10 @@ Credential-gated integration tests (skip cleanly, not a failure, without
 - `MongoChunkStoreIntegrationTests` exercises `IncrementalIngestionPipeline`
   + `MongoChunkStore` end-to-end against live MongoDB: first-run,
   unchanged-rerun, and shrink-with-stale-deletion, verifying remaining
-  document counts and cleaning up in a `finally` block.
+  document counts and cleaning up in a `finally` block; plus a case seeding
+  more than one `MaxBatchSize` (500) worth of records for one source and
+  asserting `DeleteSourceAsync` deletes all of them while leaving another
+  source and another tenant's same-named source untouched.
 - `ParentDocumentSmokeIntegrationTests` provisions its own uniquely-named
   Vector Search index via `MongoDBRAGIndexManager.EnsureVectorSearchIndexAsync
   (waitUntilReady: true)`, ingests a parent+child document via
@@ -209,15 +291,28 @@ available in the implementing environment) and remain deferred; they were
 verified to compile, run, and skip cleanly.
 
 The runnable samples are `dotnet/samples/IncrementalIngestionQuickstart`
-(three sequential `IngestAsync` runs demonstrating new/unchanged/changed
-+stale-deleted reconciliation, then explicit bounded cleanup) and
-`dotnet/samples/ParentDocumentRAGQuickstart` (explicit index provisioning,
-parent-document ingestion, child-chunk search + parent hydration, then
-explicit cleanup of both data and the index). Both were verified to build in
-Release for every target framework and to fail fast with a clear
-`InvalidOperationException` guard message when `MONGODB_URI`/
-`MONGODB_DATABASE` are unset; a live credentialed run was not performed in
-this environment and remains deferred.
+(four sequential runs: new/unchanged/changed+stale-deleted reconciliation for
+one source, then a "Run 4" demonstrating `SourceManifestReconciler` tombstoning
+a second source once it is omitted from a subsequent "currently known
+sources" manifest, then explicit bounded cleanup) and
+`dotnet/samples/ParentDocumentRAGQuickstart` (parent-document ingestion,
+child-chunk search + parent hydration, then explicit cleanup of both data and
+the index). **Neither sample accepts a user-supplied Vector Search index
+name**: each always generates its own unique, sample-prefixed name (e.g.
+`agent_framework_sample_incr_<guid>` / `agent_framework_sample_pd_<guid>`) at
+startup, checks whether that generated name happens to already exist (via
+`MongoDBRAGIndexManager.GetVectorSearchIndexAsync`), provisions it via
+`EnsureVectorSearchIndexAsync(waitUntilReady: true, timeout: 3 minutes)` only
+if absent, and tracks whether *this run* created it. The `finally` block drops
+the index only when this run created it -- never an arbitrary, pre-existing,
+or externally configured index. (The `MONGODB_INGESTION_COLLECTION` env var
+remains configurable, since a collection is not a "created/managed resource"
+the same way an index is -- MongoDB implicitly creates collections on first
+write, and cleanup already only ever touches the sample's own tenant+source
+chunks within it.) Both samples were verified to build in Release for every
+target framework and to fail fast with a clear `InvalidOperationException`
+guard message when `MONGODB_URI`/`MONGODB_DATABASE` are unset; a live
+credentialed run was not performed in this environment and remains deferred.
 
 Validated commands are recorded in the implementing change
 (`dotnet build`/`dotnet test`/`dotnet format --verify-no-changes`/
