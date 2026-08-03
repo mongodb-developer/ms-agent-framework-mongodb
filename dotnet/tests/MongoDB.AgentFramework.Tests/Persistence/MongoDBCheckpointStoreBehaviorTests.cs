@@ -681,6 +681,163 @@ public sealed class MongoDBCheckpointStoreBehaviorTests
         await Assert.ThrowsAsync<MongoDBTimeoutException>(() => store.LoadCheckpointAsync("session-x", "cp-1"));
     }
 
+    // ---------------------------------------------------------------------------------------------------
+    // RetrieveIndexAsync applies exactly one overall RetrievalTimeout deadline across its whole multi-page
+    // operation (never resetting per page), and bounds the whole enumeration to a stable upper-sequence
+    // snapshot captured once at the start so continuous concurrent writers cannot make it unbounded.
+    // ---------------------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task RetrieveIndexAsyncAppliesOneOverallRetrievalTimeoutAcrossTheWholeMultiPageOperation()
+    {
+        var state = new CheckpointCollectionState();
+        var store = CreateStore(state);
+        JsonElement payload = JsonSerializer.SerializeToElement("value");
+        await store.SaveCheckpointAsync("session-index-timeout", "cp-1", payload);
+        await store.SaveCheckpointAsync("session-index-timeout", "cp-2", payload);
+
+        // Every fake FindAsync call (the upper-bound snapshot lookup, then each page) delays 40ms.
+        // RetrieveIndexAsync issues at least two such calls for these two checkpoints (the upper-bound lookup,
+        // then one page). Each *individual* 40ms delay would comfortably fit inside a fresh 60ms budget if the
+        // deadline were (incorrectly) reset per call/page; only a single deadline shared across the whole
+        // operation makes their combined ~80ms elapsed time exceed the 60ms RetrievalTimeout and throw.
+        state.FindDelay = async token => await Task.Delay(TimeSpan.FromMilliseconds(40), token);
+        var options = new MongoDBCheckpointStoreOptions
+        {
+            WorkflowId = "workflow",
+            ContinuationTokenSigningKey = CheckpointStoreTestSigningKey.Bytes,
+            RetrievalTimeout = TimeSpan.FromMilliseconds(60),
+        };
+        var timeoutStore = new MongoDBCheckpointStore(CheckpointCollectionProxy.Create(state), options);
+
+        // JsonCheckpointStore.RetrieveIndexAsync -- the actual framework hook -- accepts no CancellationToken
+        // at all, proving the single overall deadline is enforced purely from configuration.
+        await Assert.ThrowsAsync<MongoDBTimeoutException>(() =>
+            timeoutStore.RetrieveIndexAsync("session-index-timeout").AsTask());
+    }
+
+    [Fact]
+    public async Task RetrieveIndexAsyncExcludesCheckpointsCommittedAfterItsUpperBoundSnapshot()
+    {
+        const string SessionId = "session-snapshot-bound";
+        var state = new CheckpointCollectionState();
+        var store = CreateStore(state);
+        JsonElement payload = JsonSerializer.SerializeToElement("value");
+        await store.SaveCheckpointAsync(SessionId, "cp-before-1", payload);
+        await store.SaveCheckpointAsync(SessionId, "cp-before-2", payload);
+
+        // As soon as RetrieveIndexAsync's page fetch begins (its second FindAsync call, right after the
+        // upper-bound snapshot lookup is the first), commit additional checkpoints -- simulating a writer that
+        // keeps committing new checkpoints while this enumeration is already in progress. Because the snapshot
+        // upper bound was already captured before this delay runs, these late checkpoints must never appear in
+        // the result, regardless of how many pages the enumeration still has left to fetch.
+        var callCount = 0;
+        state.FindDelay = async _ =>
+        {
+            if (Interlocked.Increment(ref callCount) == 2)
+            {
+                await store.SaveCheckpointAsync(SessionId, "cp-after-1", payload);
+                await store.SaveCheckpointAsync(SessionId, "cp-after-2", payload);
+            }
+        };
+
+        CheckpointInfo[] index = (await store.RetrieveIndexAsync(SessionId)).ToArray();
+
+        Assert.Equal(["cp-before-1", "cp-before-2"], index.Select(info => info.CheckpointId));
+        Assert.DoesNotContain(index, info => info.CheckpointId.StartsWith("cp-after-", StringComparison.Ordinal));
+
+        // The excluded checkpoints genuinely committed (they are not lost, merely outside this snapshot), and a
+        // fresh call -- capturing a new snapshot -- observes them.
+        CheckpointInfo[] laterIndex = (await store.RetrieveIndexAsync(SessionId)).ToArray();
+        Assert.Equal(4, laterIndex.Length);
+    }
+
+    [Fact]
+    public async Task RetrieveIndexAsyncExcludesConcurrentInsertsMadeBetweenTwoRealInternalPages()
+    {
+        const string SessionId = "session-snapshot-bound-multipage";
+        var state = new CheckpointCollectionState();
+        var store = CreateStore(state);
+        JsonElement payload = JsonSerializer.SerializeToElement("value");
+
+        // RetrieveIndexAsync pages internally in batches of 1,000; seeding one more than that forces a genuine
+        // second internal page fetch (not merely a second call for a single small page).
+        const int InitialCount = 1_001;
+        for (int i = 0; i < InitialCount; i++)
+        {
+            await store.SaveCheckpointAsync(SessionId, $"cp-{i:D5}", payload);
+        }
+
+        // Call 1 is the upper-bound snapshot lookup, call 2 is the first (1,000-item) page, call 3 is the
+        // second (1-item) page. Committing new checkpoints exactly when call 3 begins proves they are excluded
+        // from *this* enumeration's second page even though they exist in the collection by the time that
+        // page's query actually executes.
+        var callCount = 0;
+        state.FindDelay = async _ =>
+        {
+            if (Interlocked.Increment(ref callCount) == 3)
+            {
+                await store.SaveCheckpointAsync(SessionId, "cp-late-1", payload);
+                await store.SaveCheckpointAsync(SessionId, "cp-late-2", payload);
+            }
+        };
+
+        CheckpointInfo[] index = (await store.RetrieveIndexAsync(SessionId)).ToArray();
+
+        Assert.Equal(InitialCount, index.Length);
+        Assert.DoesNotContain(index, info => info.CheckpointId.StartsWith("cp-late-", StringComparison.Ordinal));
+    }
+
+    // ---------------------------------------------------------------------------------------------------
+    // Public exception messages exclude scoped identifiers (tenant/workflow/session/checkpoint/parent):
+    // messages are operation/category text only, never caller- or store-supplied identity values.
+    // ---------------------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task RetrieveCheckpointAsyncKeyNotFoundExceptionMessageExcludesScopedIdentifiers()
+    {
+        const string SentinelTenantId = "sentinel-tenant-77c02e1f";
+        const string SentinelSessionId = "sentinel-session-98216f3a";
+        const string SentinelCheckpointId = "sentinel-checkpoint-4b7e1c9d";
+        var state = new CheckpointCollectionState();
+        var store = CreateStore(state, tenantId: SentinelTenantId);
+
+        KeyNotFoundException exception = await Assert.ThrowsAsync<KeyNotFoundException>(() =>
+            store.RetrieveCheckpointAsync(
+                SentinelSessionId, new CheckpointInfo(SentinelSessionId, SentinelCheckpointId)).AsTask());
+
+        Assert.DoesNotContain(SentinelSessionId, exception.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(SentinelCheckpointId, exception.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(SentinelTenantId, exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task SaveWithConflictingPayloadExceptionMessageExcludesScopedIdentifiers()
+    {
+        const string SentinelTenantId = "sentinel-tenant-6a1b3c9d";
+        const string SentinelSessionId = "sentinel-session-3f9a2b6c";
+        const string SentinelCheckpointId = "sentinel-checkpoint-71d0e5aa";
+        const string SentinelParentId = "sentinel-parent-9c4d8e12";
+        var state = new CheckpointCollectionState();
+        var store = CreateStore(state, tenantId: SentinelTenantId);
+        JsonElement payload = JsonSerializer.SerializeToElement("value");
+
+        await store.SaveCheckpointAsync(
+            SentinelSessionId, SentinelCheckpointId, payload, parentCheckpointId: SentinelParentId);
+
+        MongoDBConcurrencyException exception = await Assert.ThrowsAsync<MongoDBConcurrencyException>(() =>
+            store.SaveCheckpointAsync(
+                SentinelSessionId,
+                SentinelCheckpointId,
+                JsonSerializer.SerializeToElement("different-value"),
+                parentCheckpointId: SentinelParentId));
+
+        Assert.DoesNotContain(SentinelSessionId, exception.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(SentinelCheckpointId, exception.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(SentinelParentId, exception.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(SentinelTenantId, exception.Message, StringComparison.Ordinal);
+    }
+
     private static BsonDocument RenderFilter(FilterDefinition<BsonDocument> filter) =>
         filter.Render(new RenderArgs<BsonDocument>(BsonDocumentSerializer.Instance, BsonSerializer.SerializerRegistry));
 

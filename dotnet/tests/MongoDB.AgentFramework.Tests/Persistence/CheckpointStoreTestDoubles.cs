@@ -566,6 +566,11 @@ internal class CheckpointCollectionProxy : DispatchProxy
                 {
                     return false;
                 }
+
+                if (operation.TryGetValue("$lte", out BsonValue lte) && actual.CompareTo(lte) > 0)
+                {
+                    return false;
+                }
             }
             else if (actual != element.Value)
             {

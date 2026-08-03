@@ -78,6 +78,13 @@ public sealed class MongoDBCheckpointStore : JsonCheckpointStore, IAsyncDisposab
     private const byte ContinuationTokenFormatVersion = 1;
 
     /// <summary>
+    /// The internal page size <see cref="RetrieveIndexAsync"/> uses to bound each individual query it issues
+    /// while enumerating a session's full checkpoint index. Distinct from the caller-supplied
+    /// <c>limit</c> the public <see cref="ListCheckpointsAsync"/> facade accepts.
+    /// </summary>
+    private const int RetrieveIndexPageSize = 1_000;
+
+    /// <summary>
     /// Partial filter shared by both regular lookup indexes: scopes each to checkpoint documents only, so
     /// neither index ever includes the <c>sequence_counter</c> pseudo-documents that intentionally share this
     /// collection.
@@ -333,7 +340,7 @@ public sealed class MongoDBCheckpointStore : JsonCheckpointStore, IAsyncDisposab
             .ConfigureAwait(false);
         return record is null
             ? throw new KeyNotFoundException(
-                $"Checkpoint '{key.CheckpointId}' not found for session '{sessionId}'.")
+                "No checkpoint exists at the requested authorized identity.")
             : record.Payload;
     }
 
@@ -342,29 +349,75 @@ public sealed class MongoDBCheckpointStore : JsonCheckpointStore, IAsyncDisposab
     /// Returns every matching checkpoint (the base contract is unbounded), in ascending, monotonic
     /// <c>sequence</c> order -- never timestamp order -- so framework callers such as
     /// <c>CheckpointManager.GetLatestCheckpointAsync</c> that rely on this ordering to find the head checkpoint
-    /// observe correct results. Internally paged in bounded batches to avoid one unbounded query.
+    /// observe correct results. Internally paged in bounded batches to avoid one unbounded query, but exactly
+    /// one <see cref="MongoDBCheckpointStoreOptions.RetrievalTimeout"/> deadline governs the <em>entire</em>
+    /// multi-page operation -- the deadline is established once, before the first page is fetched, and is never
+    /// reset as later pages are fetched, so a slow or stalled page cannot silently grant the operation a fresh
+    /// full timeout budget. A stable upper <c>sequence</c> bound is also captured once, from the scoped latest
+    /// committed checkpoint at that instant, before the first page is fetched; every page is filtered to that
+    /// snapshot bound (inclusive), so checkpoints committed by other writers <em>during</em> this enumeration
+    /// are excluded rather than making the operation unbounded or returning an inconsistent, ever-growing
+    /// result.
     /// </remarks>
     public override async ValueTask<IEnumerable<CheckpointInfo>> RetrieveIndexAsync(
         string sessionId,
         CheckpointInfo? withParent = null)
     {
-        var results = new List<CheckpointInfo>();
-        string? continuationToken = null;
-        do
-        {
-            MongoDBCheckpointPage page = await ListCheckpointsAsync(
-                sessionId,
-                limit: 1_000,
-                continuationToken,
-                CancellationToken.None).ConfigureAwait(false);
-            results.AddRange(
-                page.Items
-                    .Where(item => withParent is null || item.ParentCheckpointId == withParent.CheckpointId)
-                    .Select(item => new CheckpointInfo(item.SessionId, item.CheckpointId)));
-            continuationToken = page.ContinuationToken;
-        } while (continuationToken is not null);
+        BsonDocument scope = Scope(sessionId);
+        return await WithDeadlineAsync(
+            async token =>
+            {
+                try
+                {
+                    long? upperBound = await FindMaxSequenceAsync(scope, sessionId, token).ConfigureAwait(false);
+                    var results = new List<CheckpointInfo>();
+                    if (upperBound is null)
+                    {
+                        return (IEnumerable<CheckpointInfo>)results;
+                    }
 
-        return results;
+                    long? afterSequence = null;
+                    bool hasMore;
+                    do
+                    {
+                        (IReadOnlyList<BsonDocument> documents, hasMore) = await FindCheckpointPageAsync(
+                            scope, sessionId, afterSequence, upperBound, RetrieveIndexPageSize, token)
+                            .ConfigureAwait(false);
+                        foreach (BsonDocument document in documents)
+                        {
+                            MongoDBCheckpointSummary summary = ToSummary(document);
+                            if (withParent is null || summary.ParentCheckpointId == withParent.CheckpointId)
+                            {
+                                results.Add(new CheckpointInfo(summary.SessionId, summary.CheckpointId));
+                            }
+                        }
+
+                        if (documents.Count > 0)
+                        {
+                            afterSequence = documents[^1]["sequence"].ToInt64();
+                        }
+                    } while (hasMore);
+
+                    return (IEnumerable<CheckpointInfo>)results;
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (MongoDBIntegrationException)
+                {
+                    throw;
+                }
+                catch (MongoException exception)
+                {
+                    throw new MongoDBRetrievalException(
+                        "MongoDB Workflow Checkpoint Store list failed.",
+                        exception);
+                }
+            },
+            _options.RetrievalTimeout,
+            "MongoDB Workflow Checkpoint Store retrieval deadline exceeded.",
+            CancellationToken.None).ConfigureAwait(false);
     }
 
     // ---------------------------------------------------------------------------------------------------
@@ -506,33 +559,9 @@ public sealed class MongoDBCheckpointStore : JsonCheckpointStore, IAsyncDisposab
             {
                 try
                 {
-                    FilterDefinition<BsonDocument> filter = ScopeSessionFilter(scope, sessionId);
-                    if (afterSequence is { } after)
-                    {
-                        filter &= Builders<BsonDocument>.Filter.Gt("sequence", after);
-                    }
-
-                    var findOptions = new FindOptions<BsonDocument, BsonDocument>
-                    {
-                        Sort = Builders<BsonDocument>.Sort.Ascending("sequence"),
-                        Limit = limit + 1,
-                    };
-                    using IAsyncCursor<BsonDocument> cursor = await _collection.FindAsync(
-                        filter,
-                        findOptions,
-                        token).ConfigureAwait(false);
-                    var documents = new List<BsonDocument>();
-                    while (await cursor.MoveNextAsync(token).ConfigureAwait(false))
-                    {
-                        documents.AddRange(cursor.Current);
-                    }
-
-                    bool hasMore = documents.Count > limit;
-                    if (hasMore)
-                    {
-                        documents.RemoveAt(documents.Count - 1);
-                    }
-
+                    (IReadOnlyList<BsonDocument> documents, bool hasMore) = await FindCheckpointPageAsync(
+                        scope, sessionId, afterSequence, maxSequenceInclusive: null, limit, token)
+                        .ConfigureAwait(false);
                     return new MongoDBCheckpointPage
                     {
                         Items = documents.Select(ToSummary).ToArray(),
@@ -813,7 +842,7 @@ public sealed class MongoDBCheckpointStore : JsonCheckpointStore, IAsyncDisposab
                 return raced;
             }
 
-            throw ConflictException(sessionId, checkpointId, exception);
+            throw ConflictException(exception);
         }
         catch (MongoException exception) when (IsTransactionsUnsupported(exception))
         {
@@ -895,7 +924,7 @@ public sealed class MongoDBCheckpointStore : JsonCheckpointStore, IAsyncDisposab
             return ToRecord(existing);
         }
 
-        throw ConflictException(sessionId, checkpointId, raceException);
+        throw ConflictException(raceException);
     }
 
     private async Task<long> AllocateSequenceAsync(
@@ -992,6 +1021,81 @@ public sealed class MongoDBCheckpointStore : JsonCheckpointStore, IAsyncDisposab
     private DateTimeOffset? DefaultExpiresAt(DateTimeOffset now) =>
         _options.DefaultExpiration is { } defaultExpiration ? now + defaultExpiration : null;
 
+    /// <summary>
+    /// Returns the greatest committed <c>sequence</c> in scope, or <see langword="null"/> if no checkpoint
+    /// exists. Reads only the raw <c>sequence</c> field -- unlike <see cref="ToRecord"/>/<see cref="ToSummary"/>
+    /// it does not validate <c>schema_version</c>, since it exists purely to capture a snapshot upper bound for
+    /// <see cref="RetrieveIndexAsync"/>'s enumeration, not to surface that document's content.
+    /// </summary>
+    private async Task<long?> FindMaxSequenceAsync(
+        BsonDocument scope,
+        string sessionId,
+        CancellationToken cancellationToken)
+    {
+        var findOptions = new FindOptions<BsonDocument, BsonDocument>
+        {
+            Sort = Builders<BsonDocument>.Sort.Descending("sequence"),
+            Limit = 1,
+        };
+        using IAsyncCursor<BsonDocument> cursor = await _collection.FindAsync(
+            ScopeSessionFilter(scope, sessionId),
+            findOptions,
+            cancellationToken).ConfigureAwait(false);
+        BsonDocument? document = await cursor.MoveNextAsync(cancellationToken).ConfigureAwait(false)
+            ? cursor.Current.FirstOrDefault()
+            : null;
+        return document?["sequence"].ToInt64();
+    }
+
+    /// <summary>
+    /// Fetches one bounded, ascending-<c>sequence</c>-ordered page of raw checkpoint documents, shared by the
+    /// public <see cref="ListCheckpointsAsync"/> facade (<paramref name="maxSequenceInclusive"/> is
+    /// <see langword="null"/>, so it never excludes newly committed checkpoints) and
+    /// <see cref="RetrieveIndexAsync"/>'s internal multi-page loop (<paramref name="maxSequenceInclusive"/> is
+    /// the snapshot upper bound captured once before paging begins, so later pages never observe checkpoints
+    /// committed after that snapshot).
+    /// </summary>
+    private async Task<(IReadOnlyList<BsonDocument> Documents, bool HasMore)> FindCheckpointPageAsync(
+        BsonDocument scope,
+        string sessionId,
+        long? afterSequenceExclusive,
+        long? maxSequenceInclusive,
+        int limit,
+        CancellationToken cancellationToken)
+    {
+        FilterDefinition<BsonDocument> filter = ScopeSessionFilter(scope, sessionId);
+        if (afterSequenceExclusive is { } after)
+        {
+            filter &= Builders<BsonDocument>.Filter.Gt("sequence", after);
+        }
+
+        if (maxSequenceInclusive is { } max)
+        {
+            filter &= Builders<BsonDocument>.Filter.Lte("sequence", max);
+        }
+
+        var findOptions = new FindOptions<BsonDocument, BsonDocument>
+        {
+            Sort = Builders<BsonDocument>.Sort.Ascending("sequence"),
+            Limit = limit + 1,
+        };
+        using IAsyncCursor<BsonDocument> cursor = await _collection.FindAsync(filter, findOptions, cancellationToken)
+            .ConfigureAwait(false);
+        var documents = new List<BsonDocument>();
+        while (await cursor.MoveNextAsync(cancellationToken).ConfigureAwait(false))
+        {
+            documents.AddRange(cursor.Current);
+        }
+
+        bool hasMore = documents.Count > limit;
+        if (hasMore)
+        {
+            documents.RemoveAt(documents.Count - 1);
+        }
+
+        return (documents, hasMore);
+    }
+
     private async Task<BsonDocument?> FindOneAsync(
         FilterDefinition<BsonDocument> filter,
         CancellationToken cancellationToken)
@@ -1079,17 +1183,15 @@ public sealed class MongoDBCheckpointStore : JsonCheckpointStore, IAsyncDisposab
             "). No read, update, or delete was attempted against it. Follow the manual remediation in " +
             "docs/development/persistence/dotnet-checkpoint-store-migration.md before retrying.");
 
-    private static MongoDBConcurrencyException ConflictException(
-        string sessionId, string checkpointId, Exception? innerException = null)
+    private static MongoDBConcurrencyException ConflictException(Exception? innerException = null)
     {
         const string Message =
             "A checkpoint with this identifier already exists in scope with a different payload or parent " +
             "lineage. Checkpoints are immutable historical records; use a new checkpoint id for a new " +
             "checkpoint.";
         return innerException is null
-            ? new MongoDBConcurrencyException($"{Message} (session '{sessionId}', checkpoint '{checkpointId}')")
-            : new MongoDBConcurrencyException(
-                $"{Message} (session '{sessionId}', checkpoint '{checkpointId}')", innerException);
+            ? new MongoDBConcurrencyException(Message)
+            : new MongoDBConcurrencyException(Message, innerException);
     }
 
     private static JsonElement DeserializePayloadElement(BsonDocument document)
