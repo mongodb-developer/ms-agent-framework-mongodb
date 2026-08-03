@@ -17,7 +17,7 @@ namespace MongoDB.AgentFramework.Tests.Observability;
 /// </summary>
 public sealed class TelemetryAllowlistTests
 {
-    private const string Secret = "SENTINEL-ALLOWLIST-3f9a7c2e5b1d4f68a0c9e2d7b5f1a3c6";
+    private const string Secret = "SENTINEL-SECRET-3f9a7c2e5b1d4f68a0c9e2d7b5f1a3c6";
 
     public static TheoryData<string, string, string?> FeatureOperationModeCombinations()
     {
