@@ -292,6 +292,47 @@ public sealed class MongoDBRAGIndexManagerTests
     }
 
     [Fact]
+    public async Task CreateHybridMakesZeroMutationsWhenTheVectorIndexAlreadyExists()
+    {
+        var state = new RAGCollectionState
+        {
+            SearchIndexes = [RAGIndexFixtures.ValidVectorIndex("facade_vector")],
+        };
+        MongoDBRAGIndexManager manager = CreateHybridManager(state);
+
+        // Both indexes must be checked for existence before either is created: since the Vector Search index
+        // already exists, this must fail before ever attempting to create the Search index, leaving zero
+        // mutations rather than potentially a partially-created Hybrid pair.
+        await Assert.ThrowsAsync<MongoDBIndexAlreadyExistsException>(() => manager.CreateHybridAsync());
+
+        Assert.Equal(0, state.CreateOneCallCount);
+        Assert.Null(state.CreatedSearchIndex);
+        Assert.Single(state.SearchIndexes);
+    }
+
+    [Fact]
+    public async Task CreateHybridMakesZeroMutationsWhenTheSearchIndexAlreadyExists()
+    {
+        var state = new RAGCollectionState
+        {
+            SearchIndexes = [RAGIndexFixtures.ValidSearchIndex("facade_search")],
+        };
+        MongoDBRAGIndexManager manager = CreateHybridManager(state);
+
+        // Before this fix, CreateHybridAsync created the Vector Search index first and only then attempted the
+        // Search index: when only the Search index pre-existed, the Vector Search index would already have been
+        // created (a real mutation) by the time the Search create failed with "already exists". Preflighting
+        // both indexes' existence before creating either must prevent that entirely: this assertion of zero
+        // CreateOneAsync calls proves the Vector Search index was never created either, not just that the
+        // overall call failed.
+        await Assert.ThrowsAsync<MongoDBIndexAlreadyExistsException>(() => manager.CreateHybridAsync());
+
+        Assert.Equal(0, state.CreateOneCallCount);
+        Assert.Null(state.CreatedSearchIndex);
+        Assert.Single(state.SearchIndexes);
+    }
+
+    [Fact]
     public async Task EnsureVectorThrowsMismatchWhenARivalConcurrentCreateWonWithAnIncompatibleDefinition()
     {
         var state = new RAGCollectionState

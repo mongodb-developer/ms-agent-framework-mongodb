@@ -241,13 +241,32 @@ public sealed class MongoDBRAGIndexManager : IAsyncDisposable
     /// <summary>
     /// Creates both the configured Vector Search and Search indexes -- the combination
     /// <see cref="MongoDBSearchMode.HybridRrf"/> requires. Both <see cref="VectorDefinition"/> and
-    /// <see cref="SearchDefinition"/> must be configured. Fails immediately if either already exists.
+    /// <see cref="SearchDefinition"/> must be configured. Both indexes are checked for existence before either is
+    /// created, so this call makes zero mutations if either already exists -- a caller never ends up with a
+    /// partially-created Hybrid pair (one index created, the other rejected) from a call that fails. A rival
+    /// caller winning a create race against one of the indexes after this preflight check (but before this
+    /// call's own create attempt) is still rejected by <see cref="CreateVectorSearchIndexAsync"/>/
+    /// <see cref="CreateSearchIndexAsync"/>'s own create-only semantics; only the up-front "one obviously already
+    /// exists" case is prevented here.
     /// </summary>
     /// <exception cref="MongoDBConfigurationException">Either definition is not configured.</exception>
     /// <exception cref="MongoDBIndexAlreadyExistsException">Either configured index already exists.</exception>
     public async Task CreateHybridAsync(CancellationToken cancellationToken = default)
     {
         RequireHybridDefinitions();
+        MongoDBVectorSearchIndexDefinition vectorDefinition = RequireVectorDefinition();
+        MongoDBSearchIndexDefinition searchDefinition = RequireSearchDefinition();
+
+        if (await FindAsync(vectorDefinition.IndexName, cancellationToken).ConfigureAwait(false) is not null)
+        {
+            throw MapAlreadyExistsException(vectorDefinition.IndexName, raceException: null);
+        }
+
+        if (await FindAsync(searchDefinition.IndexName, cancellationToken).ConfigureAwait(false) is not null)
+        {
+            throw MapAlreadyExistsException(searchDefinition.IndexName, raceException: null);
+        }
+
         await CreateVectorSearchIndexAsync(cancellationToken).ConfigureAwait(false);
         await CreateSearchIndexAsync(cancellationToken).ConfigureAwait(false);
     }
