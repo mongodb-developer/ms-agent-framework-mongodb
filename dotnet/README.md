@@ -117,6 +117,106 @@ Optional variables are `MONGODB_HISTORY_COLLECTION`,
 sample's authorized session should be removed. See the
 [.NET Chat History developer guide](../docs/development/history/dotnet-history.md).
 
+## Session Store
+
+`Microsoft.Agents.AI.Abstractions` (verified 1.13.0 through 1.16.0; see
+[contract verification](../docs/development/persistence/dotnet-contract-research.md))
+exposes no public session-hosting persistence contract, so
+`MongoDBAgentSessionStore` is a **compatibility-blocked, non-1.0-complete**
+facade over the public `AIAgent.SerializeSessionAsync`/`DeserializeSessionAsync`
+serialization surface rather than an implementation of a framework interface --
+there is none to implement yet. Every constructor validates the resolved
+`Microsoft.Agents.AI.Abstractions` assembly version against the verified range
+`[1.13.0, 1.17.0)` and fails closed (`MongoDBConfigurationException`) for any
+other resolved version, and the `PackageReference` itself is pinned to that
+same range.
+
+```csharp
+await using var store = new MongoDBAgentSessionStore(
+    collection,
+    new MongoDBAgentSessionStoreOptions
+    {
+        ApplicationId = "my-app",
+        AgentId = "assistant",
+        DefaultExpiration = TimeSpan.FromDays(30),
+    });
+
+await store.EnsureIndexesAsync();
+
+MongoDBAgentSessionRecord created = await store.CreateAsync("session-123", session, agent);
+
+MongoDBAgentSessionRecord? loaded = await store.GetAsync("session-123", agent);
+
+// Optimistic compare-and-swap: throws MongoDBConcurrencyException on a real
+// conflict; a retried, already-applied write converges instead of throwing
+// (identical content, and either an identical explicit expiry or -- when
+// expiresAt is omitted and DefaultExpiration is configured -- a still-future
+// persisted expiry that is not extended).
+MongoDBAgentSessionRecord updated = await store.SetAsync(
+    "session-123", session, agent, expectedVersion: loaded!.Version);
+
+await store.DeleteAsync("session-123", expectedVersion: updated.Version);
+```
+
+Every stored document is a single versioned snapshot (not a message log): a
+canonical application/agent/session scope, optional tenant/user scope, an
+incrementing `version` for compare-and-swap, optional `expires_at` backed by
+an explicit TTL index, and the complete framework-serialized session --
+persisted as the public serializer's exact UTF-8 JSON bytes wrapped verbatim
+in a BSON `Binary` field, never re-parsed through `BsonDocument` -- so unknown
+or future `AgentSessionStateBag` entries (including numeric literals beyond
+double precision) round-trip byte-for-byte. `CreateAsync` and `SetAsync` never
+silently last-write-wins: a genuine conflict always throws
+`MongoDBConcurrencyException`, while a retried call whose payload is already
+durably stored converges instead of erroring. The expiry half of that
+comparison depends on how it was derived: an explicit caller `expiresAt` must
+match the stored value exactly, and a *different* explicit intended expiry is
+a genuine conflict, not silently converged; a default-derived expiry (no
+`expiresAt` supplied, `DefaultExpiration` configured) is instead recomputed
+from "now" on every call, so a retry converges whenever the persisted
+`expires_at` is still non-null and in the future, and the retry never extends
+it -- only a genuine content change gets a freshly computed default expiry.
+`session_id` is opaque and never trimmed -- only null/empty/whitespace-only
+values are rejected, so leading/trailing-space session IDs remain distinct and
+independently reachable. `EnsureIndexesAsync` is the only mutating
+provisioning operation; `ValidateIndexesAsync` is read-only. `ListAsync`
+excludes sessions whose `expires_at` has already passed.
+
+Every `CreateAsync`/`SetAsync`/`DeleteAsync` mutation filter also requires the
+stored document's `schema_version`/`framework_version` to match this build's
+supported markers. A scoped record that exists but carries an incompatible
+marker is detected read-only, before any mutation is attempted, and raises a
+migration exception distinct from a not-found result or a compare-and-swap
+conflict; see the
+[.NET Session Store migration guide](../docs/development/persistence/dotnet-session-store-migration.md)
+for the required manual remediation (there is no automated migration).
+
+Injected clients, databases, and collections remain caller-owned; only a
+client created by the connection-string constructor is disposed by the store,
+including when a later construction step (such as resolving the
+database/collection) fails after the client was created.
+
+Run the sample after setting `MONGODB_URI` and `MONGODB_DATABASE`:
+
+```powershell
+dotnet run --project samples\SessionPersistenceQuickstart\SessionPersistenceQuickstart.csproj
+```
+
+Optional variables are `MONGODB_SESSION_COLLECTION`,
+`MONGODB_SESSION_APPLICATION_ID`, `MONGODB_SESSION_AGENT_ID`, and
+`MONGODB_SESSION_ID`. Set `MONGODB_SESSION_CLEAR=true` only when the sample's
+authorized session should be removed. The MongoDB principal needs collection
+read/write privileges, plus index-management privileges to run
+`EnsureIndexesAsync`. No Python Session Store exists yet; see the
+[implementation map](../docs/spec/implementation-map.md) for cross-language
+sequencing. See the
+[.NET Session Store developer guide](../docs/development/persistence/dotnet-session-store.md),
+the
+[.NET Session Store contract verification](../docs/development/persistence/dotnet-contract-research.md),
+and the
+[.NET Session Store migration guide](../docs/development/persistence/dotnet-session-store-migration.md).
+
+
 ## RAG contracts, typed filters, Vector Search (ANN/ENN), FullText, and HybridRrf
 
 `MongoDBSearchMode` (`VectorAnn`, `VectorEnn`, `FullText`, `HybridRrf`), the bounded typed `MongoDBRAGFilter` AST,

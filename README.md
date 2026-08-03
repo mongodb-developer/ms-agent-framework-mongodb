@@ -14,3 +14,4 @@ Implemented provider guides:
 
 - [Python Chat History](docs/development/history/python-history.md)
 - [.NET Chat History](docs/development/history/dotnet-history.md)
+- [.NET Session Store](docs/development/persistence/dotnet-session-store.md)

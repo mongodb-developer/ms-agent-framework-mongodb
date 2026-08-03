@@ -21,7 +21,14 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.Agents.AI.Abstractions" Version="[1.13.0,2.0.0)" />
+    <!--
+      Upper bound narrowed to the verified maximum next-minor: 1.13.0-1.16.0 have been reflection-verified to
+      expose no public session-hosting persistence contract and a stable AIAgent assembly version scheme (see
+      docs/development/persistence/dotnet-contract-research.md). MongoDBAgentSessionStore additionally rejects at
+      runtime, via MongoDBAgentSessionStore's resolved-assembly-version check, if a package outside this verified
+      range is ever loaded despite this constraint (e.g. a private feed override).
+    -->
+    <PackageReference Include="Microsoft.Agents.AI.Abstractions" Version="[1.13.0,1.17.0)" />
     <PackageReference Include="Microsoft.Extensions.AI.Abstractions" Version="[10.7.0,11.0.0)" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="[10.0.0,11.0.0)" />
     <PackageReference Include="MongoDB.Driver" Version="[3.10.0,4.0.0)" />
