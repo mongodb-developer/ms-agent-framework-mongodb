@@ -32,12 +32,14 @@ Every read, write, sort, limit, and delete includes the discriminator and all ra
 scope fields. `workflow_name` arguments and checkpoint payloads must equal the
 bound value. A checkpoint ID alone is never an authorization filter.
 
-The inherited list methods return the first configured bounded page. The
-additional `list_checkpoint_page(..., cursor=None, limit=None)` API returns
-`MongoDBCheckpointPage(checkpoints, next_cursor)`. The default page size is 100,
-the configurable hard maximum defaults to 1000, and invalid or unknown-version
-cursors fail closed. Ordering is `(sequence, checkpoint_id)`, not timestamp or
-`iteration_count`.
+The inherited list methods enumerate the complete authorized run in deterministic
+order by repeatedly fetching configured bounded pages. Cancellation propagates
+from every page request. The additional
+`list_checkpoint_page(..., cursor=None, limit=None)` API lets callers consume
+one bounded `MongoDBCheckpointPage(checkpoints, next_cursor)` at a time. The
+default page size is 100, the configurable hard maximum defaults to 1000, and
+invalid or unknown-version cursors fail closed. Ordering is
+`(sequence, checkpoint_id)`, not timestamp or `iteration_count`.
 
 ## Serialization and immutable records
 
@@ -65,6 +67,7 @@ Each immutable checkpoint document is:
   "schema_version": 1,
   "framework_version": "agent-framework-core/1:WorkflowCheckpoint.to_dict/v1",
   "payload_version": "1.0",
+  "idempotency_hash_version": 1,
   "scope_discriminator": "<scope sha-256>",
   "tenant_id": "tenant-1",
   "application_id": "application-1",
@@ -81,19 +84,30 @@ Each immutable checkpoint document is:
 ```
 
 The framework checkpoint ID is preserved exactly, while `_id` is deterministic
-for the complete scope and ID. An identical retry returns the same ID. Reusing
-the ID with different public state raises `MongoDBConcurrencyError`.
-`schema_version`, `framework_version`, and the checkpoint's public `version`
-are independent compatibility gates. Unknown values raise
-`MongoDBMappingError` with migration guidance rather than best-effort loading.
-Python/.NET physical checkpoint interoperability is not claimed.
+for the complete scope and ID. Idempotency hashes use a versioned canonical
+logical representation of the public checkpoint dictionary rather than pickle
+bytes. Mappings and sets are stably ordered, scalar and collection types carry
+explicit tags, and framework/application dataclasses or public `to_dict` values
+carry stable type identities. The same logical checkpoint therefore hashes
+identically across processes and `PYTHONHASHSEED` values. Cycles, non-finite
+floats, and unsupported objects fail before sequence allocation with a stable
+`MongoDBMappingError`. Pickle remains only the lossless storage encoding and is
+not part of identity. An identical retry returns the same ID. Reusing the ID
+with different public state raises `MongoDBConcurrencyError`.
+`schema_version`, `framework_version`, the checkpoint's public `version`, and
+`idempotency_hash_version` are independent compatibility gates. Unknown values
+raise `MongoDBMappingError` with migration guidance rather than best-effort
+loading. Python/.NET physical checkpoint interoperability is not claimed.
 
 ## Sequence allocation, lineage, and retention
 
 A separate, scoped counter document uses atomic `$inc` with upsert. Concurrent
-saves therefore receive unique, positive, monotonic sequences. Retries and
-failed inserts may leave sequence gaps; ordering never assumes contiguity.
-`get_latest()` sorts by descending sequence and checkpoint ID.
+saves therefore receive unique, positive, monotonic sequences. When TTL is
+configured, the same atomic update refreshes the counter's `expires_at` to the
+new checkpoint's expiration, so counter metadata cannot outlive retained run
+history indefinitely. Retries and failed inserts may leave sequence gaps;
+ordering never assumes contiguity. `get_latest()` sorts by descending sequence
+and checkpoint ID.
 
 `previous_checkpoint_id` is copied unchanged to `parent_checkpoint_id`.
 Parents are not required to exist at save or load time. This permits branched
@@ -106,6 +120,14 @@ Session Store, Chat History, and Memory retention. The TTL monitor provides
 eventual deletion; applications must not use expiration timing as workflow
 coordination.
 
+`clear_run()` is the explicit authorized lifecycle operation for a completed
+run. It applies the complete constructor-bound scope to a checkpoint
+`delete_many` followed by the exact deterministic counter `delete_one`, returning
+`MongoDBCheckpointClearResult` with acknowledged checkpoint and counter counts.
+It is retry-safe best-effort cleanup rather than a cross-deployment transaction;
+callers must quiesce writers before clearing and may retry after a partial driver
+failure. It never issues an empty or ID-only delete.
+
 ## Explicit regular indexes
 
 Construction, save, load, and workflow hooks never mutate indexes.
@@ -117,11 +139,13 @@ Construction, save, load, and workflow hooks never mutate indexes.
 | `checkpoint_scope_identity` | `checkpoint_id` | unique, simple collation |
 | `checkpoint_scope_sequence` | `sequence` | unique, simple collation |
 | `checkpoint_scope_lineage` | `parent_checkpoint_id` | simple collation |
-| `checkpoint_expiration` | `expires_at` | `expireAfterSeconds: 0` |
+| `checkpoint_expiration` | `expires_at` | `expireAfterSeconds: 0`, checkpoints |
+| `checkpoint_counter_expiration` | `expires_at` | `expireAfterSeconds: 0`, counters |
 
 The scoped prefix is `scope_discriminator`, `workflow_name`, and `session_id`.
-All indexes have a partial filter for checkpoint records so the internal
-sequence counter cannot collide with checkpoint uniqueness.
+Identity, sequence, lineage, and checkpoint TTL indexes have a checkpoint-only
+partial filter, so the internal counter cannot collide with checkpoint
+uniqueness. The counter TTL index has a counter-only partial filter.
 
 Runtime privileges are find, insert, atomic update/upsert for the sequence
 counter, and targeted delete on the checkpoint collection. Provisioning also
@@ -146,8 +170,9 @@ collection/database names, filters, driver messages, hosts, and credentials.
 
 ## Verification
 
-Public serialization, actual workflow pause/resume, idempotency, conflict,
-lineage, concurrent sequence, pagination, latest, scope, TTL-gap, compatibility,
+Public serialization, actual workflow pause/resume, cross-process canonical
+idempotency, conflict, lineage, concurrent sequence, complete inherited listing,
+bounded pagination, latest, scope cleanup, counter TTL, TTL-gap, compatibility,
 index, cancellation, error, and ownership tests are in
 `python/tests/unit/test_checkpoint_storage.py`. Language-neutral outcomes are in
 `python/tests/contracts/fixtures/checkpoint_storage_contract.json`.

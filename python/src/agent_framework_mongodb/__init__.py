@@ -1,6 +1,7 @@
 """MongoDB integrations for Microsoft Agent Framework."""
 
 from .checkpointing import (
+    MongoDBCheckpointClearResult,
     MongoDBCheckpointNotFoundError,
     MongoDBCheckpointPage,
     MongoDBCheckpointStorage,
@@ -68,6 +69,7 @@ __all__ = [
     "LessThanFilter",
     "LessThanOrEqualFilter",
     "MongoDBCheckpointNotFoundError",
+    "MongoDBCheckpointClearResult",
     "MongoDBCheckpointPage",
     "MongoDBCheckpointStorage",
     "MongoDBCheckpointStorageOptions",

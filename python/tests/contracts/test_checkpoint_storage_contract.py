@@ -22,6 +22,7 @@ def test_checkpoint_storage_contract_matches_public_surface() -> None:
         contract["framework_serialization"]
         == MongoDBCheckpointStorage.FRAMEWORK_SERIALIZATION_VERSION
     )
+    assert contract["idempotency_hash_version"] == MongoDBCheckpointStorage.IDEMPOTENCY_HASH_VERSION
     assert contract["payload_versions"] == sorted(
         MongoDBCheckpointStorage.SUPPORTED_PAYLOAD_VERSIONS
     )
@@ -33,9 +34,13 @@ def test_checkpoint_storage_contract_matches_public_surface() -> None:
     )
     assert contract["pagination"]["default_page_size"] == defaults.page_size
     assert contract["pagination"]["maximum_page_size"] == defaults.max_page_size
+    assert contract["pagination"]["inherited_lists"] == "all_records_via_bounded_pages"
+    assert contract["retention"]["counter_expiration_is_refreshed"]
+    assert contract["retention"]["authorized_clear_run_deletes_counter"]
     assert [item["name"] for item in contract["indexes"]] == [
         "checkpoint_scope_identity",
         "checkpoint_scope_sequence",
         "checkpoint_scope_lineage",
         "checkpoint_expiration",
+        "checkpoint_counter_expiration",
     ]

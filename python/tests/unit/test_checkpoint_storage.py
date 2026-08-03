@@ -1,7 +1,12 @@
 import asyncio
 import copy
+import json
+import os
+import subprocess
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
 
@@ -42,8 +47,9 @@ class Result:
 
 
 class FakeCursor:
-    def __init__(self, documents: list[dict[str, Any]]) -> None:
+    def __init__(self, documents: list[dict[str, Any]], *, cancel: bool = False) -> None:
         self.documents = documents
+        self.cancel = cancel
 
     def sort(self, keys: list[tuple[str, int]]) -> "FakeCursor":
         for key, direction in reversed(keys):
@@ -58,6 +64,8 @@ class FakeCursor:
         return self
 
     async def to_list(self, *, length: int | None) -> list[dict[str, Any]]:
+        if self.cancel:
+            raise asyncio.CancelledError
         return copy.deepcopy(self.documents if length is None else self.documents[:length])
 
 
@@ -79,6 +87,8 @@ class FakeCollection:
         self.fail_reads = False
         self.fail_writes = False
         self.cancel_writes = False
+        self.cancel_list_call: int | None = None
+        self.find_calls = 0
 
     async def find_one(
         self,
@@ -96,8 +106,10 @@ class FakeCollection:
     def find(self, query: dict[str, Any]) -> FakeCursor:
         if self.fail_reads:
             raise ConnectionFailure("private-host.invalid")
+        self.find_calls += 1
         return FakeCursor(
-            [copy.deepcopy(item) for item in self.documents if matches_query(item, query)]
+            [copy.deepcopy(item) for item in self.documents if matches_query(item, query)],
+            cancel=self.find_calls == self.cancel_list_call,
         )
 
     async def find_one_and_update(
@@ -125,6 +137,7 @@ class FakeCollection:
             document["sequence"] = 0
             self.documents.append(document)
         document["sequence"] += cast(int, update["$inc"]["sequence"])
+        document.update(copy.deepcopy(update.get("$set", {})))
         return copy.deepcopy(document)
 
     async def insert_one(self, document: dict[str, Any]) -> Result:
@@ -146,6 +159,15 @@ class FakeCollection:
                 del self.documents[index]
                 return Result(deleted_count=1)
         return Result()
+
+    async def delete_many(self, query: dict[str, Any]) -> Result:
+        if self.fail_writes:
+            raise ConnectionFailure("private-host.invalid")
+        self.deleted_filters.append(copy.deepcopy(query))
+        retained = [item for item in self.documents if not matches_query(item, query)]
+        deleted_count = len(self.documents) - len(retained)
+        self.documents = retained
+        return Result(deleted_count=deleted_count)
 
     async def create_index(self, keys: Any, **kwargs: Any) -> str:
         self.created_indexes.append((keys, copy.deepcopy(kwargs)))
@@ -435,10 +457,73 @@ async def test_bounded_cursor_pagination_and_id_listing_are_deterministic() -> N
     ]
     assert [item.checkpoint_id for item in third.checkpoints] == ["checkpoint-4"]
     assert third.next_cursor is None
+    assert [
+        item.checkpoint_id
+        for item in await storage.list_checkpoints(workflow_name="approval-workflow")
+    ] == [f"checkpoint-{index}" for index in range(5)]
     assert await storage.list_checkpoint_ids(workflow_name="approval-workflow") == [
-        "checkpoint-0",
-        "checkpoint-1",
+        f"checkpoint-{index}" for index in range(5)
     ]
+
+
+@pytest.mark.asyncio
+async def test_inherited_listing_propagates_cancellation_between_bounded_pages() -> None:
+    collection = FakeCollection()
+    storage = MongoDBCheckpointStorage(cast(Any, collection), options=options())
+    for index in range(5):
+        await storage.save(checkpoint(f"checkpoint-{index}"))
+    collection.cancel_list_call = 2
+
+    with pytest.raises(asyncio.CancelledError):
+        await storage.list_checkpoints(workflow_name="approval-workflow")
+    assert collection.find_calls == 2
+
+
+def test_idempotency_hash_is_stable_across_python_hash_seeds() -> None:
+    fixture_path = (
+        Path(__file__).parents[1] / "contracts" / "fixtures" / "checkpoint_canonical_hash.json"
+    )
+    expected = cast(dict[str, str], json.loads(fixture_path.read_text(encoding="utf-8")))
+    script = """
+from agent_framework import WorkflowCheckpoint
+from agent_framework_mongodb.checkpointing.store import _logical_payload_hash
+checkpoint = WorkflowCheckpoint(
+    workflow_name="approval-workflow",
+    graph_signature_hash="graph-v1",
+    checkpoint_id="checkpoint-stable",
+    previous_checkpoint_id="checkpoint-parent",
+    timestamp="2030-01-02T03:04:05+00:00",
+    state={"labels": {"beta", "alpha"}, "nested": {"b": 2, "a": 1}},
+    iteration_count=7,
+    metadata={"attempt": 1},
+)
+print(_logical_payload_hash(checkpoint, frozenset()))
+"""
+    observed: list[str] = []
+    for seed in ("1", "987654"):
+        environment = {**os.environ, "PYTHONHASHSEED": seed}
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+        observed.append(result.stdout.strip())
+
+    assert observed == [expected["sha256"], expected["sha256"]]
+
+
+@pytest.mark.asyncio
+async def test_save_rejects_noncanonical_state_before_allocating_sequence() -> None:
+    collection = FakeCollection()
+    storage = MongoDBCheckpointStorage(cast(Any, collection), options=options())
+    invalid = checkpoint("unsupported")
+    invalid.state["unsupported"] = object()
+
+    with pytest.raises(MongoDBMappingError, match="canonical"):
+        await storage.save(invalid)
+    assert collection.documents == []
 
 
 @pytest.mark.asyncio
@@ -490,14 +575,49 @@ async def test_expiration_can_leave_documented_lineage_gaps() -> None:
     )
     await storage.save(checkpoint("parent"))
     await storage.save(checkpoint("child", previous_checkpoint_id="parent"))
+    counter = next(
+        item for item in collection.documents if item["_kind"] == "workflow_checkpoint_counter"
+    )
     parent_document = next(
         item for item in checkpoint_documents(collection) if item["checkpoint_id"] == "parent"
     )
     assert cast(datetime, parent_document["expires_at"]).tzinfo is timezone.utc
+    assert counter["expires_at"] == checkpoint_documents(collection)[-1]["expires_at"]
 
     collection.documents.remove(parent_document)
     child = await storage.load("child")
     assert child.previous_checkpoint_id == "parent"
+
+
+@pytest.mark.asyncio
+async def test_clear_run_deletes_only_authorized_checkpoints_and_counter_with_counts() -> None:
+    collection = FakeCollection()
+    first = MongoDBCheckpointStorage(
+        cast(Any, collection),
+        options=options(tenant_id="tenant-1"),
+    )
+    second = MongoDBCheckpointStorage(
+        cast(Any, collection),
+        options=options(tenant_id="tenant-2"),
+    )
+    for index in range(3):
+        await first.save(checkpoint(f"first-{index}"))
+    await second.save(checkpoint("second-0"))
+
+    result = await first.clear_run()
+
+    assert result.acknowledged
+    assert result.checkpoints_deleted == 3
+    assert result.counter_deleted == 1
+    assert {(item["_kind"], item["tenant_id"]) for item in collection.documents} == {
+        ("workflow_checkpoint", "tenant-2"),
+        ("workflow_checkpoint_counter", "tenant-2"),
+    }
+    for query in collection.deleted_filters[-2:]:
+        assert query["scope_discriminator"]
+        assert query["tenant_id"] == "tenant-1"
+        assert query["workflow_name"] == "approval-workflow"
+        assert query["session_id"] == "run-1"
 
 
 @pytest.mark.asyncio
@@ -536,9 +656,14 @@ async def test_index_operations_are_explicit_and_validate_required_definitions()
         "checkpoint_scope_sequence",
         "checkpoint_scope_lineage",
         "checkpoint_expiration",
+        "checkpoint_counter_expiration",
     )
     expected_partial = {
         "_kind": "workflow_checkpoint",
+        "scope_discriminator": {"$type": "string"},
+    }
+    expected_counter_partial = {
+        "_kind": "workflow_checkpoint_counter",
         "scope_discriminator": {"$type": "string"},
     }
     assert collection.created_indexes == [
@@ -589,6 +714,14 @@ async def test_index_operations_are_explicit_and_validate_required_definitions()
                 "name": "checkpoint_expiration",
                 "expireAfterSeconds": 0,
                 "partialFilterExpression": expected_partial,
+            },
+        ),
+        (
+            [("expires_at", ASCENDING)],
+            {
+                "name": "checkpoint_counter_expiration",
+                "expireAfterSeconds": 0,
+                "partialFilterExpression": expected_counter_partial,
             },
         ),
     ]

@@ -1,4 +1,3 @@
-import asyncio
 import os
 import uuid
 from dataclasses import dataclass
@@ -153,21 +152,23 @@ async def test_checkpoint_storage_resumption_lineage_order_isolation_and_cleanup
 
         with pytest.raises(MongoDBCheckpointNotFoundError):
             await second.load(latest.checkpoint_id)
-        checkpoint_ids: list[str] = []
-        cursor: str | None = None
-        while True:
-            page = await first.list_checkpoint_page(
-                workflow_name="deployment-approval",
-                cursor=cursor,
-                limit=100,
-            )
-            checkpoint_ids.extend(item.checkpoint_id for item in page.checkpoints)
-            if page.next_cursor is None:
-                break
-            cursor = page.next_cursor
-        deleted = await asyncio.gather(*(first.delete(item) for item in checkpoint_ids))
-        assert all(deleted)
+        checkpoint_ids = await first.list_checkpoint_ids(workflow_name="deployment-approval")
+        assert len(checkpoint_ids) > first.options.page_size
+        cleared = await first.clear_run()
+        assert cleared.acknowledged
+        assert cleared.checkpoints_deleted == len(checkpoint_ids)
+        assert cleared.counter_deleted == 1
         assert await first.get_latest(workflow_name="deployment-approval") is None
+        assert (
+            await collection.count_documents(
+                {
+                    "tenant_id": first.options.tenant_id,
+                    "workflow_name": first.options.workflow_name,
+                    "session_id": first.options.session_id,
+                }
+            )
+            == 0
+        )
     finally:
         await database.drop_collection(collection_name)
         await client.close()

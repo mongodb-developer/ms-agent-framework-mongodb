@@ -1,6 +1,7 @@
 {
   "schema_version": 1,
   "framework_serialization": "agent-framework-core/1:WorkflowCheckpoint.to_dict/v1",
+  "idempotency_hash_version": 1,
   "payload_versions": ["1.0"],
   "collection_default": "workflow_checkpoints",
   "scope_dimensions": ["tenant_id", "workflow_name", "session_id", "checkpoint_id"],
@@ -8,13 +9,15 @@
   "pagination": {
     "default_page_size": 100,
     "maximum_page_size": 1000,
-    "cursor_version": 1
+    "cursor_version": 1,
+    "inherited_lists": "all_records_via_bounded_pages"
   },
   "indexes": [
     {"name": "checkpoint_scope_identity", "unique": true},
     {"name": "checkpoint_scope_sequence", "unique": true},
     {"name": "checkpoint_scope_lineage", "unique": false},
-    {"name": "checkpoint_expiration", "unique": false}
+    {"name": "checkpoint_expiration", "unique": false},
+    {"name": "checkpoint_counter_expiration", "unique": false}
   ],
   "idempotency_cases": [
     {"operation": "save", "payload": "same", "outcome": "idempotent"},
@@ -22,6 +25,8 @@
   ],
   "retention": {
     "ttl_is_eventual": true,
-    "lineage_gaps_are_valid": true
+    "lineage_gaps_are_valid": true,
+    "counter_expiration_is_refreshed": true,
+    "authorized_clear_run_deletes_counter": true
   }
 }

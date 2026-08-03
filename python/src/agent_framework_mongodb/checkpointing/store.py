@@ -10,11 +10,16 @@ import json
 import logging
 import pickle  # nosec B403 -- restricted unpickling of authorized checkpoint storage
 import time
-from collections.abc import Mapping
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from collections.abc import Callable, Mapping, Set
+from dataclasses import dataclass, fields, is_dataclass
+from datetime import date, datetime, timedelta, timezone
+from datetime import time as datetime_time
+from decimal import Decimal
+from enum import Enum
+from math import isfinite
 from types import TracebackType
 from typing import Any, ClassVar, TypeAlias, cast
+from uuid import UUID
 
 from agent_framework import (
     CheckpointID,
@@ -143,11 +148,21 @@ class MongoDBCheckpointPage:
     next_cursor: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class MongoDBCheckpointClearResult:
+    """Acknowledged counts from an authorized best-effort run cleanup."""
+
+    checkpoints_deleted: int
+    counter_deleted: int
+    acknowledged: bool = True
+
+
 class MongoDBCheckpointStorage(CheckpointStorage):
     """Persist immutable checkpoints in one constructor-bound authorized run."""
 
     SCHEMA_VERSION: ClassVar[int] = 1
     CURSOR_VERSION: ClassVar[int] = 1
+    IDEMPOTENCY_HASH_VERSION: ClassVar[int] = 1
     FRAMEWORK_SERIALIZATION_VERSION: ClassVar[str] = (
         "agent-framework-core/1:WorkflowCheckpoint.to_dict/v1"
     )
@@ -241,7 +256,7 @@ class MongoDBCheckpointStorage(CheckpointStorage):
         if checkpoint.previous_checkpoint_id == checkpoint.checkpoint_id:
             raise MongoDBConfigurationError("A checkpoint cannot be its own parent.")
         identity = self._identity(checkpoint.checkpoint_id)
-        payload, payload_hash = _serialize(checkpoint)
+        payload, payload_hash = _serialize(checkpoint, self._allowed_types)
         _validate_payload_version(checkpoint.version)
         existing = await self._find_one(identity)
         if existing is not None:
@@ -252,21 +267,27 @@ class MongoDBCheckpointStorage(CheckpointStorage):
                 "The checkpoint ID already exists with a different payload."
             )
 
-        sequence = await self._allocate_sequence()
         now = _to_bson_utc_milliseconds(datetime.now(timezone.utc))
+        expires_at = (
+            _to_bson_utc_milliseconds(now + self.options.ttl)
+            if self.options.ttl is not None
+            else None
+        )
+        sequence = await self._allocate_sequence(now=now, expires_at=expires_at)
         document: MongoDocument = {
             **identity,
             "schema_version": self.SCHEMA_VERSION,
             "framework_version": self.FRAMEWORK_SERIALIZATION_VERSION,
             "payload_version": checkpoint.version,
+            "idempotency_hash_version": self.IDEMPOTENCY_HASH_VERSION,
             "parent_checkpoint_id": checkpoint.previous_checkpoint_id,
             "sequence": sequence,
             "created_at": now,
             "checkpoint": payload,
             "payload_hash": payload_hash,
         }
-        if self.options.ttl is not None:
-            document["expires_at"] = _to_bson_utc_milliseconds(now + self.options.ttl)
+        if expires_at is not None:
+            document["expires_at"] = expires_at
         started = time.monotonic()
         try:
             await self.collection.insert_one(document)
@@ -299,9 +320,18 @@ class MongoDBCheckpointStorage(CheckpointStorage):
         return restored
 
     async def list_checkpoints(self, *, workflow_name: str) -> list[WorkflowCheckpoint]:
-        """Return the first bounded page in monotonic sequence order."""
-        page = await self.list_checkpoint_page(workflow_name=workflow_name)
-        return list(page.checkpoints)
+        """Enumerate all checkpoints through bounded pages in monotonic order."""
+        checkpoints: list[WorkflowCheckpoint] = []
+        cursor: str | None = None
+        while True:
+            page = await self.list_checkpoint_page(
+                workflow_name=workflow_name,
+                cursor=cursor,
+            )
+            checkpoints.extend(page.checkpoints)
+            if page.next_cursor is None:
+                return checkpoints
+            cursor = page.next_cursor
 
     async def list_checkpoint_page(
         self,
@@ -354,6 +384,25 @@ class MongoDBCheckpointStorage(CheckpointStorage):
         _log_success("delete", started, result.deleted_count)
         return result.deleted_count == 1
 
+    async def clear_run(self) -> MongoDBCheckpointClearResult:
+        """Best-effort delete all records in this exact authorized workflow run."""
+        partition = self._partition(self.options.workflow_name)
+        counter_identity = self._counter_identity()
+        started = time.monotonic()
+        try:
+            checkpoints_result = await self.collection.delete_many(partition)
+            counter_result = await self.collection.delete_one(counter_identity)
+        except PyMongoError as exc:
+            _log_failure("clear", started, _error_category(exc, "persistence"))
+            raise _translate_mongo_error(exc, "persistence") from exc
+        checkpoints_deleted = _acknowledged_delete_count(checkpoints_result)
+        counter_deleted = _acknowledged_delete_count(counter_result)
+        _log_success("clear", started, checkpoints_deleted + counter_deleted)
+        return MongoDBCheckpointClearResult(
+            checkpoints_deleted=checkpoints_deleted,
+            counter_deleted=counter_deleted,
+        )
+
     async def get_latest(self, *, workflow_name: str) -> WorkflowCheckpoint | None:
         """Load the greatest monotonic sequence in the authorized workflow session."""
         started = time.monotonic()
@@ -369,12 +418,12 @@ class MongoDBCheckpointStorage(CheckpointStorage):
         return restored
 
     async def list_checkpoint_ids(self, *, workflow_name: str) -> list[CheckpointID]:
-        """Return IDs from the first bounded page in monotonic sequence order."""
-        page = await self.list_checkpoint_page(workflow_name=workflow_name)
-        return [checkpoint.checkpoint_id for checkpoint in page.checkpoints]
+        """Enumerate all checkpoint IDs through bounded pages in monotonic order."""
+        checkpoints = await self.list_checkpoints(workflow_name=workflow_name)
+        return [checkpoint.checkpoint_id for checkpoint in checkpoints]
 
-    async def _allocate_sequence(self) -> int:
-        counter_identity = {
+    def _counter_identity(self) -> MongoDocument:
+        return {
             "_id": _canonical_hash(
                 {
                     "kind": "workflow_checkpoint_counter",
@@ -390,13 +439,23 @@ class MongoDBCheckpointStorage(CheckpointStorage):
             "workflow_name": self.options.workflow_name,
             "session_id": self.options.session_id,
         }
+
+    async def _allocate_sequence(
+        self,
+        *,
+        now: datetime,
+        expires_at: datetime | None,
+    ) -> int:
+        update: MongoDocument = {
+            "$inc": {"sequence": 1},
+            "$setOnInsert": {"created_at": now},
+        }
+        if expires_at is not None:
+            update["$set"] = {"expires_at": expires_at}
         try:
             counter = await self.collection.find_one_and_update(
-                counter_identity,
-                {
-                    "$inc": {"sequence": 1},
-                    "$setOnInsert": {"created_at": datetime.now(timezone.utc)},
-                },
+                self._counter_identity(),
+                update,
                 upsert=True,
                 return_document=ReturnDocument.AFTER,
             )
@@ -473,12 +532,24 @@ class MongoDBCheckpointStorage(CheckpointStorage):
                 "Stored checkpoint envelope and payload disagree; "
                 "migrate the authorized checkpoint."
             )
+        if document.get("payload_hash") != _logical_payload_hash(
+            checkpoint,
+            self._allowed_types,
+        ):
+            raise MongoDBMappingError(
+                "Stored checkpoint canonical hash does not match its public payload; "
+                "migrate or delete the authorized checkpoint."
+            )
         return checkpoint
 
     async def ensure_indexes(self) -> tuple[str, ...]:
         """Explicitly create checkpoint identity, ordering, lineage, and TTL indexes."""
         partial = {
             "_kind": "workflow_checkpoint",
+            "scope_discriminator": {"$type": "string"},
+        }
+        counter_partial = {
+            "_kind": "workflow_checkpoint_counter",
             "scope_discriminator": {"$type": "string"},
         }
         prefix = [
@@ -521,6 +592,14 @@ class MongoDBCheckpointStorage(CheckpointStorage):
                     "partialFilterExpression": partial,
                 },
             ),
+            (
+                [("expires_at", ASCENDING)],
+                {
+                    "name": "checkpoint_counter_expiration",
+                    "expireAfterSeconds": 0,
+                    "partialFilterExpression": counter_partial,
+                },
+            ),
         ]
         try:
             return tuple(
@@ -543,22 +622,48 @@ class MongoDBCheckpointStorage(CheckpointStorage):
             "_kind": "workflow_checkpoint",
             "scope_discriminator": {"$type": "string"},
         }
+        counter_partial = {
+            "_kind": "workflow_checkpoint_counter",
+            "scope_discriminator": {"$type": "string"},
+        }
         prefix = (
             ("scope_discriminator", 1),
             ("workflow_name", 1),
             ("session_id", 1),
         )
         required = {
-            "checkpoint_scope_identity": ((*prefix, ("checkpoint_id", 1)), True, None),
-            "checkpoint_scope_sequence": ((*prefix, ("sequence", 1)), True, None),
+            "checkpoint_scope_identity": (
+                (*prefix, ("checkpoint_id", 1)),
+                True,
+                None,
+                partial,
+            ),
+            "checkpoint_scope_sequence": (
+                (*prefix, ("sequence", 1)),
+                True,
+                None,
+                partial,
+            ),
             "checkpoint_scope_lineage": (
                 (*prefix, ("parent_checkpoint_id", 1)),
                 False,
                 None,
+                partial,
             ),
-            "checkpoint_expiration": ((("expires_at", 1),), False, 0),
+            "checkpoint_expiration": (
+                (("expires_at", 1),),
+                False,
+                0,
+                partial,
+            ),
+            "checkpoint_counter_expiration": (
+                (("expires_at", 1),),
+                False,
+                0,
+                counter_partial,
+            ),
         }
-        for name, (keys, unique, expire_after) in required.items():
+        for name, (keys, unique, expire_after, expected_partial) in required.items():
             index = by_name.get(name)
             if index is None:
                 raise MongoDBIndexMissingError(
@@ -567,7 +672,7 @@ class MongoDBCheckpointStorage(CheckpointStorage):
             if (
                 _index_keys(index) != keys
                 or bool(index.get("unique", False)) is not unique
-                or index.get("partialFilterExpression") != partial
+                or index.get("partialFilterExpression") != expected_partial
                 or (expire_after is None and not _has_simple_collation(index))
                 or (expire_after is not None and index.get("expireAfterSeconds") != expire_after)
             ):
@@ -613,8 +718,12 @@ class _RestrictedCheckpointUnpickler(pickle.Unpickler):  # nosec B301
         )
 
 
-def _serialize(checkpoint: WorkflowCheckpoint) -> tuple[Binary, str]:
+def _serialize(
+    checkpoint: WorkflowCheckpoint,
+    allowed_types: frozenset[str],
+) -> tuple[Binary, str]:
     public_payload = checkpoint.to_dict()
+    payload_hash = _logical_payload_hash(checkpoint, allowed_types)
     try:
         encoded = pickle.dumps(public_payload, protocol=pickle.HIGHEST_PROTOCOL)
     except (pickle.PickleError, TypeError, AttributeError) as exc:
@@ -622,7 +731,219 @@ def _serialize(checkpoint: WorkflowCheckpoint) -> tuple[Binary, str]:
             "Checkpoint public state cannot be serialized; "
             "store only serializable workflow and executor state."
         ) from exc
-    return Binary(encoded), hashlib.sha256(encoded).hexdigest()
+    return Binary(encoded), payload_hash
+
+
+def _logical_payload_hash(
+    checkpoint: WorkflowCheckpoint,
+    allowed_types: frozenset[str],
+) -> str:
+    """Hash a canonical logical representation of public checkpoint state."""
+    canonical = _canonical_checkpoint_value(
+        checkpoint.to_dict(),
+        allowed_types=allowed_types,
+        active_ids=set(),
+    )
+    encoded = json.dumps(
+        canonical,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _canonical_checkpoint_value(
+    value: object,
+    *,
+    allowed_types: frozenset[str],
+    active_ids: set[int],
+) -> object:
+    if value is None:
+        return {"type": "none"}
+    if type(value) is bool:
+        return {"type": "bool", "value": value}
+    if type(value) is int:
+        return {"type": "int", "value": str(value)}
+    if type(value) is float:
+        if not isfinite(value):
+            raise _noncanonical_error(value)
+        return {"type": "float", "value": value.hex()}
+    if type(value) is str:
+        return {"type": "str", "value": value}
+    if type(value) is bytes:
+        return {
+            "type": "bytes",
+            "value": base64.b64encode(value).decode("ascii"),
+        }
+    if type(value) is bytearray:
+        return {
+            "type": "bytearray",
+            "value": base64.b64encode(bytes(value)).decode("ascii"),
+        }
+    if isinstance(value, datetime):
+        return {"type": "datetime", "value": value.isoformat(), "fold": value.fold}
+    if isinstance(value, date):
+        return {"type": "date", "value": value.isoformat()}
+    if isinstance(value, datetime_time):
+        return {"type": "time", "value": value.isoformat(), "fold": value.fold}
+    if isinstance(value, timezone):
+        offset = value.utcoffset(None)
+        return {
+            "type": "timezone",
+            "offset_seconds": offset.total_seconds(),
+            "name": value.tzname(None),
+        }
+    if isinstance(value, timedelta):
+        return {
+            "type": "timedelta",
+            "days": value.days,
+            "seconds": value.seconds,
+            "microseconds": value.microseconds,
+        }
+    if isinstance(value, UUID):
+        return {"type": "uuid", "value": value.hex}
+    if isinstance(value, Decimal):
+        decimal_tuple = value.as_tuple()
+        return {
+            "type": "decimal",
+            "sign": decimal_tuple.sign,
+            "digits": list(decimal_tuple.digits),
+            "exponent": decimal_tuple.exponent,
+        }
+    if isinstance(value, Enum):
+        return {
+            "type": "enum",
+            "class": _type_key(type(value)),
+            "name": value.name,
+        }
+    if isinstance(value, type):
+        type_key = _type_key(value)
+        if value.__module__.startswith("agent_framework.") or type_key in allowed_types:
+            return {"type": "type_reference", "class": type_key}
+        raise _noncanonical_error(value)
+
+    value_id = id(value)
+    if value_id in active_ids:
+        raise MongoDBMappingError(
+            "Checkpoint public state contains a cycle and has no canonical serialization."
+        )
+    active_ids.add(value_id)
+    try:
+        if isinstance(value, Mapping):
+            mapping = cast(Mapping[object, object], value)
+            pairs = [
+                [
+                    _canonical_checkpoint_value(
+                        key,
+                        allowed_types=allowed_types,
+                        active_ids=active_ids,
+                    ),
+                    _canonical_checkpoint_value(
+                        item,
+                        allowed_types=allowed_types,
+                        active_ids=active_ids,
+                    ),
+                ]
+                for key, item in mapping.items()
+            ]
+            pairs.sort(key=lambda pair: _canonical_sort_key(pair[0]))
+            return {"type": "mapping", "items": pairs}
+        if isinstance(value, list):
+            list_value = cast(list[object], value)
+            return {
+                "type": "list",
+                "items": [
+                    _canonical_checkpoint_value(
+                        item,
+                        allowed_types=allowed_types,
+                        active_ids=active_ids,
+                    )
+                    for item in list_value
+                ],
+            }
+        if isinstance(value, tuple):
+            tuple_value = cast(tuple[object, ...], value)
+            return {
+                "type": "tuple",
+                "items": [
+                    _canonical_checkpoint_value(
+                        item,
+                        allowed_types=allowed_types,
+                        active_ids=active_ids,
+                    )
+                    for item in tuple_value
+                ],
+            }
+        if isinstance(value, (set, frozenset)):
+            set_value = cast(Set[object], value)
+            items = [
+                _canonical_checkpoint_value(
+                    item,
+                    allowed_types=allowed_types,
+                    active_ids=active_ids,
+                )
+                for item in set_value
+            ]
+            items.sort(key=_canonical_sort_key)
+            return {
+                "type": "frozenset" if isinstance(value, frozenset) else "set",
+                "items": items,
+            }
+
+        type_key = _type_key(type(value))
+        type_is_allowed = (
+            type(value).__module__.startswith("agent_framework.") or type_key in allowed_types
+        )
+        to_dict = getattr(value, "to_dict", None)
+        if type_is_allowed and callable(to_dict):
+            public_value = cast(Callable[[], object], to_dict)()
+            if not isinstance(public_value, Mapping):
+                raise _noncanonical_error(value)
+            return {
+                "type": "object",
+                "class": type_key,
+                "value": _canonical_checkpoint_value(
+                    cast(Mapping[object, object], public_value),
+                    allowed_types=allowed_types,
+                    active_ids=active_ids,
+                ),
+            }
+        if type_is_allowed and is_dataclass(value) and not isinstance(value, type):
+            return {
+                "type": "dataclass",
+                "class": type_key,
+                "fields": [
+                    [
+                        field.name,
+                        _canonical_checkpoint_value(
+                            getattr(value, field.name),
+                            allowed_types=allowed_types,
+                            active_ids=active_ids,
+                        ),
+                    ]
+                    for field in fields(value)
+                ],
+            }
+        raise _noncanonical_error(value)
+    finally:
+        active_ids.remove(value_id)
+
+
+def _canonical_sort_key(value: object) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
+def _type_key(value_type: type[object]) -> str:
+    return f"{value_type.__module__}:{value_type.__qualname__}"
+
+
+def _noncanonical_error(value: object) -> MongoDBMappingError:
+    return MongoDBMappingError(
+        "Checkpoint public state contains unsupported noncanonical type "
+        f"'{_type_key(type(value))}'; use supported values or register an "
+        "application dataclass/public to_dict type in allowed_checkpoint_types."
+    )
 
 
 def _restricted_loads(payload: bytes, allowed_types: frozenset[str]) -> Any:
@@ -702,6 +1023,12 @@ def _validate_versions(document: Mapping[str, Any]) -> None:
             f"{framework_version!r}; "
             "migrate the authorized checkpoint with a supported Agent Framework version."
         )
+    hash_version = document.get("idempotency_hash_version")
+    if hash_version != MongoDBCheckpointStorage.IDEMPOTENCY_HASH_VERSION:
+        raise MongoDBMappingError(
+            f"Unsupported checkpoint idempotency hash version {hash_version!r}; "
+            "migrate the authorized checkpoint with the canonical version 1 hash."
+        )
 
 
 def _to_bson_utc_milliseconds(value: datetime) -> datetime:
@@ -725,6 +1052,20 @@ def _has_simple_collation(index: Mapping[str, Any]) -> bool:
         return False
     collation = cast(Mapping[str, object], raw)
     return collation.get("locale") == "simple"
+
+
+def _acknowledged_delete_count(result: object) -> int:
+    acknowledged = getattr(result, "acknowledged", True)
+    if acknowledged is not True:
+        raise MongoDBPersistenceError(
+            "MongoDB Workflow Checkpoint cleanup requires acknowledged writes."
+        )
+    deleted_count = getattr(result, "deleted_count", None)
+    if type(deleted_count) is not int or deleted_count < 0:
+        raise MongoDBPersistenceError(
+            "MongoDB Workflow Checkpoint cleanup returned an invalid delete count."
+        )
+    return deleted_count
 
 
 def _translate_mongo_error(error: PyMongoError, operation: str) -> Exception:
