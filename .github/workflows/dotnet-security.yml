@@ -1,0 +1,115 @@
+name: .NET dependency, secret, and code scanning
+
+# Implements the "security" job from docs/spec/quality-release.md's CI workflow topology, scoped to this change:
+# a .NET NuGet (including transitive) dependency vulnerability audit, a repository secret scan, and CodeQL code
+# scanning for the .NET provider. All three use free, already-available GitHub-native or open-source tooling only
+# (the `dotnet` SDK itself, GitHub's first-party CodeQL action, and the open-source gitleaks CLI) -- no paid
+# third-party service is introduced. Runs on every pull request and push so credential-free checks always gate
+# review, plus a weekly schedule so newly disclosed advisories are caught even without new commits.
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dotnet-vulnerability-audit:
+    name: .NET dependency vulnerability audit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+            10.0.x
+
+      - name: Restore
+        working-directory: dotnet
+        run: dotnet restore MongoDB.AgentFramework.slnx
+
+      # `dotnet list package --vulnerable` always exits 0, even when it finds vulnerable packages, so the audit
+      # step must inspect its own output text and fail the job explicitly. `--include-transitive` is required so
+      # a vulnerability introduced only by a dependency-of-a-dependency is still caught, matching
+      # docs/spec/observability-security.md's "Run dependency and secret scanning in CI" requirement.
+      - name: Audit direct and transitive NuGet dependencies for known vulnerabilities
+        working-directory: dotnet
+        shell: pwsh
+        run: |
+          $output = dotnet list MongoDB.AgentFramework.slnx package --vulnerable --include-transitive 2>&1 | Tee-Object -Variable capturedOutput
+          $capturedOutput | Out-String -Stream | Write-Output
+          if ($capturedOutput -match 'has the following vulnerable packages') {
+            Write-Error "One or more NuGet packages (direct or transitive) have known vulnerabilities. See the audit output above."
+            exit 1
+          }
+
+  secret-scan:
+    name: Repository secret scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # gitleaks is open-source (MIT licensed) and free to run as a plain CLI in any repository visibility; only
+      # the separately distributed GitHub Action wrapper requires a paid license for private-organization use, so
+      # the CLI binary is downloaded and invoked directly to avoid introducing any paid dependency.
+      - name: Download gitleaks CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="8.21.2"
+          curl -sSL -o gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${version}/gitleaks_${version}_linux_x64.tar.gz"
+          tar -xzf gitleaks.tar.gz gitleaks
+          chmod +x gitleaks
+
+      - name: Scan git history and working tree for secrets
+        shell: bash
+        run: ./gitleaks detect --source . --redact --verbose --exit-code 1
+
+  codeql:
+    name: CodeQL code scanning (C#)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+            10.0.x
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: csharp
+
+      - name: Build (autobuild)
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:csharp"
