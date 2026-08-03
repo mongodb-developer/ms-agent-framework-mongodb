@@ -6,11 +6,13 @@ on:
       - "python/**"
       - "scripts/scan_credentials.py"
       - ".github/workflows/python-quality.yml"
+      - ".github/workflows/release-python.yml"
   push:
     paths:
       - "python/**"
       - "scripts/scan_credentials.py"
       - ".github/workflows/python-quality.yml"
+      - ".github/workflows/release-python.yml"
   workflow_dispatch:
 
 permissions:

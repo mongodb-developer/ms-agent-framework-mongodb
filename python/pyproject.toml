@@ -36,6 +36,7 @@ dev = [
     "build>=1.2,<2",
     "mypy>=1.17,<2",
     "pyright>=1.1.403,<2",
+    "pyyaml>=6,<7",
     "pytest>=8.4,<9",
     "pytest-asyncio>=1.1,<2",
     "pytest-cov>=6.2,<7",

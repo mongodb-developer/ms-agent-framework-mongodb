@@ -46,11 +46,13 @@ MongoDB. The provider clients are then closed.
 ## Public API compatibility
 
 `api-baseline.json` is the reviewed first-release candidate baseline. It records
-every top-level export and all package-owned constructor signatures and
-defaults that Python can inspect reliably. `scripts/check_api_baseline.py`
-fails on additions, removals, renames, or signature/default changes. The
-baseline version must be finalized to the first published package version
-during the release review. Later intentional changes require semantic-version,
+every top-level export, package-owned constructor, and every visible public
+method, property accessor, classmethod, and staticmethod defined by a
+package-owned class in the exported class's inheritance chain. Private members
+and members inherited from foreign dependencies are excluded.
+`scripts/check_api_baseline.py` fails on additions, removals, renames,
+signature/default changes, or any mismatch between `baseline_version` and the
+installed package version. Later intentional changes require semantic-version,
 migration, and deprecation review before regenerating it with `--write`.
 
 ## Compatibility matrix
@@ -82,8 +84,12 @@ artifact retention. Security workflows separately run dependency review,
 credential scanning, CodeQL, and `pip-audit`.
 
 `release-python.yml` is manual and accepts only an existing
-`python-v<version>` tag whose version matches `pyproject.toml`. It rebuilds from
-the tagged commit and repeats the credential-free gate. Publication is skipped
+`python-v<version>` tag whose version exactly matches both `pyproject.toml` and
+`api-baseline.json`. The current reviewed tag is therefore
+`python-v0.1.0.dev0`; a different release requires a reviewed commit updating
+both version sources rather than unreviewed build-time substitution. The
+workflow rebuilds from the tagged commit, exact-tests wheel and sdist in
+separate environments, and repeats the credential-free gate. Publication is skipped
 unless owners configure both:
 
 1. `PYTHON_PROVENANCE_APPROVED=true`, enabling GitHub artifact provenance; and
@@ -91,7 +97,12 @@ unless owners configure both:
    configured for PyPI trusted publishing.
 
 The publish job has only `contents: read` and `id-token: write`; it accepts no
-password or token secret. Tag protection, environment reviewers, PyPI project
+password or token secret. Release-sensitive actions are pinned to full,
+reviewed commit SHAs with their upstream major/ref recorded inline. After a
+successful publish, a protected job waits for the exact PyPI version, downloads
+both distributions, compares their SHA-256 hashes to the pre-publish artifacts,
+installs each separately, and repeats versioned public API smoke. Tag
+protection, environment reviewers, PyPI project
 ownership, support/security contacts, release approvers, and signature policy
 are owner settings and remain blockers. No signing placeholder is selected
 until that policy is known.

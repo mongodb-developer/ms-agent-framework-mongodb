@@ -12,4 +12,6 @@ dist/
 .artifact-*/
 .audit-venv/
 .dependency-*/
-.release-smoke/
+.release-smoke-*/
+.published-smoke-*/
+published/

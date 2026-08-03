@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 from collections.abc import Awaitable, Sequence
 from importlib.metadata import version
@@ -85,6 +86,18 @@ async def _smoke() -> None:
     )
 
 
-if __name__ == "__main__":
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--expected-version")
+    args = parser.parse_args()
+    installed_version = version("agent-framework-mongodb")
+    if args.expected_version is not None and installed_version != args.expected_version:
+        raise RuntimeError(
+            f"expected installed version {args.expected_version}, found {installed_version}"
+        )
     asyncio.run(_smoke())
     print("Installed public API constructor smoke passed.")
+
+
+if __name__ == "__main__":
+    main()
