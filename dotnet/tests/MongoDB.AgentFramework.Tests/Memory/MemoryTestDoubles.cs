@@ -4,6 +4,7 @@ using MongoDB.Bson.Serialization;
 using MongoDB.Bson.Serialization.Serializers;
 using MongoDB.Driver;
 using System.Collections;
+using System.Net;
 using System.Reflection;
 
 namespace MongoDB.AgentFramework.Tests.Memory;
@@ -53,6 +54,9 @@ internal sealed class MemoryCollectionState
 {
     private readonly object _attemptLock = new();
 
+    /// <summary>Guards <see cref="SearchIndexes"/> mutation so concurrent Ensure calls race deterministically.</summary>
+    public object SearchIndexLock { get; } = new();
+
     public List<BsonDocument> Inserted { get; } = [];
 
     public List<BsonDocument> AggregateStages { get; } = [];
@@ -80,6 +84,26 @@ internal sealed class MemoryCollectionState
     public Queue<List<BsonDocument>> SearchIndexSnapshots { get; } = [];
 
     public CreateSearchIndexModel? CreatedSearchIndex { get; set; }
+
+    public int CreateOneCallCount { get; set; }
+
+    public Exception? CreateException { get; set; }
+
+    public string? DroppedIndexName { get; set; }
+
+    public int DropOneCallCount { get; set; }
+
+    public Exception? DropException { get; set; }
+
+    public string? UpdatedIndexName { get; set; }
+
+    public BsonDocument? UpdatedDefinition { get; set; }
+
+    public int UpdateCallCount { get; set; }
+
+    public Exception? UpdateException { get; set; }
+
+    public Exception? ListException { get; set; }
 
     public void CaptureAttempt(BsonDocument[] documents)
     {
@@ -216,6 +240,11 @@ internal class SearchIndexManagerProxy : DispatchProxy
     {
         if (targetMethod!.Name == "ListAsync")
         {
+            if (State.ListException is not null)
+            {
+                return Task.FromException<IAsyncCursor<BsonDocument>>(State.ListException);
+            }
+
             if (State.SearchIndexSnapshots.Count > 0)
             {
                 State.SearchIndexes = State.SearchIndexSnapshots.Dequeue();
@@ -228,8 +257,56 @@ internal class SearchIndexManagerProxy : DispatchProxy
         if (targetMethod.Name == "CreateOneAsync" &&
             args![0] is CreateSearchIndexModel model)
         {
-            State.CreatedSearchIndex = model;
-            return Task.FromResult(model.Name);
+            lock (State.SearchIndexLock)
+            {
+                State.CreateOneCallCount++;
+                if (State.CreateException is not null)
+                {
+                    return Task.FromException<string>(State.CreateException);
+                }
+
+                if (State.SearchIndexes.Any(index => index.GetValue("name", "").AsString == model.Name))
+                {
+                    // A concurrent caller already won the race to create this index; the real server would
+                    // reject this second attempt as "already exists".
+                    return Task.FromException<string>(
+                        MemoryIndexFixtures.CommandException(68, "IndexAlreadyExists", "Index already exists"));
+                }
+
+                State.CreatedSearchIndex = model;
+                State.SearchIndexes =
+                [
+                    .. State.SearchIndexes,
+                    new BsonDocument
+                    {
+                        { "name", model.Name },
+                        { "type", "vectorSearch" },
+                        { "status", "READY" },
+                        { "queryable", true },
+                        { "latestDefinition", model.Definition },
+                    },
+                ];
+                return Task.FromResult(model.Name);
+            }
+        }
+
+        if (targetMethod.Name == "DropOneAsync")
+        {
+            State.DropOneCallCount++;
+            State.DroppedIndexName = (string)args![0]!;
+            return State.DropException is not null
+                ? Task.FromException(State.DropException)
+                : Task.CompletedTask;
+        }
+
+        if (targetMethod.Name == "UpdateAsync")
+        {
+            State.UpdateCallCount++;
+            State.UpdatedIndexName = (string)args![0]!;
+            State.UpdatedDefinition = (BsonDocument)args[1]!;
+            return State.UpdateException is not null
+                ? Task.FromException(State.UpdateException)
+                : Task.CompletedTask;
         }
 
         throw new NotSupportedException($"Unexpected search-index call: {targetMethod}");
@@ -277,4 +354,69 @@ internal sealed class UnacknowledgedDeleteResult : DeleteResult
 
     public override long DeletedCount =>
         throw new NotSupportedException("The delete was not acknowledged.");
+}
+
+/// <summary>
+/// Builds fake index management fixtures shared by <see cref="MongoDBMemoryIndexAndOwnershipTests"/> and
+/// <see cref="MongoDBMemoryIndexManagerTests"/>.
+/// </summary>
+internal static class MemoryIndexFixtures
+{
+    /// <summary>
+    /// Builds a fake <see cref="MongoCommandException"/> as the driver would surface a failed search-index
+    /// management command, with <paramref name="code"/>/<paramref name="codeName"/>/<paramref name="errorMessage"/>
+    /// driving the exception's corresponding properties -- used to prove privilege/deployment-error recognition
+    /// without a real deployment.
+    /// </summary>
+    public static MongoCommandException CommandException(int code, string codeName, string errorMessage)
+    {
+        Assembly assembly = typeof(MongoCommandException).Assembly;
+        Type clusterIdType = assembly.GetTypes().First(t => t.Name == "ClusterId");
+        Type serverIdType = assembly.GetTypes().First(t => t.Name == "ServerId");
+        Type connectionIdType = assembly.GetTypes().First(t => t.Name == "ConnectionId");
+        object clusterId = Activator.CreateInstance(clusterIdType)!;
+        object serverId = Activator.CreateInstance(serverIdType, clusterId, new DnsEndPoint("localhost", 27017))!;
+        object connectionId = Activator.CreateInstance(connectionIdType, serverId)!;
+        var command = new BsonDocument("createSearchIndexes", "test");
+        var result = new BsonDocument
+        {
+            { "ok", 0 },
+            { "code", code },
+            { "codeName", codeName },
+            { "errmsg", errorMessage },
+        };
+        return (MongoCommandException)Activator.CreateInstance(
+            typeof(MongoCommandException), connectionId, "command failed", command, result)!;
+    }
+
+    /// <summary>Builds a valid Vector Search index document matching <see cref="MongoDBVectorSearchIndexDefinition"/> defaults used across facade tests.</summary>
+    public static BsonDocument ValidVectorIndex(
+        string indexName = "facade_vector",
+        string vectorFieldName = "embedding",
+        int dimensions = 3,
+        string status = "READY",
+        bool queryable = true,
+        params string[] filterFieldPaths)
+    {
+        var fields = new BsonArray
+        {
+            new BsonDocument
+            {
+                { "type", "vector" },
+                { "path", vectorFieldName },
+                { "numDimensions", dimensions },
+                { "similarity", "cosine" },
+            },
+        };
+        fields.AddRange(filterFieldPaths.Select(
+            path => new BsonDocument { { "type", "filter" }, { "path", path } }));
+        return new BsonDocument
+        {
+            { "name", indexName },
+            { "type", "vectorSearch" },
+            { "status", status },
+            { "queryable", queryable },
+            { "latestDefinition", new BsonDocument("fields", fields) },
+        };
+    }
 }
