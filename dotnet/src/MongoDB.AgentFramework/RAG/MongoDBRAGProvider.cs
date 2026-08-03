@@ -77,6 +77,41 @@ public sealed class MongoDBRAGProvider : IAsyncDisposable
         _logger = logger ?? NullLogger<MongoDBRAGProvider>.Instance;
     }
 
+    /// <summary>
+    /// Wraps an <see cref="MongoDBRAGProviderOptions"/> value already known to be a validated, independent
+    /// snapshot (produced by a single <see cref="MongoDBRAGProviderOptions.Copy"/> call). It exists purely to give
+    /// the "already validated, do not copy again" core constructors a distinct parameter type from the public
+    /// collection constructors, which must still validate and copy caller-supplied options themselves; it carries
+    /// no behavior of its own.
+    /// </summary>
+    private readonly record struct ValidatedOptions(MongoDBRAGProviderOptions Value);
+
+    /// <summary>
+    /// Core constructor for the connection-string-owned-client family only: unlike every other constructor,
+    /// <paramref name="options"/> here is already a validated, independent snapshot (produced by
+    /// <see cref="Connect"/> before the owned client was created), so this does not call
+    /// <see cref="MongoDBRAGProviderOptions.Copy"/> again. A second call would re-enumerate any caller-controlled
+    /// <see cref="IReadOnlyList{T}"/> option value (for example <see cref="MongoDBRAGProviderOptions.MetadataFieldNames"/>)
+    /// after the client already exists; if that second enumeration ever threw, the owned client would leak, since
+    /// no <see cref="MongoDBRAGProvider"/> instance would ever exist to dispose it. <see cref="ValidatedOptions"/>
+    /// exists purely so this overload cannot be confused with (or accidentally called in place of) the public
+    /// collection constructor above, which must copy caller-supplied options itself.
+    /// </summary>
+    private MongoDBRAGProvider(
+        IMongoCollection<BsonDocument> collection,
+        ValidatedOptions options,
+        IEmbeddingGenerator<string, Embedding<float>> embeddingGenerator,
+        int vectorDimensions,
+        ILogger<MongoDBRAGProvider>? logger)
+    {
+        _options = options.Value;
+        _collection = collection ?? throw new ArgumentNullException(nameof(collection));
+        _embeddingGenerator = embeddingGenerator ??
+            throw new ArgumentNullException(nameof(embeddingGenerator));
+        _vectorDimensions = vectorDimensions;
+        _logger = logger ?? NullLogger<MongoDBRAGProvider>.Instance;
+    }
+
     /// <summary>Creates a provider over an injected client, which remains caller-owned.</summary>
     public MongoDBRAGProvider(
         IMongoClient client,
@@ -144,18 +179,16 @@ public sealed class MongoDBRAGProvider : IAsyncDisposable
                 clientFactory),
             embeddingGenerator,
             vectorDimensions,
-            options,
             logger)
     {
     }
 
     private MongoDBRAGProvider(
-        (OwnedResource<IMongoClient> Client, IMongoCollection<BsonDocument> Collection) connected,
+        (OwnedResource<IMongoClient> Client, IMongoCollection<BsonDocument> Collection, MongoDBRAGProviderOptions Options) connected,
         IEmbeddingGenerator<string, Embedding<float>> embeddingGenerator,
         int vectorDimensions,
-        MongoDBRAGProviderOptions options,
         ILogger<MongoDBRAGProvider>? logger)
-        : this(connected.Collection, embeddingGenerator, vectorDimensions, options, logger)
+        : this(connected.Collection, new ValidatedOptions(connected.Options), embeddingGenerator, vectorDimensions, logger)
     {
         _client = connected.Client;
     }
@@ -201,6 +234,22 @@ public sealed class MongoDBRAGProvider : IAsyncDisposable
         _options = options.Copy();
         RequireFullTextOnlyConstructionMode(_options.SearchMode);
 
+        _collection = collection ?? throw new ArgumentNullException(nameof(collection));
+        _embeddingGenerator = null;
+        _vectorDimensions = 0;
+        _logger = logger ?? NullLogger<MongoDBRAGProvider>.Instance;
+    }
+
+    /// <summary>
+    /// The <see cref="MongoDBSearchMode.FullText"/>-only analogue of the vector family's <c>ValidatedOptions</c>
+    /// core constructor; see its remarks for why this does not call <see cref="MongoDBRAGProviderOptions.Copy"/>.
+    /// </summary>
+    private MongoDBRAGProvider(
+        IMongoCollection<BsonDocument> collection,
+        ValidatedOptions options,
+        ILogger<MongoDBRAGProvider>? logger)
+    {
+        _options = options.Value;
         _collection = collection ?? throw new ArgumentNullException(nameof(collection));
         _embeddingGenerator = null;
         _vectorDimensions = 0;
@@ -261,30 +310,30 @@ public sealed class MongoDBRAGProvider : IAsyncDisposable
         Func<string, IMongoClient>? clientFactory)
         : this(
             ConnectFullTextOnly(connectionString, databaseName, collectionName, options, clientFactory),
-            options,
             logger)
     {
     }
 
     private MongoDBRAGProvider(
-        (OwnedResource<IMongoClient> Client, IMongoCollection<BsonDocument> Collection) connected,
-        MongoDBRAGProviderOptions options,
+        (OwnedResource<IMongoClient> Client, IMongoCollection<BsonDocument> Collection, MongoDBRAGProviderOptions Options) connected,
         ILogger<MongoDBRAGProvider>? logger)
-        : this(connected.Collection, options, logger)
+        : this(connected.Collection, new ValidatedOptions(connected.Options), logger)
     {
         _client = connected.Client;
     }
 
     /// <summary>
-    /// Validates every argument that does not require a MongoDB client first — including calling
-    /// <see cref="MongoDBRAGProviderOptions.Validate"/> directly, since the chained collection constructor only
-    /// validates <paramref name="options"/> indirectly through <c>Copy()</c>, which would otherwise run after a
-    /// client already exists — so a validation failure never leaves an owned client that nothing will ever
-    /// dispose. Only after that validation succeeds does this create the client and resolve the
-    /// database/collection; if that later step throws, the client is disposed here before rethrowing, since no
+    /// Validates every argument that does not require a MongoDB client first, producing a single validated,
+    /// independent <paramref name="options"/> snapshot via <see cref="MongoDBRAGProviderOptions.Copy"/> — entirely
+    /// before this creates a client. The tuple-connected core constructor threads that snapshot through
+    /// unmodified and never calls <c>Copy()</c>/<c>Validate()</c> a second time, so a caller-controlled
+    /// <see cref="IReadOnlyList{T}"/> option value can never be enumerated again after the client already exists;
+    /// if it threw only on a later enumeration, the owned client would otherwise leak, since no
+    /// <see cref="MongoDBRAGProvider"/> instance would ever exist to dispose it. If resolving the
+    /// database/collection afterward throws, the client is disposed here before rethrowing, since no
     /// <see cref="MongoDBRAGProvider"/> instance will ever exist to do it.
     /// </summary>
-    private static (OwnedResource<IMongoClient> Client, IMongoCollection<BsonDocument> Collection) Connect(
+    private static (OwnedResource<IMongoClient> Client, IMongoCollection<BsonDocument> Collection, MongoDBRAGProviderOptions Options) Connect(
         string connectionString,
         string databaseName,
         string collectionName,
@@ -294,19 +343,21 @@ public sealed class MongoDBRAGProvider : IAsyncDisposable
         Func<string, IMongoClient>? clientFactory)
     {
         ArgumentNullException.ThrowIfNull(options);
-        options.Validate();
+        MongoDBRAGProviderOptions snapshot = options.Copy();
         EmbeddingValidator.ValidateDimensions(vectorDimensions);
         ArgumentNullException.ThrowIfNull(embeddingGenerator);
-        return ConnectClient(connectionString, databaseName, collectionName, clientFactory);
+        (OwnedResource<IMongoClient> client, IMongoCollection<BsonDocument> collection) =
+            ConnectClient(connectionString, databaseName, collectionName, clientFactory);
+        return (client, collection, snapshot);
     }
 
     /// <summary>
-    /// The <see cref="MongoDBSearchMode.FullText"/>-only analogue of <see cref="Connect"/>: it validates
-    /// <paramref name="options"/> and requires <see cref="MongoDBSearchMode.FullText"/> — since this family accepts
-    /// no embedding generator to validate — before creating a client, with the same client-disposal-on-later-
-    /// failure guarantee.
+    /// The <see cref="MongoDBSearchMode.FullText"/>-only analogue of <see cref="Connect"/>: it produces a single
+    /// validated <paramref name="options"/> snapshot and requires <see cref="MongoDBSearchMode.FullText"/> — since
+    /// this family accepts no embedding generator to validate — before creating a client, with the same
+    /// single-snapshot and client-disposal-on-later-failure guarantees.
     /// </summary>
-    private static (OwnedResource<IMongoClient> Client, IMongoCollection<BsonDocument> Collection) ConnectFullTextOnly(
+    private static (OwnedResource<IMongoClient> Client, IMongoCollection<BsonDocument> Collection, MongoDBRAGProviderOptions Options) ConnectFullTextOnly(
         string connectionString,
         string databaseName,
         string collectionName,
@@ -314,9 +365,11 @@ public sealed class MongoDBRAGProvider : IAsyncDisposable
         Func<string, IMongoClient>? clientFactory)
     {
         ArgumentNullException.ThrowIfNull(options);
-        options.Validate();
-        RequireFullTextOnlyConstructionMode(options.SearchMode);
-        return ConnectClient(connectionString, databaseName, collectionName, clientFactory);
+        MongoDBRAGProviderOptions snapshot = options.Copy();
+        RequireFullTextOnlyConstructionMode(snapshot.SearchMode);
+        (OwnedResource<IMongoClient> client, IMongoCollection<BsonDocument> collection) =
+            ConnectClient(connectionString, databaseName, collectionName, clientFactory);
+        return (client, collection, snapshot);
     }
 
     private static (OwnedResource<IMongoClient> Client, IMongoCollection<BsonDocument> Collection) ConnectClient(

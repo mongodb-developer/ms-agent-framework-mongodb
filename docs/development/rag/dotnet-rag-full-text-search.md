@@ -128,6 +128,37 @@ cancellation propagation, `MongoDBCapabilityException` wrapping of a `$listSearc
 behavior (TTL reuse without a second network call, `refresh: true` bypass, TTL expiry, and no stale-serving across a
 `requireReady` escalation).
 
+## Owned-client options-snapshot fix (review fix)
+
+A review found that the connection-string constructors validated `options` once directly in `Connect`/
+`ConnectFullTextOnly` (a single enumeration of any list-typed option) but then, *after* the owned client was already
+created, the chained core constructor called `MongoDBRAGProviderOptions.Copy()` again — which itself calls
+`Validate()` and rebuilds list-typed properties via a collection-expression spread, each a further enumeration. If a
+caller-supplied `IReadOnlyList<string>` (for example `MetadataFieldNames`) threw only on one of those *later*
+enumerations, the exception would propagate out of the constructor-initializer chain before the instance ever
+assigned `_client`, so nothing would ever exist to dispose the already-created owned `IMongoClient` — a genuine
+leak, distinct from the disposal path already covered for a client-creation-adjacent failure.
+
+The fix: `Connect`/`ConnectFullTextOnly` now call `options.Copy()` **exactly once**, producing an immutable
+snapshot, entirely **before** creating the owned client. The tuple they return carries that snapshot alongside the
+client/collection, and a new private `ValidatedOptions`-parameterized constructor overload (one per family) assigns
+`_options` directly from it without ever calling `Copy()`/`Validate()` again. `ValidatedOptions` is a private
+`readonly record struct` wrapper whose only purpose is to give this "already validated" constructor a distinct
+parameter type from the public collection constructors, which must still copy caller-supplied options themselves —
+callers of those constructors are unaffected. The injected-client/database/collection constructor families, which
+never own a client, are unchanged.
+
+Regression tests in `MongoDBRAGProviderLifecycleTests` use a new `SingleUseFieldNames` test double — an
+`IReadOnlyList<string>` that throws after a configurable number of enumerations — on `MetadataFieldNames` (validated
+in every mode) for both families:
+
+- `...NeverEnumeratesOptionsListsAfterCreatingAClient` tolerates exactly one enumeration and asserts the internal
+  `clientFactory` test seam is never invoked, proving the single validated snapshot is produced before any client
+  exists.
+- `...OnlyEnumeratesOptionsListsOnceOverall` tolerates exactly two enumerations (one from `Copy()`'s own `Validate()`
+  call, one from its collection-expression rebuild) and asserts full construction success, proving no further
+  enumeration occurs.
+
 ## Errors, cancellation, and result mapping
 
 Unchanged from [slice 8](dotnet-rag-vector-search.md#errors-and-cancellation): `MongoException` translation to

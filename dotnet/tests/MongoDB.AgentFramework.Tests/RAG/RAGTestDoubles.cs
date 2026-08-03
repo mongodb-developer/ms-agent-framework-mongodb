@@ -263,3 +263,32 @@ internal sealed class ListCursor<T>(IReadOnlyList<T> values) : IAsyncCursor<T>
     {
     }
 }
+
+/// <summary>
+/// An <see cref="IReadOnlyList{T}"/> that tolerates only a bounded number of enumerations before throwing,
+/// simulating a caller-controlled collection that changes shape or becomes invalid across repeated reads. Used to
+/// prove that construction never enumerates an options list a second time after an owned client already exists.
+/// </summary>
+internal sealed class SingleUseFieldNames(IReadOnlyList<string> values, int toleratedEnumerations) :
+    IReadOnlyList<string>
+{
+    private int _enumerations;
+
+    public int Count => values.Count;
+
+    public string this[int index] => values[index];
+
+    public IEnumerator<string> GetEnumerator()
+    {
+        _enumerations++;
+        if (_enumerations > toleratedEnumerations)
+        {
+            throw new InvalidOperationException(
+                $"This list was enumerated more than the tolerated {toleratedEnumerations} time(s).");
+        }
+
+        return values.GetEnumerator();
+    }
+
+    System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
+}

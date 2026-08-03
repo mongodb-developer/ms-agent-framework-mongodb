@@ -110,6 +110,62 @@ public sealed class MongoDBRAGProviderLifecycleTests
     }
 
     [Fact]
+    public void ConnectionStringConstructorNeverEnumeratesOptionsListsAfterCreatingAClient()
+    {
+        bool clientFactoryInvoked = false;
+
+        // A caller-controlled IReadOnlyList that only tolerates a single enumeration proves the constructor
+        // validates/copies MongoDBRAGProviderOptions exactly once, entirely before the owned client is created.
+        // Before this fix, Connect validated options directly (one enumeration) and the chained collection
+        // constructor separately called options.Copy() (a second, later enumeration) after the client already
+        // existed; if that second enumeration ever threw, the just-created client leaked, because no
+        // MongoDBRAGProvider instance was ever returned to dispose it. With the fix, the single validated/copied
+        // snapshot is produced before ConnectClient runs, so a list that cannot tolerate a second read fails here
+        // -- before any client is created -- instead of after.
+        Assert.Throws<InvalidOperationException>(() => new MongoDBRAGProvider(
+            "mongodb://localhost:27017",
+            "database",
+            "chunks",
+            new RecordingEmbeddingGenerator(),
+            3,
+            new MongoDBRAGProviderOptions
+            {
+                SearchMode = MongoDBSearchMode.VectorAnn,
+                MetadataFieldNames = new SingleUseFieldNames(["field"], toleratedEnumerations: 1),
+            },
+            logger: null,
+            clientFactory: _ =>
+            {
+                clientFactoryInvoked = true;
+                return FakeMongoClientProxy.Create(new FakeMongoClientState());
+            }));
+
+        Assert.False(clientFactoryInvoked);
+    }
+
+    [Fact]
+    public async Task ConnectionStringConstructorOnlyEnumeratesOptionsListsOnceOverall()
+    {
+        // A list tolerating exactly the two reads one full Validate()+Copy() pass performs (the foreach inside
+        // Validate and the collection-expression spread inside Copy) must succeed end to end, proving construction
+        // never performs a second such pass after that snapshot is taken.
+        MongoDBRAGProvider provider = new(
+            "mongodb://localhost:27017",
+            "database",
+            "chunks",
+            new RecordingEmbeddingGenerator(),
+            3,
+            new MongoDBRAGProviderOptions
+            {
+                SearchMode = MongoDBSearchMode.VectorAnn,
+                MetadataFieldNames = new SingleUseFieldNames(["field"], toleratedEnumerations: 2),
+            });
+
+        Assert.True(provider.OwnsClient);
+        await provider.DisposeAsync();
+    }
+
+    [Fact]
     public void NonPositiveVectorDimensionsAreRejected()
     {
         Assert.Throws<MongoDBConfigurationException>(() => new MongoDBRAGProvider(
@@ -275,5 +331,48 @@ public sealed class MongoDBRAGProviderLifecycleTests
             }));
 
         Assert.False(clientFactoryInvoked);
+    }
+
+    [Fact]
+    public void FullTextOnlyConnectionStringConstructorNeverEnumeratesOptionsListsAfterCreatingAClient()
+    {
+        bool clientFactoryInvoked = false;
+
+        // Mirrors ConnectionStringConstructorNeverEnumeratesOptionsListsAfterCreatingAClient for the FullText-only
+        // family, which shares the same ConnectClient/options-snapshot refactor.
+        Assert.Throws<InvalidOperationException>(() => new MongoDBRAGProvider(
+            "mongodb://localhost:27017",
+            "database",
+            "chunks",
+            new MongoDBRAGProviderOptions
+            {
+                SearchMode = MongoDBSearchMode.FullText,
+                MetadataFieldNames = new SingleUseFieldNames(["field"], toleratedEnumerations: 1),
+            },
+            logger: null,
+            clientFactory: _ =>
+            {
+                clientFactoryInvoked = true;
+                return FakeMongoClientProxy.Create(new FakeMongoClientState());
+            }));
+
+        Assert.False(clientFactoryInvoked);
+    }
+
+    [Fact]
+    public async Task FullTextOnlyConnectionStringConstructorOnlyEnumeratesOptionsListsOnceOverall()
+    {
+        MongoDBRAGProvider provider = new(
+            "mongodb://localhost:27017",
+            "database",
+            "chunks",
+            new MongoDBRAGProviderOptions
+            {
+                SearchMode = MongoDBSearchMode.FullText,
+                MetadataFieldNames = new SingleUseFieldNames(["field"], toleratedEnumerations: 2),
+            });
+
+        Assert.True(provider.OwnsClient);
+        await provider.DisposeAsync();
     }
 }
