@@ -75,4 +75,28 @@ internal sealed class FakeChunkStore : IChunkStore
 
         return Task.FromResult(deleted);
     }
+
+    public Task<int> DeleteSourceAsync(string tenantId, string sourceId, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        string[] matchingIds = [.. _records.Values
+            .Where(record => record.TenantId == tenantId && record.SourceId == sourceId)
+            .Select(record => record.Id)];
+        foreach (string id in matchingIds)
+        {
+            _records.Remove(id);
+        }
+
+        return Task.FromResult(matchingIds.Length);
+    }
+
+    public Task<IReadOnlyList<string>> ListSourceIdsAsync(string tenantId, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        IReadOnlyList<string> sourceIds = [.. _records.Values
+            .Where(record => record.TenantId == tenantId)
+            .Select(record => record.SourceId)
+            .Distinct(StringComparer.Ordinal)];
+        return Task.FromResult(sourceIds);
+    }
 }

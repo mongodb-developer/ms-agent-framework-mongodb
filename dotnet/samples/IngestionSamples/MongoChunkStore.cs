@@ -132,6 +132,81 @@ public sealed class MongoChunkStore : IChunkStore
         return checked((int)deleted);
     }
 
+    /// <inheritdoc />
+    public async Task<int> DeleteSourceAsync(
+        string tenantId,
+        string sourceId,
+        CancellationToken cancellationToken = default)
+    {
+        RequireText(tenantId, nameof(tenantId));
+        RequireText(sourceId, nameof(sourceId));
+
+        FilterDefinition<BsonDocument> scopeFilter = Builders<BsonDocument>.Filter.And(
+            Builders<BsonDocument>.Filter.Eq(ChunkRecord.TenantIdFieldName, tenantId),
+            Builders<BsonDocument>.Filter.Eq(ChunkRecord.SourceIdFieldName, sourceId));
+        ProjectionDefinition<BsonDocument> idOnlyProjection = Builders<BsonDocument>.Projection
+            .Include(ChunkRecord.IdFieldName);
+
+        long deleted = 0;
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            // Deletion is paged rather than issued as one unbounded DeleteManyAsync: find at most MaxBatchSize
+            // matching IDs, delete just that page scoped to tenant_id + source_id + _id-in-page, and repeat only
+            // while a full page was found. This bounds every underlying MongoDB round trip's size regardless of
+            // how many records the source has, matching the existing bounded-batch pattern used by
+            // UpsertAsync/DeleteAsync.
+            string[] page = [.. (await _collection
+                .Find(scopeFilter)
+                .Project(idOnlyProjection)
+                .Limit(MaxBatchSize)
+                .ToListAsync(cancellationToken)
+                .ConfigureAwait(false))
+                .Select(document => document[ChunkRecord.IdFieldName].AsString)];
+
+            if (page.Length == 0)
+            {
+                break;
+            }
+
+            FilterDefinition<BsonDocument> pageFilter = Builders<BsonDocument>.Filter.And(
+                scopeFilter,
+                Builders<BsonDocument>.Filter.In(ChunkRecord.IdFieldName, page));
+            DeleteResult result = await _collection.DeleteManyAsync(pageFilter, cancellationToken).ConfigureAwait(false);
+            deleted += result.DeletedCount;
+
+            if (page.Length < MaxBatchSize)
+            {
+                break;
+            }
+        }
+
+        return checked((int)deleted);
+    }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<string>> ListSourceIdsAsync(
+        string tenantId,
+        CancellationToken cancellationToken = default)
+    {
+        RequireText(tenantId, nameof(tenantId));
+
+        FilterDefinition<BsonDocument> filter =
+            Builders<BsonDocument>.Filter.Eq(ChunkRecord.TenantIdFieldName, tenantId);
+
+        var sourceIds = new List<string>();
+        using IAsyncCursor<string> cursor = await _collection
+            .DistinctAsync<string>(ChunkRecord.SourceIdFieldName, filter, cancellationToken: cancellationToken)
+            .ConfigureAwait(false);
+        while (await cursor.MoveNextAsync(cancellationToken).ConfigureAwait(false))
+        {
+            sourceIds.AddRange(cursor.Current);
+        }
+
+        return sourceIds;
+    }
+
     private static void RequireText(string value, string name)
     {
         if (string.IsNullOrWhiteSpace(value))

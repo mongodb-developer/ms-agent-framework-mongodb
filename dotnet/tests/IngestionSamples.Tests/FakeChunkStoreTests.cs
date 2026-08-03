@@ -66,4 +66,76 @@ public sealed class FakeChunkStoreTests
 
         Assert.Equal("hash-b", store.Records["shared-id"].ContentHash);
     }
+
+    [Fact]
+    public async Task DeleteSourceAsyncRemovesOnlyRecordsForTheGivenTenantAndSource()
+    {
+        var store = new FakeChunkStore();
+        await store.UpsertAsync(
+        [
+            Record("chunk-1", "tenant-a", "source-1"),
+            Record("chunk-2", "tenant-a", "source-1"),
+            Record("chunk-3", "tenant-a", "source-2"),
+            Record("chunk-4", "tenant-b", "source-1"),
+        ]);
+
+        int deleted = await store.DeleteSourceAsync("tenant-a", "source-1");
+
+        Assert.Equal(2, deleted);
+        Assert.DoesNotContain(store.Records.Values, r => r.TenantId == "tenant-a" && r.SourceId == "source-1");
+        Assert.Contains(store.Records.Values, r => r.TenantId == "tenant-a" && r.SourceId == "source-2");
+        Assert.Contains(store.Records.Values, r => r.TenantId == "tenant-b" && r.SourceId == "source-1");
+    }
+
+    [Fact]
+    public async Task DeleteSourceAsyncReturnsZeroForAnUnknownSource()
+    {
+        var store = new FakeChunkStore();
+
+        int deleted = await store.DeleteSourceAsync("tenant-a", "source-does-not-exist");
+
+        Assert.Equal(0, deleted);
+    }
+
+    [Fact]
+    public async Task DeleteSourceAsyncPropagatesCancellation()
+    {
+        var store = new FakeChunkStore();
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        await Assert.ThrowsAsync<OperationCanceledException>(
+            () => store.DeleteSourceAsync("tenant-a", "source-1", cts.Token));
+    }
+
+    [Fact]
+    public async Task ListSourceIdsAsyncReturnsDistinctSourceIdsForTheGivenTenantOnly()
+    {
+        var store = new FakeChunkStore();
+        await store.UpsertAsync(
+        [
+            Record("chunk-1", "tenant-a", "source-1"),
+            Record("chunk-2", "tenant-a", "source-1"),
+            Record("chunk-3", "tenant-a", "source-2"),
+            Record("chunk-4", "tenant-b", "source-3"),
+        ]);
+
+        IReadOnlyList<string> sourceIds = await store.ListSourceIdsAsync("tenant-a");
+
+        Assert.Equal(["source-1", "source-2"], sourceIds.Order(StringComparer.Ordinal));
+    }
+
+    [Fact]
+    public async Task ListSourceIdsAsyncPropagatesCancellation()
+    {
+        var store = new FakeChunkStore();
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        await Assert.ThrowsAsync<OperationCanceledException>(() => store.ListSourceIdsAsync("tenant-a", cts.Token));
+    }
+
+    private static ChunkRecord Record(string id, string tenantId, string sourceId) =>
+        new(id, tenantId, sourceId, ParentId: null, ChunkRecord.FlatChunkRecordType, "text", "hash",
+            Embedding: null, SourceName: null, SourceUrl: null);
 }

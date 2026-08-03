@@ -33,4 +33,25 @@ public interface IChunkStore
         string sourceId,
         IReadOnlyList<string> ids,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Deletes every record (parent, child, or flat chunk) scoped to one tenant and source -- used when an entire
+    /// source has disappeared from the corpus, as opposed to <see cref="DeleteAsync"/>'s per-ID stale-chunk cleanup
+    /// within a source that is still active. Always scoped to both <paramref name="tenantId"/> and
+    /// <paramref name="sourceId"/>; never issues a tenant-only or unscoped deletion. Returns the number of records
+    /// actually deleted. Implementations must delete in bounded batches rather than one unbounded operation.
+    /// </summary>
+    Task<int> DeleteSourceAsync(
+        string tenantId,
+        string sourceId,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Lists every distinct source ID currently stored for one tenant, bounded and streamed rather than
+    /// materializing the whole collection. Used to detect sources that were previously ingested but have since
+    /// disappeared from a caller's manifest of currently known sources.
+    /// </summary>
+    Task<IReadOnlyList<string>> ListSourceIdsAsync(
+        string tenantId,
+        CancellationToken cancellationToken = default);
 }
