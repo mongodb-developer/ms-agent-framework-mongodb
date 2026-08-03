@@ -231,11 +231,15 @@ other resolved version, and the `PackageReference` itself is pinned to that
 same range.
 
 ```csharp
+byte[] signingKey = Convert.FromBase64String(
+    Environment.GetEnvironmentVariable("MONGODB_CHECKPOINT_SIGNING_KEY")!); // >= 32 random bytes; see below
+
 await using var store = new MongoDBCheckpointStore(
     collection,
     new MongoDBCheckpointStoreOptions
     {
         WorkflowId = "my-workflow",
+        ContinuationTokenSigningKey = signingKey,
         DefaultExpiration = TimeSpan.FromDays(30),
     });
 
@@ -264,10 +268,19 @@ scope is applied to every query before any sort, limit, or delete. Each
 checkpoint carries a monotonically, atomically allocated `sequence` number
 that establishes commit order independent of wall-clock timestamps --
 `GetLatestCheckpointAsync` and pagination always order by `sequence`, never
-`created_at`. The exact framework-produced checkpoint JSON payload is stored
-as the serializer's exact UTF-8 bytes wrapped verbatim in a BSON `Binary`
-field, never re-parsed through `BsonDocument`, so unusual numeric literals
-round-trip byte-for-byte.
+`created_at`. Sequence allocation and the checkpoint write commit together
+inside one MongoDB transaction (`collection.Database.Client.StartSessionAsync`
++ `IClientSessionHandle.WithTransactionAsync`), so concurrent writers for the
+same session genuinely serialize on the shared sequence counter and no two
+checkpoints ever observe the same sequence, and a duplicate idempotent retry
+never burns a sequence value. This requires a deployment that supports
+multi-document transactions (a replica set, sharded cluster, or `mongos`); a
+standalone `mongod` rejects transaction usage, and `SaveCheckpointAsync`/
+`CreateCheckpointAsync` fail with `MongoDBCapabilityException` rather than
+silently giving up the ordering guarantee. The exact framework-produced
+checkpoint JSON payload is stored as the serializer's exact UTF-8 bytes
+wrapped verbatim in a BSON `Binary` field, never re-parsed through
+`BsonDocument`, so unusual numeric literals round-trip byte-for-byte.
 
 Saving under an already-used checkpoint identifier with identical payload
 bytes and identical parent lineage converges (idempotent retry, no new
@@ -275,11 +288,27 @@ sequence allocated, `expires_at` never extended); saving with a *different*
 payload or a *different* parent throws `MongoDBConcurrencyException` -- a
 real conflict against an immutable record is never silently overwritten.
 Branched lineage (multiple children of the same parent) is fully supported
-and independently retrievable. `ListCheckpointsAsync` is bounded per call and
-returns an opaque, scoped, versioned, tamper-rejecting continuation token for
-the next page; a token from a different tenant/workflow scope, or one that
-has been altered, is rejected with `MongoDBConfigurationException` rather
-than silently returning wrong-scope or skipped data.
+and independently retrievable. Every document identifier, cache key, and
+signed payload is built from length-prefixed binary framing of its
+components (never delimiter-joined text), so an opaque caller-controlled
+identifier containing any character -- including one this store could
+otherwise have chosen as a delimiter -- can never collide with a different
+logical identity. `ListCheckpointsAsync` is bounded per call and returns an
+opaque, scoped, versioned, tamper-rejecting continuation token for the next
+page; a token from a different tenant/workflow scope, or one that has been
+altered, is rejected with `MongoDBConfigurationException` rather than
+silently returning wrong-scope or skipped data. Continuation tokens are
+HMAC-SHA256-signed with the required, server-held
+`MongoDBCheckpointStoreOptions.ContinuationTokenSigningKey` (at least 32
+cryptographically random bytes, generated for example with
+`RandomNumberGenerator.GetBytes(32)`, loaded from a secret manager or
+protected environment variable, and kept stable and identical across every
+store instance that must accept each other's tokens) -- the key is combined
+with this store's own tenant/workflow scope for domain separation and is
+never derived from a token's own contents, so a token cannot be forged or
+replayed across a differently scoped store without knowledge of the secret.
+`ContinuationTokenSigningKey` is excluded from `MongoDBCheckpointStoreOptions.ToString()`
+so it is never accidentally logged.
 
 The raw framework hooks (`CreateCheckpointAsync`, `RetrieveCheckpointAsync`,
 `RetrieveIndexAsync`) accept no `CancellationToken` -- a real, verified
@@ -290,7 +319,10 @@ cancellable facade (`SaveCheckpointAsync`, `LoadCheckpointAsync`,
 sharing the same internal storage core. `RetrieveCheckpointAsync` throws
 `KeyNotFoundException` when a checkpoint is absent (matching
 `ICheckpointManager`'s documented convention); `LoadCheckpointAsync` instead
-returns `null`.
+returns `null`. `CreateCheckpointAsync` still applies the configured
+`PersistenceTimeout` even though the base contract gives it no
+`CancellationToken` to observe an external one -- a hung write fails with a
+stable `MongoDBTimeoutException` rather than blocking the caller indefinitely.
 
 Every save/load/delete filter also requires the stored document's
 `schema_version` to match this build's supported constant. A scoped
@@ -305,7 +337,10 @@ client created by the connection-string constructor is disposed by the
 store, including when a later construction step fails after the client was
 created.
 
-Run the sample after setting `MONGODB_URI` and `MONGODB_DATABASE`:
+Run the sample after setting `MONGODB_URI`, `MONGODB_DATABASE`, and
+`MONGODB_CHECKPOINT_SIGNING_KEY` (a base64-encoded, at least 32-byte
+cryptographically random secret, for example generated with
+`openssl rand -base64 32`):
 
 ```powershell
 dotnet run --project samples\WorkflowCheckpointResumeQuickstart\WorkflowCheckpointResumeQuickstart.csproj
@@ -316,7 +351,9 @@ Optional variables are `MONGODB_CHECKPOINT_COLLECTION`,
 `MONGODB_CHECKPOINT_SESSION_ID`. Set `MONGODB_CHECKPOINT_CLEAR=true` only when
 the sample's checkpoints should be removed. The MongoDB principal needs
 collection read/write privileges, plus index-management privileges to run
-`EnsureIndexesAsync`. No Python Workflow Checkpoint Store exists yet; see the
+`EnsureIndexesAsync`, and the target deployment must support multi-document
+transactions (a replica set, sharded cluster, or `mongos`). No Python
+Workflow Checkpoint Store exists yet; see the
 [implementation map](../docs/spec/implementation-map.md) for cross-language
 sequencing. See the
 [.NET Workflow Checkpoint Store developer guide](../docs/development/persistence/dotnet-checkpoint-store.md),
@@ -324,6 +361,7 @@ the
 [.NET Workflow Checkpoint Store contract verification](../docs/development/persistence/dotnet-checkpoint-contract-research.md),
 and the
 [.NET Workflow Checkpoint Store migration guide](../docs/development/persistence/dotnet-checkpoint-store-migration.md).
+
 
 
 ## RAG contracts, typed filters, Vector Search (ANN/ENN), FullText, and HybridRrf

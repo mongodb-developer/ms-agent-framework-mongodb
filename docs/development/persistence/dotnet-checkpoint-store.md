@@ -42,10 +42,18 @@ rethrowing. Construction otherwise neither contacts MongoDB nor creates
 indexes. The facade passes `CancellationToken` to the driver; the three raw
 framework hooks cannot (see
 [dotnet-checkpoint-contract-research.md](dotnet-checkpoint-contract-research.md)),
-so they run with `CancellationToken.None`. Optional operation deadlines raise
-`MongoDBTimeoutException`; caller cancellation on the facade remains
-cancellation. Driver failures preserve their cause in stable retrieval,
-persistence, or concurrency errors.
+so they run with `CancellationToken.None` -- `CreateCheckpointAsync` still
+applies the configured `PersistenceTimeout` internally (a linked deadline
+token constructed from `CancellationToken.None`), so a hung write still fails
+with `MongoDBTimeoutException` rather than blocking indefinitely, even though
+the base contract gives it no external token to observe. Optional operation
+deadlines raise `MongoDBTimeoutException`; caller cancellation on the facade
+remains cancellation. Every non-cancellation driver failure from a public
+save/load/list/delete/index call is wrapped in a stable
+`MongoDBPersistenceException`, `MongoDBRetrievalException`,
+`MongoDBCapabilityException`, or `MongoDBConcurrencyException` (never a raw
+`MongoException`), always preserving the driver exception as
+`InnerException`.
 
 Workflow checkpoints are stored in a **separate collection and document
 `doc_type` from Session Store's session documents** -- distinct persistence
@@ -63,12 +71,23 @@ Checkpoints are **immutable historical records**: once committed, a
 checkpoint's payload bytes and parent lineage never change on a retry.
 `SaveCheckpointAsync` (and `CreateCheckpointAsync`, which delegates to the
 same internal core) first performs a read-check against the identity scope
-before allocating a sequence number, so a purely idempotent retry -- the
-common case -- never burns a sequence value:
+before opening a transaction, so a purely idempotent retry -- the common case
+-- never opens a transaction or burns a sequence value:
 
-- If no checkpoint with that identifier exists in scope, a new sequence is
-  atomically allocated (`FindOneAndUpdateAsync` with `$inc` on a per-session
-  counter pseudo-document, upserted) and the document is inserted.
+- If no checkpoint with that identifier exists in scope, the store starts a
+  MongoDB session (`collection.Database.Client.StartSessionAsync`) and runs
+  `IClientSessionHandle.WithTransactionAsync` (majority write concern) so
+  sequence allocation and the checkpoint insert commit atomically together: a
+  new sequence is allocated (`FindOneAndUpdateAsync` with `$inc` on a
+  per-session counter pseudo-document, upserted, inside the transaction) and
+  the checkpoint document is inserted inside the same transaction. Two
+  concurrent first-writers for the same session genuinely serialize on the
+  shared sequence-counter document's write conflict; the driver's own
+  `WithTransactionAsync` retry loop (per official MongoDB driver guidance for
+  `TransientTransactionError`/`UnknownTransactionCommitResult`, bounded by the
+  configured deadline and cancelable) handles the losing side, so no two
+  checkpoints ever observe the same sequence and a retried transaction never
+  double-allocates.
 - If a checkpoint with that identifier already exists in scope with
   byte-identical payload and identical parent lineage, the call converges
   and returns the already-stored record unchanged -- it does not extend,
@@ -80,18 +99,29 @@ common case -- never burns a sequence value:
   `MongoDBConcurrencyException` -- a real conflict against an immutable
   record is never silently overwritten.
 - A genuine race between two concurrent first-writers for the same
-  identifier is resolved the same way, via the insert-time duplicate-key
-  exception path: the losing writer re-fetches the winner's document and
-  applies the same converge-or-conflict comparison.
+  identifier that the pre-check did not observe is resolved the same way via
+  the transaction's insert-time duplicate-key exception: the losing writer
+  re-fetches the winner's document and applies the same converge-or-conflict
+  comparison, without having burned a sequence value (the whole allocation
+  and insert aborted together in one transaction).
 - If the colliding/raced document carries an incompatible `schema_version`,
   the call throws the migration exception below instead of ever comparing
   content.
+- This design requires a deployment that supports multi-document
+  transactions (a replica set, sharded cluster, or `mongos`). A standalone
+  `mongod` rejects transaction usage with a recognizable server error (code
+  20, "Transaction numbers..."); the store detects this precisely and throws
+  `MongoDBCapabilityException` rather than silently claiming an ordering
+  guarantee the deployment cannot provide, and no checkpoint is written.
 
 Monotonic `sequence` allocation is independent of wall-clock timestamps:
 `GetLatestCheckpointAsync` and `RetrieveIndexAsync`'s ordering are always
 driven by `sequence`, never by `created_at`, so concurrent saves that commit
 in a different order than they were allocated (or whose clocks are skewed)
-still produce a stable, correct commit order.
+still produce a stable, correct commit order. Because sequence allocation and
+the checkpoint write commit atomically in one transaction, `sequence`
+represents genuine committed order under cross-process concurrency, not
+merely allocation order.
 
 - **`LoadCheckpointAsync`** returns `null` when absent (a non-throwing,
   facade-level not-found convention).
@@ -144,7 +174,7 @@ Representative checkpoint document:
 
 ```json
 {
-  "_id": "scoped SHA-256 identity hash",
+  "_id": "SHA-256 hash of the length-prefixed binary framing of (\"checkpoint\", scope discriminator, session id, checkpoint id)",
   "doc_type": "checkpoint",
   "schema_version": 1,
   "tenant_id": null,
@@ -164,7 +194,7 @@ excluded from every checkpoint query via the `doc_type` discriminator:
 
 ```json
 {
-  "_id": "scoped SHA-256 sequence-counter hash",
+  "_id": "SHA-256 hash of the length-prefixed binary framing of (\"sequence_counter\", scope discriminator, session id)",
   "doc_type": "sequence_counter",
   "tenant_id": null,
   "workflow_id": "workflow-42",
@@ -173,33 +203,77 @@ excluded from every checkpoint query via the `doc_type` discriminator:
 }
 ```
 
-`EnsureIndexesAsync` explicitly creates three regular/TTL indexes, filtered
-to checkpoint documents only via a partial-filter expression so the
-sequence-counter pseudo-documents are never indexed by them:
+Every document identifier (`_id` above), the internal scope discriminator,
+and the continuation-token payload are built by framing each component as a
+big-endian 4-byte UTF-8 length followed by its exact UTF-8 bytes -- never by
+joining components with a text delimiter -- before hashing or signing.
+Session, checkpoint, and parent-checkpoint identifiers are arbitrary
+caller-controlled opaque strings that may contain any character, including
+one this store might otherwise have chosen as a delimiter (for example a
+literal `|`); length-prefixed binary framing is unambiguous and injective
+regardless of component content, so two logically distinct identity tuples
+can never collide onto the same document ID, scope discriminator, or signed
+payload the way delimiter-joined text could.
+
+`EnsureIndexesAsync` explicitly creates three regular/TTL indexes:
 
 - `checkpoint_identity_lookup`: unique index on
-  `tenant_id, workflow_id, session_id, checkpoint_id`.
+  `tenant_id, workflow_id, session_id, checkpoint_id`, partial-filtered to
+  `doc_type: "checkpoint"` so the sequence-counter pseudo-documents are never
+  indexed by it.
 - `checkpoint_sequence_lookup`: non-unique index on
   `tenant_id, workflow_id, session_id, sequence`, backing
-  `GetLatestCheckpointAsync` and paginated `ListCheckpointsAsync`.
+  `GetLatestCheckpointAsync` and paginated `ListCheckpointsAsync`, partial-filtered
+  the same way (`doc_type: "checkpoint"`).
 - `checkpoint_expiration_ttl`: TTL index on `expires_at`
-  (`expireAfter = TimeSpan.Zero`), partial-filtered to documents where
-  `expires_at` is a BSON date so undated checkpoints never expire.
+  (`expireAfter = TimeSpan.Zero`), partial-filtered to documents that satisfy
+  **both** `doc_type: "checkpoint"` **and** `expires_at: {$type: "date"}`
+  together -- the `doc_type` condition ensures this TTL index can never reap a
+  sequence-counter pseudo-document (which has no `expires_at` field at all,
+  even if it shared this collection with unrelated document types in the
+  future), and the `$type: "date"` condition ensures a checkpoint written
+  with no expiration (`expires_at` is `BsonNull`, a valid "never expires"
+  sentinel) is never mistaken for an expiration date.
 
-`ValidateIndexesAsync` checks exact key order, unique flags, partial
-filters, and TTL expiry without mutating MongoDB. Neither index is ever
-created implicitly by construction, saves, or retrieval; provisioning is
-always an explicit, separate call. Runtime privileges are find, insert, and
-scoped delete; provisioning additionally needs index-management privileges.
+`ValidateIndexesAsync` checks exact key order, unique flags, **and** an exact
+`partialFilterExpression` match (both conditions on the TTL index, not just
+one), and TTL expiry, without mutating MongoDB -- an index that lacks the
+required `doc_type` isolation (for example a hand-created or legacy index)
+fails validation with `MongoDBIndexMismatchException` rather than being
+silently accepted. Neither index is ever created implicitly by construction,
+saves, or retrieval; provisioning is always an explicit, separate call.
+Runtime privileges are find, insert, and scoped delete, plus transaction
+usage (a replica set, sharded cluster, or `mongos` deployment); provisioning
+additionally needs index-management privileges.
 
-Continuation tokens are `{version}|{scopeDiscriminator}|{sessionId}|{lastSequence}`,
-base64url-encoded and HMAC-SHA256-signed with a key derived from the same
-scope discriminator used for document identity. Verification checks the
-signature (constant-time comparison), the version tag, the embedded scope,
-and the embedded session id; any mismatch -- including a token issued by a
-differently scoped `MongoDBCheckpointStore` (different tenant/workflow), or
-one that has been altered -- throws `MongoDBConfigurationException` rather
-than silently returning wrong-scope or skipped data.
+Continuation tokens are `Base64Url(payload) + "." + Base64Url(signature)`,
+where `payload` is length-prefixed binary (`[1-byte format version]
+[length-prefixed scope discriminator][length-prefixed session id][8-byte
+big-endian last sequence]`, never delimiter-joined text) and `signature` is
+`HMAC-SHA256(key, payload)`. The signing `key` is derived by combining the
+store's **required, server-held**
+`MongoDBCheckpointStoreOptions.ContinuationTokenSigningKey` (at least 32
+cryptographically random bytes, for example
+`RandomNumberGenerator.GetBytes(32)`, defensively copied at construction so a
+caller mutating its original array afterward cannot change the store's
+signing key, and excluded from `MongoDBCheckpointStoreOptions.ToString()` so
+it is never accidentally logged) with the same scope discriminator used for
+document identity, via HMAC domain separation -- the key is never derived
+from, or discoverable from, the token's own contents. Verification checks the
+signature (constant-time comparison via `CryptographicOperations.FixedTimeEquals`),
+the format version, the embedded scope, and the embedded session id; any
+mismatch -- including a token issued by a differently scoped
+`MongoDBCheckpointStore` (different tenant/workflow), a token decoded with a
+different signing key, or one that has been altered -- throws
+`MongoDBConfigurationException` rather than silently returning wrong-scope
+or skipped data. Because `ContinuationTokenSigningKey` is a required
+constructor-time option (there is no key-less construction path), pagination
+either works securely or fails configuration validation at construction; it
+can never silently operate with a key derived from token-visible data alone.
+This key must be configured once, kept stable, and be identical across every
+`MongoDBCheckpointStore` instance that must accept each other's tokens (for
+example every replica of a horizontally scaled service); rotating it
+invalidates every token issued under the previous key.
 
 The .NET payload is not claimed physically interoperable with Python;
 Workflow Checkpoint Store parity there is tracked separately in the
@@ -235,6 +309,48 @@ scenario. The credential-gated `integration-persistence` test uses an
 proving exact round-trip, tenant isolation, retry convergence after a real
 elapsed delay, pagination, and lineage against a live MongoDB deployment.
 
+Additional fake-driver tests specifically prove each hardened behavior:
+
+- **Deterministic concurrent-writer ordering**: two concurrent
+  `SaveCheckpointAsync` calls are interleaved via a fake transaction gate that
+  signals the exact moment each writer is about to contend for the lock
+  (no `Thread.Sleep`/timing-based flakiness); the writer that commits second
+  observes the next sequence and is listed after the first, proving
+  `sequence` reflects committed order, not call order. A companion test
+  asserts `MongoDBCapabilityException` (with the driver's transaction-code-20
+  error preserved as `InnerException`, and no document written) when the
+  simulated deployment does not support transactions. The credential-gated
+  `ConcurrentSaveCheckpointAsyncCallsAgainstARealDeploymentAllocateGaplessDistinctSequences`
+  integration test proves 10 real concurrent writers against a live
+  deployment allocate a gapless, duplicate-free `{1..10}` sequence set.
+- **Delimiter-collision safety**: identifiers constructed so a naive
+  delimiter-joined hash would collide (for example a session id containing a
+  literal `|` combined with different splits of the same total string) are
+  proven to produce distinct document identities and distinct, correctly
+  isolated lineage results.
+- **TTL/index isolation**: `EnsureIndexesAsync` is asserted to render the
+  exact `partialFilterExpression` BSON for all three indexes (including the
+  combined `doc_type` + `expires_at` date-type TTL condition), and
+  `ValidateIndexesAsync` is proven to reject a simulated legacy index that is
+  missing the `doc_type` isolation condition, for both the TTL index and a
+  regular index, with `MongoDBIndexMismatchException`.
+- **Continuation-token signing key**: tokens are proven to decode
+  successfully across independent store instances that share the same
+  signing key and scope, and to be rejected with
+  `MongoDBConfigurationException` when decoded by a store configured with a
+  different key.
+- **Exception wrapping**: a generic (non-duplicate-key, non-transaction,
+  non-cancellation) simulated driver failure injected into save, load, list,
+  get-latest, and delete is proven to surface as the stable
+  `MongoDBPersistenceException`/`MongoDBRetrievalException` wrapper with the
+  original `MongoException` preserved as `InnerException`, never an
+  unwrapped driver exception.
+- **`CreateCheckpointAsync` timeout without a caller token**: a simulated
+  hung driver call is proven to still be bounded by the configured
+  `PersistenceTimeout`/`RetrievalTimeout` and to fail with
+  `MongoDBTimeoutException`, even though the raw framework hook receives no
+  external `CancellationToken` to observe.
+
 Run:
 
 ```powershell
@@ -242,8 +358,10 @@ dotnet test dotnet\MongoDB.AgentFramework.slnx
 dotnet run --project dotnet\samples\WorkflowCheckpointResumeQuickstart\WorkflowCheckpointResumeQuickstart.csproj
 ```
 
-The sample requires `MONGODB_URI` and `MONGODB_DATABASE`; optional Workflow
-Checkpoint Store variables are documented in `dotnet/README.md`. Logs and
-exceptions do not expose checkpoint payload content, connection strings, or
-scope values. MongoDB TLS, network controls, encryption at rest, and least
-privilege remain deployment responsibilities.
+The sample requires `MONGODB_URI`, `MONGODB_DATABASE`, and
+`MONGODB_CHECKPOINT_SIGNING_KEY` (base64-encoded, at least 32 cryptographically
+random bytes); optional Workflow Checkpoint Store variables are documented in
+`dotnet/README.md`. Logs and exceptions do not expose checkpoint payload
+content, connection strings, scope values, or the continuation-token signing
+key. MongoDB TLS, network controls, encryption at rest, and least privilege
+remain deployment responsibilities.

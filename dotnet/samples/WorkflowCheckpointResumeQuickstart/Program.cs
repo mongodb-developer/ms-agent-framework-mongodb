@@ -13,6 +13,19 @@ string workflowId = Environment.GetEnvironmentVariable("MONGODB_CHECKPOINT_WORKF
 string sessionId = Environment.GetEnvironmentVariable("MONGODB_CHECKPOINT_SESSION_ID") ??
     "checkpoint-quickstart-run";
 
+// The pagination continuation-token signing key is a required, server-held secret (never derived from a
+// token's own contents) that must stay stable and identical across every MongoDBCheckpointStore instance
+// that must accept each other's tokens (for example every replica of a horizontally scaled service).
+// Generate one with `openssl rand -base64 32` or `[Convert]::ToBase64String((New-Object byte[] 32 |
+// ForEach-Object { [System.Security.Cryptography.RandomNumberGenerator]::Fill($_); $_ }))`, store it in a
+// secret manager or protected environment variable, and never hard-code it in source.
+string signingKeyBase64 = Environment.GetEnvironmentVariable("MONGODB_CHECKPOINT_SIGNING_KEY") ??
+    throw new InvalidOperationException(
+        "Set MONGODB_CHECKPOINT_SIGNING_KEY to a base64-encoded, at least 32-byte cryptographically random " +
+        "secret (for example: openssl rand -base64 32). This key signs and validates pagination continuation " +
+        "tokens and must never be a source-controlled literal.");
+byte[] signingKey = Convert.FromBase64String(signingKeyBase64);
+
 await using var store = new MongoDBCheckpointStore(
     uri,
     database,
@@ -21,9 +34,14 @@ await using var store = new MongoDBCheckpointStore(
     {
         TenantId = Environment.GetEnvironmentVariable("MONGODB_CHECKPOINT_TENANT_ID"),
         WorkflowId = workflowId,
+        ContinuationTokenSigningKey = signingKey,
         DefaultExpiration = TimeSpan.FromDays(30),
     });
 
+// EnsureIndexesAsync requires a deployment that supports multi-document transactions (a replica set,
+// sharded cluster, or mongos) -- SaveCheckpointAsync/CreateCheckpointAsync use a transaction to allocate
+// each checkpoint's monotonic sequence number atomically with its write. Against a standalone mongod this
+// throws MongoDBCapabilityException rather than silently giving up the ordering guarantee.
 await store.EnsureIndexesAsync();
 
 // CheckpointManager.CreateJson accepts any ICheckpointStore<JsonElement>: this is the real, public
