@@ -8,6 +8,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using MongoDB.AgentFramework.Internal;
 using MongoDB.AgentFramework.Internal.IndexManagement;
+using MongoDB.AgentFramework.Internal.Observability;
 using MongoDB.Bson;
 using MongoDB.Driver;
 
@@ -337,7 +338,24 @@ public sealed class MongoDBMemoryProvider : AIContextProvider, IAsyncDisposable
             "MongoDB Memory persistence deadline exceeded.",
             cancellationToken);
 
-    private async Task<int> StoreCoreAsync(
+    private Task<int> StoreCoreAsync(
+        IEnumerable<ChatMessage> messages,
+        MongoDBMemoryScope scope,
+        AgentSessionStateBag? sessionState,
+        CancellationToken cancellationToken) =>
+        MongoDBTelemetry.TrackAsync(
+            _logger,
+            MongoDBTelemetryFeature.Memory,
+            MongoDBTelemetryOperation.Persist,
+            mode: null,
+            () => StoreCoreInnerAsync(messages, scope, sessionState, cancellationToken),
+            static count => new MongoDBTelemetryResult(
+                count > 0 ? MongoDBTelemetryOutcome.Success : MongoDBTelemetryOutcome.Empty,
+                count,
+                CandidateBucket: null),
+            cancellationToken);
+
+    private async Task<int> StoreCoreInnerAsync(
         IEnumerable<ChatMessage> messages,
         MongoDBMemoryScope scope,
         AgentSessionStateBag? sessionState,
@@ -443,7 +461,7 @@ public sealed class MongoDBMemoryProvider : AIContextProvider, IAsyncDisposable
             "MongoDB Memory retrieval deadline exceeded.",
             cancellationToken);
 
-    private async Task<IReadOnlyList<MongoDBMemorySearchResult>> SearchCoreAsync(
+    private Task<IReadOnlyList<MongoDBMemorySearchResult>> SearchCoreAsync(
         string query,
         MongoDBMemoryScope scope,
         int? maxResults,
@@ -458,8 +476,33 @@ public sealed class MongoDBMemoryProvider : AIContextProvider, IAsyncDisposable
             throw new MongoDBConfigurationException("maxResults must be between 1 and 100.");
         }
 
-        float[] vector = (await EmbedAsync([query], cancellationToken).ConfigureAwait(false))[0];
         bool useExact = exact ?? _options.Exact;
+        string mode = useExact ? MongoDBTelemetryMode.Enn : MongoDBTelemetryMode.Ann;
+        string? candidateBucket = useExact
+            ? null
+            : MongoDBCandidateBucket.Bucket(Math.Max(_options.NumCandidates, limit));
+
+        return MongoDBTelemetry.TrackAsync(
+            _logger,
+            MongoDBTelemetryFeature.Memory,
+            MongoDBTelemetryOperation.Retrieve,
+            mode,
+            () => SearchCoreInnerAsync(query, scope, limit, useExact, cancellationToken),
+            results => new MongoDBTelemetryResult(
+                results.Count > 0 ? MongoDBTelemetryOutcome.Success : MongoDBTelemetryOutcome.Empty,
+                results.Count,
+                candidateBucket),
+            cancellationToken);
+    }
+
+    private async Task<IReadOnlyList<MongoDBMemorySearchResult>> SearchCoreInnerAsync(
+        string query,
+        MongoDBMemoryScope scope,
+        int limit,
+        bool useExact,
+        CancellationToken cancellationToken)
+    {
+        float[] vector = (await EmbedAsync([query], cancellationToken).ConfigureAwait(false))[0];
         var vectorSearch = new BsonDocument
         {
             { "index", _options.IndexName },
@@ -550,7 +593,7 @@ public sealed class MongoDBMemoryProvider : AIContextProvider, IAsyncDisposable
     }
 
     /// <summary>Lists bounded, content-free metadata using keyset pagination.</summary>
-    public async Task<MongoDBMemoryMetadataPage> ListAsync(
+    public Task<MongoDBMemoryMetadataPage> ListAsync(
         MongoDBMemoryScope scope,
         int pageSize = 50,
         string? cursor = null,
@@ -561,6 +604,25 @@ public sealed class MongoDBMemoryProvider : AIContextProvider, IAsyncDisposable
             throw new MongoDBConfigurationException("pageSize must be between 1 and 100.");
         }
 
+        return MongoDBTelemetry.TrackAsync(
+            _logger,
+            MongoDBTelemetryFeature.Memory,
+            MongoDBTelemetryOperation.List,
+            mode: null,
+            () => ListInnerAsync(scope, pageSize, cursor, cancellationToken),
+            static page => new MongoDBTelemetryResult(
+                page.Items.Count > 0 ? MongoDBTelemetryOutcome.Success : MongoDBTelemetryOutcome.Empty,
+                page.Items.Count,
+                CandidateBucket: null),
+            cancellationToken);
+    }
+
+    private async Task<MongoDBMemoryMetadataPage> ListInnerAsync(
+        MongoDBMemoryScope scope,
+        int pageSize,
+        string? cursor,
+        CancellationToken cancellationToken)
+    {
         FilterDefinition<BsonDocument> filter = ScopeFilter(scope);
         if (cursor is not null)
         {
@@ -596,11 +658,25 @@ public sealed class MongoDBMemoryProvider : AIContextProvider, IAsyncDisposable
     }
 
     /// <summary>Creates the missing Vector Search index, validates it, and optionally waits.</summary>
-    public async Task<string> EnsureVectorSearchIndexAsync(
+    public Task<string> EnsureVectorSearchIndexAsync(
         bool waitUntilReady = false,
         TimeSpan? timeout = null,
         TimeSpan? pollInterval = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        MongoDBTelemetry.TrackAsync(
+            _logger,
+            MongoDBTelemetryFeature.Memory,
+            MongoDBTelemetryOperation.EnsureIndex,
+            mode: null,
+            () => EnsureVectorSearchIndexInnerAsync(waitUntilReady, timeout, pollInterval, cancellationToken),
+            static _ => new MongoDBTelemetryResult(MongoDBTelemetryOutcome.Success, null, null),
+            cancellationToken);
+
+    private async Task<string> EnsureVectorSearchIndexInnerAsync(
+        bool waitUntilReady,
+        TimeSpan? timeout,
+        TimeSpan? pollInterval,
+        CancellationToken cancellationToken)
     {
         BsonDocument? index = await FindIndexAsync(cancellationToken).ConfigureAwait(false);
         bool created = index is null;
@@ -654,9 +730,21 @@ public sealed class MongoDBMemoryProvider : AIContextProvider, IAsyncDisposable
     }
 
     /// <summary>Validates the Vector Search index without mutating MongoDB.</summary>
-    public async Task ValidateVectorSearchIndexAsync(
+    public Task ValidateVectorSearchIndexAsync(
         bool requireReady = true,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        MongoDBTelemetry.TrackAsync(
+            _logger,
+            MongoDBTelemetryFeature.Memory,
+            MongoDBTelemetryOperation.ValidateIndex,
+            mode: null,
+            () => ValidateVectorSearchIndexInnerAsync(requireReady, cancellationToken),
+            static () => new MongoDBTelemetryResult(MongoDBTelemetryOutcome.Success, null, null),
+            cancellationToken);
+
+    private async Task ValidateVectorSearchIndexInnerAsync(
+        bool requireReady,
+        CancellationToken cancellationToken)
     {
         BsonDocument index = await RequireIndexAsync(cancellationToken).ConfigureAwait(false);
         ValidateIndex(index, requireReady);
@@ -815,7 +903,22 @@ public sealed class MongoDBMemoryProvider : AIContextProvider, IAsyncDisposable
         }
     }
 
-    private async Task<long> DeleteAsync(
+    private Task<long> DeleteAsync(
+        FilterDefinition<BsonDocument> filter,
+        CancellationToken cancellationToken) =>
+        MongoDBTelemetry.TrackAsync(
+            _logger,
+            MongoDBTelemetryFeature.Memory,
+            MongoDBTelemetryOperation.Delete,
+            mode: null,
+            () => DeleteInnerAsync(filter, cancellationToken),
+            static count => new MongoDBTelemetryResult(
+                count > 0 ? MongoDBTelemetryOutcome.Success : MongoDBTelemetryOutcome.Empty,
+                (int)Math.Min(count, int.MaxValue),
+                CandidateBucket: null),
+            cancellationToken);
+
+    private async Task<long> DeleteInnerAsync(
         FilterDefinition<BsonDocument> filter,
         CancellationToken cancellationToken)
     {
