@@ -19,6 +19,7 @@ def test_session_store_contract_matches_public_surface() -> None:
         contract["framework_serialization"] == MongoDBSessionStore.FRAMEWORK_SERIALIZATION_VERSION
     )
     assert contract["collection_default"] == MongoDBSessionStore.DEFAULT_COLLECTION_NAME
+    assert contract["expiration_precision"] == "utc_bson_milliseconds"
     assert contract["scope_dimensions"] == [
         "tenant_id",
         "application_id",

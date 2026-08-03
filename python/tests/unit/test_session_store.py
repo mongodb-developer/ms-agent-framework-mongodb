@@ -352,12 +352,23 @@ async def test_expiration_is_utc_and_versions_are_migration_gated() -> None:
 
 
 @pytest.mark.asyncio
-async def test_restore_treats_default_bson_naive_datetime_as_utc() -> None:
+async def test_create_retry_normalizes_expiration_to_bson_utc_milliseconds() -> None:
     collection = FakeCollection()
     store = MongoDBSessionStore(cast(Any, collection), options=options())
-    expires_at = datetime(2030, 1, 2, 8, 4, tzinfo=timezone.utc)
+    expires_at = datetime(
+        2030,
+        1,
+        2,
+        3,
+        4,
+        5,
+        123456,
+        tzinfo=timezone(timedelta(hours=-5)),
+    )
+    expected = datetime(2030, 1, 2, 8, 4, 5, 123000, tzinfo=timezone.utc)
     session = AgentSession()
     await store.create("store-key", session, expires_at=expires_at)
+    assert collection.documents[0]["expires_at"] == expected
 
     bson_document = BSON.encode(collection.documents[0])
     decoded = BSON(bson_document).decode()
@@ -366,7 +377,7 @@ async def test_restore_treats_default_bson_naive_datetime_as_utc() -> None:
 
     restored = await store.get_versioned("store-key")
     assert restored is not None
-    assert restored.expires_at == expires_at
+    assert restored.expires_at == expected
     assert restored.expires_at is not None
     assert restored.expires_at.tzinfo is timezone.utc
     assert await store.create("store-key", session, expires_at=expires_at) == 1
@@ -374,6 +385,68 @@ async def test_restore_treats_default_bson_naive_datetime_as_utc() -> None:
     collection.documents[0]["expires_at"] = "not-a-datetime"
     with pytest.raises(MongoDBMappingError, match="expires_at is invalid"):
         await store.get_versioned("store-key")
+
+
+@pytest.mark.asyncio
+async def test_cas_retry_normalizes_expiration_before_bson_comparison() -> None:
+    collection = FakeCollection()
+    store = MongoDBSessionStore(cast(Any, collection), options=options())
+    first = AgentSession(session_id="framework-session")
+    first.state["turn"] = 1
+    second = AgentSession(session_id="framework-session")
+    second.state["turn"] = 2
+    expires_at = datetime(
+        2030,
+        1,
+        2,
+        3,
+        4,
+        5,
+        123456,
+        tzinfo=timezone(timedelta(hours=-5)),
+    )
+    expected = datetime(2030, 1, 2, 8, 4, 5, 123000, tzinfo=timezone.utc)
+
+    await store.create("store-key", first)
+    assert (
+        await store.compare_and_set(
+            "store-key",
+            second,
+            expected_version=1,
+            expires_at=expires_at,
+        )
+        == 2
+    )
+    assert collection.documents[0]["expires_at"] == expected
+    collection.documents[0] = BSON(BSON.encode(collection.documents[0])).decode()
+
+    assert (
+        await store.compare_and_set(
+            "store-key",
+            second,
+            expected_version=1,
+            expires_at=expires_at,
+        )
+        == 2
+    )
+    restored = await store.get_versioned("store-key")
+    assert restored is not None
+    assert restored.expires_at == expected
+
+
+@pytest.mark.asyncio
+async def test_default_ttl_expiration_uses_bson_millisecond_precision() -> None:
+    collection = FakeCollection()
+    store = MongoDBSessionStore(
+        cast(Any, collection),
+        options=options(ttl=timedelta(hours=1)),
+    )
+
+    await store.create("store-key", AgentSession())
+
+    expires_at = cast(datetime, collection.documents[0]["expires_at"])
+    assert expires_at.tzinfo is timezone.utc
+    assert expires_at.microsecond % 1000 == 0
 
 
 @pytest.mark.asyncio

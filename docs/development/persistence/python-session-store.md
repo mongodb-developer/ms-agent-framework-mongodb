@@ -81,9 +81,13 @@ physical collection interoperability is not claimed.
 Updates replace the complete document only when the scoped current version
 matches. `created_at` is stable, `updated_at` advances, and versions are positive
 monotonic integers. `expires_at` must be future, timezone-aware input and is
-normalized to UTC. PyMongo's default timezone-naive BSON datetimes are restored
-as UTC; non-datetime values remain invalid. `options.ttl` only computes a
-default `expires_at` independently from Memory and Chat History.
+normalized to UTC and truncated to BSON's millisecond precision before document
+construction, persistence, retry comparison, and returned snapshot metadata.
+This makes create and compare-and-swap retries stable across an actual BSON
+round trip. PyMongo's default timezone-naive BSON datetimes are restored as UTC;
+non-datetime values remain invalid. `options.ttl` only computes a default
+`expires_at` independently from Memory and Chat History and uses the same
+millisecond normalization.
 
 ## Explicit regular indexes
 

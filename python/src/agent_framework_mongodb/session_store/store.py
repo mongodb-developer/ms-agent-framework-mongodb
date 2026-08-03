@@ -348,11 +348,13 @@ class MongoDBSessionStore(SessionStore):
         if expires_at is not None:
             if expires_at.tzinfo is None or expires_at.utcoffset() is None:
                 raise MongoDBConfigurationError("expires_at must be timezone-aware.")
-            normalized = expires_at.astimezone(timezone.utc)
+            normalized = _to_bson_utc_milliseconds(expires_at)
             if normalized <= now:
                 raise MongoDBConfigurationError("expires_at must be in the future.")
             return normalized
-        return now + self.options.ttl if self.options.ttl is not None else None
+        if self.options.ttl is None:
+            return None
+        return _to_bson_utc_milliseconds(now + self.options.ttl)
 
     async def ensure_indexes(self) -> tuple[str, ...]:
         """Explicitly create regular scope, version, and expiration indexes."""
@@ -552,8 +554,13 @@ def _stored_expiration(document: MongoDocument) -> datetime | None:
             "Stored Session Store expires_at is invalid; migrate the authorized snapshot."
         )
     if value.tzinfo is None or value.utcoffset() is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
+        value = value.replace(tzinfo=timezone.utc)
+    return _to_bson_utc_milliseconds(value)
+
+
+def _to_bson_utc_milliseconds(value: datetime) -> datetime:
+    normalized = value.astimezone(timezone.utc)
+    return normalized.replace(microsecond=(normalized.microsecond // 1000) * 1000)
 
 
 def _validate_versions(document: MongoDocument) -> None:

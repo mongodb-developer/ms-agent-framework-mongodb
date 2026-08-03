@@ -1,6 +1,7 @@
 {
   "schema_version": 1,
   "framework_serialization": "agent-framework-core/1:AgentSession.to_dict/v1",
+  "expiration_precision": "utc_bson_milliseconds",
   "scope_dimensions": [
     "tenant_id",
     "application_id",
