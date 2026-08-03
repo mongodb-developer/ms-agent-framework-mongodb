@@ -56,6 +56,7 @@ def test_checkpoint_storage_contract_matches_public_surface() -> None:
     assert contract["serialization_validation"] == {
         "mapping_guard": "before_all_type_handlers",
         "pickle_dispatch": "controlled_without_copyreg",
+        "copyreg_extension_registry": "recursive_reject_before_serialization",
         "custom_pickle_hooks": "reject_before_execution",
         "round_trip_load": "restricted_checkpoint_load_path",
         "round_trip_canonical_match": "required_before_io",

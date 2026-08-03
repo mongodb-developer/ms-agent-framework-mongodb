@@ -62,6 +62,16 @@ for standard values whose Python reducers are part of the documented codec:
 `timedelta`, `timezone`, `Decimal`, and `UUID`. The default `Enum` reduction is
 allowed; enum classes that override pickle hooks are rejected.
 
+Python's separate `copyreg` extension registry can replace global class
+references with process-local EXT codes even when the dispatch table is empty.
+Save recursively walks the actual serialized object graph, including nested
+framework objects, dataclass fields, enum values, instance dictionaries, and
+slots. If any value's exact `(module, qualname)` or `(module, name)` is present
+in that registry, save raises `MongoDBSerializationError` with guidance to
+remove the registration or migrate the value. This happens before pickle,
+sequence allocation, or MongoDB I/O. Restricted-load `ValueError` failures,
+including unregistered EXT codes, are translated to the same stable category.
+
 Before allocating a sequence or contacting MongoDB, save creates the exact
 payload bytes, decodes them through the same restricted load path, recursively
 canonicalizes the decoded graph, and compares it with the original canonical
@@ -215,12 +225,12 @@ collection/database names, filters, driver messages, hosts, and credentials.
 
 ## Verification
 
-Public serialization, restricted round-trip equivalence, custom-reducer
-rejection, mapping/enum precedence, actual workflow pause/resume, cross-process
-canonical idempotency, stateful-mapping rejection, conflict, lineage, concurrent
-sequence, missing-counter recovery, complete inherited listing, bounded
-pagination, latest, scope cleanup, counter TTL, TTL-gap, compatibility, index,
-cancellation, error, and ownership tests are in
+Public serialization, restricted round-trip equivalence, custom-reducer and
+copyreg-extension rejection, mapping/enum precedence, actual workflow
+pause/resume, cross-process canonical idempotency, stateful-mapping rejection,
+conflict, lineage, concurrent sequence, missing-counter recovery, complete
+inherited listing, bounded pagination, latest, scope cleanup, counter TTL,
+TTL-gap, compatibility, index, cancellation, error, and ownership tests are in
 `python/tests/unit/test_checkpoint_storage.py`. Language-neutral outcomes are in
 `python/tests/contracts/fixtures/checkpoint_storage_contract.json`.
 Credential-gated real-deployment coverage is in

@@ -650,6 +650,54 @@ async def test_exact_dict_serialization_ignores_copyreg_registration(
 
 
 @pytest.mark.asyncio
+async def test_copyreg_extensions_for_nested_framework_types_are_rejected_and_cleaned_up() -> None:
+    original = checkpoint("extension-registry")
+    event = next(iter(original.pending_request_info_events.values()))
+    registered_types = (WorkflowEvent, type(event.origin))
+
+    for registered_type in registered_types:
+        collection = FakeCollection()
+        storage = MongoDBCheckpointStorage(cast(Any, collection), options=options())
+        module = registered_type.__module__
+        name = registered_type.__qualname__
+        copyreg.add_extension(module, name, 4242)
+        try:
+            with pytest.raises(MongoDBSerializationError, match="extension registry.*migrate"):
+                await storage.save(copy.deepcopy(original))
+            assert collection.documents == []
+        finally:
+            copyreg.remove_extension(module, name, 4242)
+
+    normal_collection = FakeCollection()
+    normal = MongoDBCheckpointStorage(cast(Any, normal_collection), options=options())
+    assert await normal.save(original) == "extension-registry"
+    restored = await normal.load("extension-registry")
+    assert restored.checkpoint_id == original.checkpoint_id
+    assert restored.state == original.state
+    assert (
+        restored.pending_request_info_events.keys() == original.pending_request_info_events.keys()
+    )
+
+
+@pytest.mark.asyncio
+async def test_restricted_round_trip_value_error_is_stable_serialization_error() -> None:
+    collection = FakeCollection()
+    storage = MongoDBCheckpointStorage(cast(Any, collection), options=options())
+
+    with (
+        patch(
+            "agent_framework_mongodb.checkpointing.store._restricted_loads",
+            side_effect=ValueError("unregistered extension code 4242"),
+        ),
+        pytest.raises(MongoDBSerializationError, match="approved load path") as error,
+    ):
+        await storage.save(checkpoint("extension-value-error"))
+
+    assert isinstance(error.value.__cause__, ValueError)
+    assert collection.documents == []
+
+
+@pytest.mark.asyncio
 async def test_to_dict_object_cannot_reduce_to_ordered_mapping() -> None:
     PlainToDictOrderedReducer.reduce_calls = 0
     collection = FakeCollection()

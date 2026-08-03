@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copyreg
 import hashlib
 import io
 import json
@@ -737,6 +738,7 @@ def _serialize(
     allowed_types: frozenset[str],
 ) -> tuple[Binary, str]:
     public_payload = checkpoint.to_dict()
+    _validate_serialized_type_graph(public_payload, active_ids=set())
     canonical = _canonical_checkpoint_payload(public_payload, allowed_types)
     try:
         buffer = io.BytesIO()
@@ -1034,8 +1036,60 @@ def _is_unsupported_mapping(value: object) -> bool:
     return isinstance(value, Mapping)
 
 
+def _validate_serialized_type_graph(value: object, *, active_ids: set[int]) -> None:
+    _reject_unapproved_pickle_hooks(value)
+    if (
+        value is None
+        or type(value) in {bool, int, float, str, bytes, bytearray}
+        or isinstance(value, (date, datetime_time, timedelta, timezone, UUID, Decimal, Enum))
+        or isinstance(value, type)
+    ):
+        return
+
+    value_id = id(value)
+    if value_id in active_ids:
+        return
+    active_ids.add(value_id)
+    try:
+        if type(value) is dict:
+            mapping = cast(dict[object, object], value)
+            for key, item in mapping.items():
+                _validate_serialized_type_graph(key, active_ids=active_ids)
+                _validate_serialized_type_graph(item, active_ids=active_ids)
+            return
+        if isinstance(value, (list, tuple, set, frozenset)):
+            sequence = cast(
+                list[object] | tuple[object, ...] | set[object] | frozenset[object], value
+            )
+            for item in sequence:
+                _validate_serialized_type_graph(item, active_ids=active_ids)
+            return
+
+        try:
+            instance_state = vars(value)
+        except TypeError:
+            instance_state = {}
+        for item in instance_state.values():
+            _validate_serialized_type_graph(item, active_ids=active_ids)
+        for value_type in type(value).__mro__:
+            slots = value_type.__dict__.get("__slots__", ())
+            if isinstance(slots, str):
+                slots = (slots,)
+            for slot in cast(tuple[str, ...], slots):
+                if slot not in {"__dict__", "__weakref__"} and hasattr(value, slot):
+                    _validate_serialized_type_graph(
+                        getattr(value, slot),
+                        active_ids=active_ids,
+                    )
+    finally:
+        active_ids.remove(value_id)
+
+
 def _reject_unapproved_pickle_hooks(value: object) -> None:
     value_type = type(value)
+    _reject_copyreg_extension(value_type)
+    if isinstance(value, type):
+        _reject_copyreg_extension(cast(type[object], value))
     if value_type in _APPROVED_CUSTOM_PICKLE_TYPES or isinstance(value, type):
         return
     if isinstance(value, Enum):
@@ -1057,6 +1111,24 @@ def _reject_unapproved_pickle_hooks(value: object) -> None:
             "Checkpoint public state contains a type with custom pickle hooks "
             f"'{_type_key(value_type)}'; migrate it to a framework-supported type, "
             "application dataclass with default serialization, or plain dict/list structures."
+        )
+
+
+def _reject_copyreg_extension(value_type: type[object]) -> None:
+    registry_value = getattr(copyreg, "_extension_registry", None)
+    if not isinstance(registry_value, dict):
+        raise MongoDBSerializationError(
+            "The Python copyreg extension registry cannot be validated; "
+            "use a supported Python runtime before persisting checkpoints."
+        )
+    registry = cast(dict[tuple[str, str], int], registry_value)
+    module = value_type.__module__
+    names = {value_type.__name__, value_type.__qualname__}
+    if any((module, name) in registry for name in names):
+        raise MongoDBSerializationError(
+            "Checkpoint public state contains a type registered in the copyreg "
+            f"extension registry '{module}:{value_type.__qualname__}'; remove the "
+            "extension registration or migrate it to approved plain values."
         )
 
 
