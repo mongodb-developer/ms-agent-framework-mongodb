@@ -62,6 +62,32 @@ public sealed class MongoDBRAGProviderOptions
     public double TextWeight { get; set; } = 1.0;
 
     /// <summary>
+    /// Gets or sets the <see cref="MongoDBSearchMode.HybridRrf"/> vector-input candidate limit: the
+    /// <c>$vectorSearch</c> stage's own <c>limit</c> inside the rank-fusion vector pipeline, bounding candidates
+    /// handed to <c>$rankFusion</c> and distinct from the final <see cref="TopK"/>. Defaults using the same
+    /// over-fetch heuristic as <see cref="NumCandidates"/> when unset. Must be null for every mode other than
+    /// <see cref="MongoDBSearchMode.HybridRrf"/>.
+    /// </summary>
+    public int? VectorCandidateLimit { get; set; }
+
+    /// <summary>
+    /// Gets or sets the <see cref="MongoDBSearchMode.HybridRrf"/> text-input candidate limit: the <c>$limit</c>
+    /// stage after <c>$search</c> inside the rank-fusion text pipeline, bounding candidates handed to
+    /// <c>$rankFusion</c> and distinct from the final <see cref="TopK"/>. Defaults using the same over-fetch
+    /// heuristic as <see cref="VectorCandidateLimit"/> when unset. Must be null for every mode other than
+    /// <see cref="MongoDBSearchMode.HybridRrf"/>.
+    /// </summary>
+    public int? TextCandidateLimit { get; set; }
+
+    /// <summary>
+    /// Gets or sets whether <see cref="MongoDBSearchMode.HybridRrf"/> requests <c>$rankFusion</c>'s
+    /// <c>scoreDetails</c> diagnostic metadata. Defaults to <see langword="false"/>, since MongoDB does not
+    /// guarantee <c>scoreDetails</c>' internal shape (rag.md: "not a compatibility guarantee"). Must be
+    /// <see langword="false"/> for every mode other than <see cref="MongoDBSearchMode.HybridRrf"/>.
+    /// </summary>
+    public bool IncludeScoreDetails { get; set; }
+
+    /// <summary>
     /// Gets or sets the caller-configured mandatory filter translated into every active retrieval branch. This is
     /// the sole supported mechanism for tenant and authorization constraints; it must never be derived from raw
     /// BSON or model output.
@@ -101,6 +127,7 @@ public sealed class MongoDBRAGProviderOptions
             case MongoDBSearchMode.VectorAnn:
                 ValidateVectorConfiguration();
                 ValidateNumCandidates();
+                RequireHybridOnlyOptionsUnset();
                 break;
             case MongoDBSearchMode.VectorEnn:
                 ValidateVectorConfiguration();
@@ -110,6 +137,7 @@ public sealed class MongoDBRAGProviderOptions
                         "NumCandidates must not be set for VectorEnn (exact) search.");
                 }
 
+                RequireHybridOnlyOptionsUnset();
                 break;
             case MongoDBSearchMode.FullText:
                 ValidateSearchConfiguration();
@@ -119,11 +147,14 @@ public sealed class MongoDBRAGProviderOptions
                         "NumCandidates is not used with FullText search.");
                 }
 
+                RequireHybridOnlyOptionsUnset();
                 break;
             case MongoDBSearchMode.HybridRrf:
                 ValidateVectorConfiguration();
                 ValidateSearchConfiguration();
                 ValidateNumCandidates();
+                ValidateCandidateLimit(VectorCandidateLimit, nameof(VectorCandidateLimit));
+                ValidateCandidateLimit(TextCandidateLimit, nameof(TextCandidateLimit));
                 if (VectorWeight <= 0 && TextWeight <= 0)
                 {
                     throw new MongoDBConfigurationException(
@@ -164,6 +195,9 @@ public sealed class MongoDBRAGProviderOptions
             NumCandidates = NumCandidates,
             VectorWeight = VectorWeight,
             TextWeight = TextWeight,
+            VectorCandidateLimit = VectorCandidateLimit,
+            TextCandidateLimit = TextCandidateLimit,
+            IncludeScoreDetails = IncludeScoreDetails,
             MandatoryFilter = MandatoryFilter,
             RetrievalTimeout = RetrievalTimeout,
         };
@@ -197,6 +231,45 @@ public sealed class MongoDBRAGProviderOptions
         if (candidates < TopK)
         {
             throw new MongoDBConfigurationException("NumCandidates must be at least TopK.");
+        }
+    }
+
+    /// <summary>
+    /// Guards <see cref="VectorCandidateLimit"/>/<see cref="TextCandidateLimit"/>/<see cref="IncludeScoreDetails"/>
+    /// for every mode other than <see cref="MongoDBSearchMode.HybridRrf"/>: they configure only the
+    /// <c>$rankFusion</c> pipeline, so a caller-configured value would be silently unusable in every other mode.
+    /// </summary>
+    private void RequireHybridOnlyOptionsUnset()
+    {
+        if (VectorCandidateLimit is not null)
+        {
+            throw new MongoDBConfigurationException(
+                $"{nameof(VectorCandidateLimit)} is only used with {MongoDBSearchMode.HybridRrf}.");
+        }
+
+        if (TextCandidateLimit is not null)
+        {
+            throw new MongoDBConfigurationException(
+                $"{nameof(TextCandidateLimit)} is only used with {MongoDBSearchMode.HybridRrf}.");
+        }
+
+        if (IncludeScoreDetails)
+        {
+            throw new MongoDBConfigurationException(
+                $"{nameof(IncludeScoreDetails)} is only used with {MongoDBSearchMode.HybridRrf}.");
+        }
+    }
+
+    private static void ValidateCandidateLimit(int? limit, string name)
+    {
+        if (limit is not { } value)
+        {
+            return;
+        }
+
+        if (value is < 1 or > MaxNumCandidates)
+        {
+            throw new MongoDBConfigurationException($"{name} must be between 1 and {MaxNumCandidates}.");
         }
     }
 

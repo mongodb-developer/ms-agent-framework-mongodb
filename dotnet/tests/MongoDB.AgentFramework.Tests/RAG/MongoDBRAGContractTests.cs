@@ -93,4 +93,70 @@ public sealed class MongoDBRAGContractTests
             """)["filter"].AsBsonArray;
         Assert.Equal(expected, actual);
     }
+
+    [Fact]
+    public async Task MandatoryFilterIsCompletelyAndIndependentlyTranslatedIntoBothHybridInputBranches()
+    {
+        MongoDBRAGFilter filter = MongoDBRAGFilter.And(
+            MongoDBRAGFilter.Equal("tenant_id", "tenant-a"),
+            MongoDBRAGFilter.Or(
+                MongoDBRAGFilter.In("category", ["docs", "faq"]),
+                MongoDBRAGFilter.Range("published_at", minimum: 0, maximum: null)));
+        var state = new RAGCollectionState
+        {
+            Results = [new BsonDocument { { "_id", "chunk-1" }, { "text", "chunk" }, { "_ragScore", 1.0 } }],
+        };
+        var options = new MongoDBRAGProviderOptions
+        {
+            SearchMode = MongoDBSearchMode.HybridRrf,
+            MandatoryFilter = filter,
+        };
+        MongoDBRAGProvider provider = new(
+            RAGCollectionProxy.Create(state),
+            new RecordingEmbeddingGenerator(),
+            3,
+            options);
+
+        await provider.SearchAsync("contract query");
+
+        BsonDocument rankFusion = state.AggregateStages[0]["$rankFusion"].AsBsonDocument;
+        BsonDocument pipelines = rankFusion["input"]["pipelines"].AsBsonDocument;
+        BsonDocument vectorFilterActual =
+            pipelines["vector"].AsBsonArray[0]["$vectorSearch"]["filter"].AsBsonDocument;
+        BsonArray searchFilterActual =
+            pipelines["text"].AsBsonArray[0]["$search"]["compound"]["filter"].AsBsonArray;
+
+        BsonDocument expectedVectorFilter = BsonDocument.Parse("""
+            {
+                "$and": [
+                    { "tenant_id": { "$eq": "tenant-a" } },
+                    {
+                        "$or": [
+                            { "category": { "$in": ["docs", "faq"] } },
+                            { "published_at": { "$gte": 0.0 } }
+                        ]
+                    }
+                ]
+            }
+            """);
+        BsonArray expectedSearchFilter = BsonDocument.Parse("""
+            {
+                "filter": [
+                    { "equals": { "path": "tenant_id", "value": "tenant-a" } },
+                    {
+                        "compound": {
+                            "should": [
+                                { "in": { "path": "category", "value": ["docs", "faq"] } },
+                                { "range": { "path": "published_at", "gte": 0.0 } }
+                            ],
+                            "minimumShouldMatch": 1
+                        }
+                    }
+                ]
+            }
+            """)["filter"].AsBsonArray;
+
+        Assert.Equal(expectedVectorFilter, vectorFilterActual);
+        Assert.Equal(expectedSearchFilter, searchFilterActual);
+    }
 }

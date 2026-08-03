@@ -193,4 +193,179 @@ public sealed class RAGPipelineBuilderTests
         Assert.Equal(FieldPath.ReservedScoreAlias, stages[2]["$set"].AsBsonDocument.GetElement(0).Name);
         Assert.DoesNotContain(stages, stage => stage.Contains("$project"));
     }
+
+    [Fact]
+    public void Hybrid_pipeline_leads_with_rankFusion_and_places_the_vector_filter_inside_the_vector_input()
+    {
+        BsonDocument vectorFilter = BsonDocument.Parse("""{"tenant_id":"tenant-a"}""");
+
+        BsonDocument[] stages = RAGPipelineBuilder.BuildHybridRankFusionPipeline(
+            vectorIndexName: "vector_index",
+            vectorFieldName: "embedding",
+            queryVector: QueryVector,
+            vectorNumCandidates: 150,
+            vectorCandidateLimit: 40,
+            vectorFilter: vectorFilter,
+            searchIndexName: "search_index",
+            textFieldNames: ["text"],
+            queryText: "blue widgets",
+            textCandidateLimit: 40,
+            searchFilter: null,
+            vectorWeight: 1.0,
+            textWeight: 1.0,
+            includeScoreDetails: false,
+            limit: 5);
+
+        Assert.True(stages[0].Contains("$rankFusion"));
+        BsonDocument rankFusion = stages[0]["$rankFusion"].AsBsonDocument;
+        BsonArray vectorPipeline = rankFusion["input"]["pipelines"]["vector"].AsBsonArray;
+        Assert.Single(vectorPipeline);
+        BsonDocument vectorSearch = vectorPipeline[0]["$vectorSearch"].AsBsonDocument;
+        Assert.Equal("vector_index", vectorSearch["index"].AsString);
+        Assert.Equal("embedding", vectorSearch["path"].AsString);
+        Assert.Equal(40, vectorSearch["limit"].AsInt32);
+        Assert.Equal(150, vectorSearch["numCandidates"].AsInt32);
+        Assert.Equal(vectorFilter, vectorSearch["filter"].AsBsonDocument);
+        Assert.False(vectorSearch.Contains("exact"));
+    }
+
+    [Fact]
+    public void Hybrid_pipeline_places_the_search_filter_inside_the_text_input_followed_by_a_candidate_limit()
+    {
+        var searchFilter = new BsonArray { BsonDocument.Parse("""{"equals":{"path":"tenant_id","value":"tenant-a"}}""") };
+
+        BsonDocument[] stages = RAGPipelineBuilder.BuildHybridRankFusionPipeline(
+            vectorIndexName: "vector_index",
+            vectorFieldName: "embedding",
+            queryVector: QueryVector,
+            vectorNumCandidates: 150,
+            vectorCandidateLimit: 40,
+            vectorFilter: null,
+            searchIndexName: "search_index",
+            textFieldNames: ["text"],
+            queryText: "blue widgets",
+            textCandidateLimit: 60,
+            searchFilter: searchFilter,
+            vectorWeight: 1.0,
+            textWeight: 1.0,
+            includeScoreDetails: false,
+            limit: 5);
+
+        BsonDocument rankFusion = stages[0]["$rankFusion"].AsBsonDocument;
+        BsonArray textPipeline = rankFusion["input"]["pipelines"]["text"].AsBsonArray;
+        Assert.Equal(2, textPipeline.Count);
+        BsonDocument search = textPipeline[0]["$search"].AsBsonDocument;
+        Assert.Equal("search_index", search["index"].AsString);
+        Assert.Equal(searchFilter, search["compound"]["filter"].AsBsonArray);
+        Assert.Equal(new BsonDocument("$limit", 60), textPipeline[1].AsBsonDocument);
+    }
+
+    [Fact]
+    public void Hybrid_pipeline_sets_combination_weights_from_options()
+    {
+        BsonDocument[] stages = RAGPipelineBuilder.BuildHybridRankFusionPipeline(
+            vectorIndexName: "vector_index",
+            vectorFieldName: "embedding",
+            queryVector: QueryVector,
+            vectorNumCandidates: 150,
+            vectorCandidateLimit: 40,
+            vectorFilter: null,
+            searchIndexName: "search_index",
+            textFieldNames: ["text"],
+            queryText: "blue widgets",
+            textCandidateLimit: 40,
+            searchFilter: null,
+            vectorWeight: 0.25,
+            textWeight: 2.5,
+            includeScoreDetails: false,
+            limit: 5);
+
+        BsonDocument weights = stages[0]["$rankFusion"]["combination"]["weights"].AsBsonDocument;
+        Assert.Equal(0.25, weights["vector"].ToDouble());
+        Assert.Equal(2.5, weights["text"].ToDouble());
+    }
+
+    [Fact]
+    public void Hybrid_pipeline_omits_scoreDetails_by_default_and_only_sets_it_when_requested()
+    {
+        BsonDocument[] withoutDetails = RAGPipelineBuilder.BuildHybridRankFusionPipeline(
+            vectorIndexName: "vector_index",
+            vectorFieldName: "embedding",
+            queryVector: QueryVector,
+            vectorNumCandidates: 150,
+            vectorCandidateLimit: 40,
+            vectorFilter: null,
+            searchIndexName: "search_index",
+            textFieldNames: ["text"],
+            queryText: "blue widgets",
+            textCandidateLimit: 40,
+            searchFilter: null,
+            vectorWeight: 1.0,
+            textWeight: 1.0,
+            includeScoreDetails: false,
+            limit: 5);
+
+        // The typed RankFusion() builder omits the "scoreDetails" property entirely rather than setting it false,
+        // matching $rankFusion's own optional-property shape.
+        Assert.False(withoutDetails[0]["$rankFusion"].AsBsonDocument.Contains("scoreDetails"));
+        Assert.DoesNotContain(
+            withoutDetails,
+            stage => stage.Contains("$set") && stage["$set"].AsBsonDocument.Contains(FieldPath.ReservedScoreDetailsAlias));
+
+        BsonDocument[] withDetails = RAGPipelineBuilder.BuildHybridRankFusionPipeline(
+            vectorIndexName: "vector_index",
+            vectorFieldName: "embedding",
+            queryVector: QueryVector,
+            vectorNumCandidates: 150,
+            vectorCandidateLimit: 40,
+            vectorFilter: null,
+            searchIndexName: "search_index",
+            textFieldNames: ["text"],
+            queryText: "blue widgets",
+            textCandidateLimit: 40,
+            searchFilter: null,
+            vectorWeight: 1.0,
+            textWeight: 1.0,
+            includeScoreDetails: true,
+            limit: 5);
+
+        Assert.True(withDetails[0]["$rankFusion"].AsBsonDocument["scoreDetails"].AsBoolean);
+        BsonDocument scoreDetailsStage = Assert.Single(
+            withDetails,
+            stage => stage.Contains("$set") && stage["$set"].AsBsonDocument.Contains(FieldPath.ReservedScoreDetailsAlias));
+        Assert.Equal(
+            "scoreDetails",
+            scoreDetailsStage["$set"][FieldPath.ReservedScoreDetailsAlias]["$meta"].AsString);
+    }
+
+    [Fact]
+    public void Hybrid_pipeline_applies_the_final_topK_limit_and_the_shared_score_alias_from_rankFusion_score()
+    {
+        BsonDocument[] stages = RAGPipelineBuilder.BuildHybridRankFusionPipeline(
+            vectorIndexName: "vector_index",
+            vectorFieldName: "embedding",
+            queryVector: QueryVector,
+            vectorNumCandidates: 150,
+            vectorCandidateLimit: 40,
+            vectorFilter: null,
+            searchIndexName: "search_index",
+            textFieldNames: ["text"],
+            queryText: "blue widgets",
+            textCandidateLimit: 40,
+            searchFilter: null,
+            vectorWeight: 1.0,
+            textWeight: 1.0,
+            includeScoreDetails: false,
+            limit: 9);
+
+        // $rankFusion, then the final topK $limit, then the score-alias $set; never a narrowing $project, and
+        // never a filter after fusion.
+        Assert.Equal(3, stages.Length);
+        Assert.True(stages[0].Contains("$rankFusion"));
+        Assert.Equal(new BsonDocument("$limit", 9), stages[1]);
+        Assert.Equal(
+            BsonDocument.Parse("""{"$set":{"_ragScore":{"$meta":"score"}}}"""),
+            stages[2]);
+        Assert.DoesNotContain(stages, stage => stage.Contains("$project"));
+    }
 }

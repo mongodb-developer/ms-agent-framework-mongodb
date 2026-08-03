@@ -177,21 +177,6 @@ public sealed class MongoDBRAGProviderSearchTests
         Assert.False(vectorSearch.Contains("numCandidates"));
     }
 
-    [Theory]
-    [InlineData(MongoDBSearchMode.HybridRrf)]
-    public async Task UnsupportedModesAreRejectedBeforeAnyEmbeddingOrNetworkCall(MongoDBSearchMode mode)
-    {
-        var state = new RAGCollectionState();
-        var embeddings = new RecordingEmbeddingGenerator();
-        var options = new MongoDBRAGProviderOptions { SearchMode = mode };
-        MongoDBRAGProvider provider = CreateProvider(state, embeddings, options);
-
-        await Assert.ThrowsAsync<MongoDBCapabilityException>(() => provider.SearchAsync("query"));
-
-        Assert.Empty(embeddings.Calls);
-        Assert.Empty(state.AggregateStages);
-    }
-
     [Fact]
     public async Task EmptyQueryIsRejected()
     {
@@ -429,6 +414,145 @@ public sealed class MongoDBRAGProviderSearchTests
         MongoDBRAGProvider provider = CreateFullTextProvider(
             state,
             new MongoDBRAGProviderOptions { SearchMode = MongoDBSearchMode.FullText });
+
+        await provider.SearchAsync("query");
+
+        Assert.Equal(3, state.AggregateStages.Count);
+        Assert.DoesNotContain(state.AggregateStages, stage => stage.Contains("$project"));
+    }
+
+    [Fact]
+    public async Task HybridSearchLeadsWithRankFusionAndPlacesIndependentFiltersInBothInputs()
+    {
+        var state = new RAGCollectionState
+        {
+            Results = [new BsonDocument { { "_id", "chunk-1" }, { "text", "chunk" }, { "_ragScore", 0.5 } }],
+        };
+        var options = new MongoDBRAGProviderOptions
+        {
+            SearchMode = MongoDBSearchMode.HybridRrf,
+            MandatoryFilter = MongoDBRAGFilter.Equal("tenant_id", "tenant-a"),
+        };
+        MongoDBRAGProvider provider = CreateProvider(state, options: options);
+
+        await provider.SearchAsync("blue widgets");
+
+        BsonDocument rankFusion = state.AggregateStages[0]["$rankFusion"].AsBsonDocument;
+        BsonDocument pipelines = rankFusion["input"]["pipelines"].AsBsonDocument;
+        BsonDocument vectorSearch = pipelines["vector"].AsBsonArray[0].AsBsonDocument["$vectorSearch"].AsBsonDocument;
+        BsonDocument search = pipelines["text"].AsBsonArray[0].AsBsonDocument["$search"].AsBsonDocument;
+        Assert.Equal(
+            BsonDocument.Parse("""{"tenant_id":{"$eq":"tenant-a"}}"""),
+            vectorSearch["filter"].AsBsonDocument);
+        Assert.Equal(
+            BsonDocument.Parse("""{"equals":{"path":"tenant_id","value":"tenant-a"}}"""),
+            search["compound"]["filter"].AsBsonArray[0].AsBsonDocument);
+    }
+
+    [Fact]
+    public async Task HybridSearchUsesConfiguredWeightsAndCandidateLimits()
+    {
+        var state = new RAGCollectionState
+        {
+            Results = [new BsonDocument { { "_id", "chunk-1" }, { "text", "chunk" }, { "_ragScore", 0.5 } }],
+        };
+        var options = new MongoDBRAGProviderOptions
+        {
+            SearchMode = MongoDBSearchMode.HybridRrf,
+            VectorWeight = 2.0,
+            TextWeight = 0.5,
+            VectorCandidateLimit = 25,
+            TextCandidateLimit = 30,
+            TopK = 7,
+        };
+        MongoDBRAGProvider provider = CreateProvider(state, options: options);
+
+        await provider.SearchAsync("blue widgets");
+
+        BsonDocument rankFusion = state.AggregateStages[0]["$rankFusion"].AsBsonDocument;
+        BsonDocument weights = rankFusion["combination"]["weights"].AsBsonDocument;
+        Assert.Equal(2.0, weights["vector"].ToDouble());
+        Assert.Equal(0.5, weights["text"].ToDouble());
+        BsonDocument pipelines = rankFusion["input"]["pipelines"].AsBsonDocument;
+        Assert.Equal(25, pipelines["vector"].AsBsonArray[0]["$vectorSearch"]["limit"].AsInt32);
+        Assert.Equal(30, pipelines["text"].AsBsonArray[1]["$limit"].AsInt32);
+        Assert.Equal(new BsonDocument("$limit", 7), state.AggregateStages[1]);
+    }
+
+    [Fact]
+    public async Task HybridSearchCapturesTheFusedScoreAndPreservesTheRawDocument()
+    {
+        var state = new RAGCollectionState
+        {
+            Results =
+            [
+                new BsonDocument
+                {
+                    { "_id", "chunk-1" },
+                    { "text", "Example chunk." },
+                    { "_ragScore", 0.031 },
+                    { "category", "docs" },
+                },
+            ],
+        };
+        var options = new MongoDBRAGProviderOptions
+        {
+            SearchMode = MongoDBSearchMode.HybridRrf,
+            MetadataFieldNames = ["category"],
+        };
+        MongoDBRAGProvider provider = CreateProvider(state, options: options);
+
+        MongoDBRAGResult result = Assert.Single(await provider.SearchAsync("blue widgets"));
+
+        Assert.Equal(0.031, result.Score);
+        Assert.Equal("docs", result.RawDocument["category"].AsString);
+        Assert.False(result.RawDocument.Contains("_ragScore"));
+        Assert.Null(result.ScoreDetails);
+    }
+
+    [Fact]
+    public async Task HybridSearchIncludesScoreDetailsOnlyWhenRequested()
+    {
+        var detailsDoc = new BsonDocument { { "value", 0.031 } };
+        var state = new RAGCollectionState
+        {
+            Results =
+            [
+                new BsonDocument
+                {
+                    { "_id", "chunk-1" },
+                    { "text", "chunk" },
+                    { "_ragScore", 0.031 },
+                    { "_ragScoreDetails", detailsDoc },
+                },
+            ],
+        };
+        var options = new MongoDBRAGProviderOptions
+        {
+            SearchMode = MongoDBSearchMode.HybridRrf,
+            IncludeScoreDetails = true,
+        };
+        MongoDBRAGProvider provider = CreateProvider(state, options: options);
+
+        MongoDBRAGResult result = Assert.Single(await provider.SearchAsync("blue widgets"));
+
+        Assert.Equal(detailsDoc, result.ScoreDetails);
+        Assert.False(result.RawDocument.Contains("_ragScoreDetails"));
+
+        BsonDocument rankFusion = state.AggregateStages[0]["$rankFusion"].AsBsonDocument;
+        Assert.True(rankFusion["scoreDetails"].AsBoolean);
+    }
+
+    [Fact]
+    public async Task HybridSearchDoesNotIncludeANarrowingProjectStage()
+    {
+        var state = new RAGCollectionState
+        {
+            Results = [new BsonDocument { { "_id", "chunk-1" }, { "text", "chunk" }, { "_ragScore", 0.5 } }],
+        };
+        MongoDBRAGProvider provider = CreateProvider(
+            state,
+            options: new MongoDBRAGProviderOptions { SearchMode = MongoDBSearchMode.HybridRrf });
 
         await provider.SearchAsync("query");
 

@@ -77,6 +77,13 @@ internal sealed class RAGCollectionState
     public Exception? SearchIndexListException { get; set; }
 
     public int SearchIndexListCallCount { get; set; }
+
+    /// <summary>The fake <c>buildInfo</c> command result used by the Hybrid server-version capability check.</summary>
+    public BsonDocument BuildInfoResult { get; set; } = new("version", "8.0.0");
+
+    public Exception? RunCommandException { get; set; }
+
+    public int RunCommandCallCount { get; set; }
 }
 
 internal class RAGCollectionProxy : DispatchProxy
@@ -128,6 +135,11 @@ internal class RAGCollectionProxy : DispatchProxy
                 new ListCursor<BsonDocument>(State.Results));
         }
 
+        if (method == "get_Database")
+        {
+            return RAGDatabaseProxy.Create(State);
+        }
+
         throw new NotSupportedException($"Unexpected collection call: {targetMethod}");
     }
 
@@ -137,6 +149,47 @@ internal class RAGCollectionProxy : DispatchProxy
             DispatchProxy.Create<IMongoCollection<BsonDocument>, RAGCollectionProxy>();
         ((RAGCollectionProxy)(object)collection).State = state;
         return collection;
+    }
+}
+
+/// <summary>
+/// Fakes <see cref="IMongoDatabase.RunCommandAsync{TResult}"/> only, used by the Hybrid server-version capability
+/// check (<c>buildInfo</c>). <see cref="RAGCollectionState.RunCommandCallCount"/> proves whether a bounded cache
+/// avoided a repeated round trip.
+/// </summary>
+internal class RAGDatabaseProxy : DispatchProxy
+{
+    public RAGCollectionState State { get; set; } = null!;
+
+    protected override object? Invoke(MethodInfo? targetMethod, object?[]? args)
+    {
+        if (targetMethod!.Name == "RunCommandAsync")
+        {
+            State.RunCommandCallCount++;
+            Type resultType = targetMethod.ReturnType.GenericTypeArguments[0];
+            if (State.RunCommandException is not null)
+            {
+                return typeof(Task).GetMethod(
+                    nameof(Task.FromException),
+                    1,
+                    [typeof(Exception)])!
+                    .MakeGenericMethod(resultType)
+                    .Invoke(null, [State.RunCommandException]);
+            }
+
+            return typeof(Task).GetMethod(nameof(Task.FromResult))!
+                .MakeGenericMethod(resultType)
+                .Invoke(null, [State.BuildInfoResult]);
+        }
+
+        throw new NotSupportedException($"Unexpected database call: {targetMethod}");
+    }
+
+    public static IMongoDatabase Create(RAGCollectionState state)
+    {
+        var database = DispatchProxy.Create<IMongoDatabase, RAGDatabaseProxy>();
+        ((RAGDatabaseProxy)(object)database).State = state;
+        return database;
     }
 }
 

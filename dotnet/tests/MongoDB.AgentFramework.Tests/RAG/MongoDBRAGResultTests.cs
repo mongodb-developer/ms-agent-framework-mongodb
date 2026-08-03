@@ -114,4 +114,45 @@ public sealed class MongoDBRAGResultTests
         Assert.Equal("https://example.test/kb/1", result.SourceUrl);
         Assert.Equal(0.75, result.Score);
     }
+
+    [Fact]
+    public void ScoreDetailsDefaultsToNull()
+    {
+        var result = new MongoDBRAGResult("doc-1", "chunk text", 0.9);
+
+        Assert.Null(result.ScoreDetails);
+    }
+
+    [Fact]
+    public void PreservesScoreDetailsContent()
+    {
+        var details = new BsonDocument { { "value", 0.5 }, { "description", "rank fusion" } };
+
+        var result = new MongoDBRAGResult("doc-1", "chunk text", 0.9, scoreDetails: details);
+
+        Assert.Equal(details, result.ScoreDetails);
+    }
+
+    [Fact]
+    public void ScoreDetailsIsImmutableAgainstLaterMutationOfTheSourceDocument()
+    {
+        var details = new BsonDocument { { "value", 0.5 } };
+        var result = new MongoDBRAGResult("doc-1", "chunk text", 0.9, scoreDetails: details);
+
+        details.Add("mutated_after_construction", true);
+
+        Assert.False(result.ScoreDetails!.Contains("mutated_after_construction"));
+    }
+
+    [Fact]
+    public void ScoreDetailsGetterReturnsIndependentSnapshotOnEachAccess()
+    {
+        var details = new BsonDocument { { "value", 0.5 } };
+        var result = new MongoDBRAGResult("doc-1", "chunk text", 0.9, scoreDetails: details);
+
+        BsonDocument firstRead = result.ScoreDetails!;
+        firstRead["mutated_via_getter"] = true;
+
+        Assert.False(result.ScoreDetails!.Contains("mutated_via_getter"));
+    }
 }
