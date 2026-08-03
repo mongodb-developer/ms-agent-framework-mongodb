@@ -40,8 +40,12 @@ def test_session_store_contract_matches_public_surface() -> None:
         for item in contract["concurrency_cases"]
     ] == [
         ("create", "stored", 1),
+        ("create", "idempotent", 1),
+        ("create", "conflict", None),
         ("create", "conflict", None),
         ("compare_and_set", "stored", 2),
+        ("compare_and_set", "idempotent", 2),
+        ("compare_and_set", "conflict", None),
         ("compare_and_set", "conflict", None),
         ("compare_and_delete", "deleted", None),
     ]

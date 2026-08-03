@@ -27,8 +27,11 @@ The additional concurrency surface is:
 - `compare_and_set(..., expected_version=...)` returns the winning version; and
 - `compare_and_delete(..., expected_version=...)` returns whether it deleted.
 
-Identical create/update retries return the stored version. Different create
-payloads, stale updates, and stale deletes raise `MongoDBConcurrencyError`.
+An identical create retry returns version 1 only while the stored document is
+still version 1. An identical compare-and-set retry returns only
+`expected_version + 1`; matching payload at any later version is still stale.
+Different create payloads, stale updates, and stale deletes raise
+`MongoDBConcurrencyError`.
 Unconditional `set()` resolves bounded CAS races rather than issuing a
 last-writer update that could silently lose a concurrent write. Unconditional
 `delete()` remains idempotent.
@@ -78,8 +81,9 @@ physical collection interoperability is not claimed.
 Updates replace the complete document only when the scoped current version
 matches. `created_at` is stable, `updated_at` advances, and versions are positive
 monotonic integers. `expires_at` must be future, timezone-aware input and is
-normalized to UTC. `options.ttl` supplies a default expiration independently
-from Memory and Chat History.
+normalized to UTC. PyMongo's default timezone-naive BSON datetimes are restored
+as UTC; non-datetime values remain invalid. `options.ttl` only computes a
+default `expires_at` independently from Memory and Chat History.
 
 ## Explicit regular indexes
 
@@ -93,11 +97,13 @@ opaque session IDs retain case-sensitive identity under any collection default.
 | --- | --- | --- |
 | `session_store_scope_identity` | `scope_discriminator`, `session_id` | unique |
 | `session_store_scope_version` | `scope_discriminator`, `session_id`, `version` | regular |
-| `session_store_expiration` | `expires_at` | optional, `expireAfterSeconds: 0` |
+| `session_store_expiration` | `expires_at` | required, `expireAfterSeconds: 0` |
 
-The expiration index is required by validation and created only when `ttl` is
-configured. MongoDB TTL deletion is asynchronous, so applications must not
-depend on immediate physical deletion at the expiration instant.
+The expiration index is always created and required by validation because
+`create()` and `compare_and_set()` permit per-record expiration even when no
+default `ttl` is configured. MongoDB TTL deletion is asynchronous, so
+applications must not depend on immediate physical deletion at the expiration
+instant.
 
 Runtime privileges are find, insert, replace/update, and targeted delete on the
 session collection. Index provisioning additionally requires `createIndex`;

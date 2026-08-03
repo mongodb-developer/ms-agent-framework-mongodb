@@ -37,7 +37,7 @@
       "name": "session_store_expiration",
       "keys": [["expires_at", 1]],
       "expire_after_seconds": 0,
-      "optional": true
+      "required": true
     }
   ],
   "concurrency_cases": [
@@ -52,6 +52,23 @@
       "operation": "create",
       "existing_version": 1,
       "expected_version": null,
+      "payload_matches": true,
+      "outcome": "idempotent",
+      "new_version": 1
+    },
+    {
+      "operation": "create",
+      "existing_version": 2,
+      "expected_version": null,
+      "payload_matches": true,
+      "outcome": "conflict",
+      "new_version": null
+    },
+    {
+      "operation": "create",
+      "existing_version": 1,
+      "expected_version": null,
+      "payload_matches": false,
       "outcome": "conflict",
       "new_version": null
     },
@@ -59,6 +76,7 @@
       "operation": "compare_and_set",
       "existing_version": 1,
       "expected_version": 1,
+      "payload_matches": false,
       "outcome": "stored",
       "new_version": 2
     },
@@ -66,6 +84,23 @@
       "operation": "compare_and_set",
       "existing_version": 2,
       "expected_version": 1,
+      "payload_matches": true,
+      "outcome": "idempotent",
+      "new_version": 2
+    },
+    {
+      "operation": "compare_and_set",
+      "existing_version": 3,
+      "expected_version": 1,
+      "payload_matches": true,
+      "outcome": "conflict",
+      "new_version": null
+    },
+    {
+      "operation": "compare_and_set",
+      "existing_version": 2,
+      "expected_version": 1,
+      "payload_matches": false,
       "outcome": "conflict",
       "new_version": null
     },

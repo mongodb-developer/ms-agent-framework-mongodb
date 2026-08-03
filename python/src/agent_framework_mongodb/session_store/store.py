@@ -220,7 +220,7 @@ class MongoDBSessionStore(SessionStore):
             existing = await self._read_after_conflict(scope)
             if existing is not None:
                 _validate_versions(existing)
-                if _same_snapshot(
+                if _document_version(existing) == 1 and _same_snapshot(
                     existing,
                     payload_hash,
                     effective_expiry,
@@ -256,14 +256,15 @@ class MongoDBSessionStore(SessionStore):
             )
         _validate_versions(existing)
         effective_expiry = self._expiration(expires_at, datetime.now(timezone.utc))
-        if _document_version(existing) != expected_version:
-            if _same_snapshot(
+        existing_version = _document_version(existing)
+        if existing_version != expected_version:
+            if existing_version == expected_version + 1 and _same_snapshot(
                 existing,
                 payload_hash,
                 effective_expiry,
                 expiration_was_explicit=expires_at is not None,
             ):
-                return _document_version(existing)
+                return existing_version
             raise MongoDBConcurrencyError(
                 f"Session {session_id!r} is not at expected version {expected_version}."
             )
@@ -294,13 +295,16 @@ class MongoDBSessionStore(SessionStore):
             _log_success("persist", started, 1)
             return expected_version + 1
         winner = await self._read_after_conflict(scope)
-        if winner is not None and _same_snapshot(
-            winner,
-            payload_hash,
-            effective_expiry,
-            expiration_was_explicit=expires_at is not None,
-        ):
-            return _document_version(winner)
+        if winner is not None:
+            _validate_versions(winner)
+            winner_version = _document_version(winner)
+            if winner_version == expected_version + 1 and _same_snapshot(
+                winner,
+                payload_hash,
+                effective_expiry,
+                expiration_was_explicit=expires_at is not None,
+            ):
+                return winner_version
         raise MongoDBConcurrencyError(
             f"Session {session_id!r} changed from expected version {expected_version}."
         )
@@ -351,7 +355,7 @@ class MongoDBSessionStore(SessionStore):
         return now + self.options.ttl if self.options.ttl is not None else None
 
     async def ensure_indexes(self) -> tuple[str, ...]:
-        """Explicitly create regular scope, version, and configured TTL indexes."""
+        """Explicitly create regular scope, version, and expiration indexes."""
         partial = {
             "_kind": "agent_session",
             "scope_discriminator": {"$type": "string"},
@@ -379,17 +383,16 @@ class MongoDBSessionStore(SessionStore):
                 },
             ),
         ]
-        if self.options.ttl is not None:
-            definitions.append(
-                (
-                    [("expires_at", ASCENDING)],
-                    {
-                        "name": "session_store_expiration",
-                        "expireAfterSeconds": 0,
-                        "partialFilterExpression": partial,
-                    },
-                )
+        definitions.append(
+            (
+                [("expires_at", ASCENDING)],
+                {
+                    "name": "session_store_expiration",
+                    "expireAfterSeconds": 0,
+                    "partialFilterExpression": partial,
+                },
             )
+        )
         try:
             return tuple(
                 [await self.collection.create_index(keys, **kwargs) for keys, kwargs in definitions]
@@ -423,8 +426,7 @@ class MongoDBSessionStore(SessionStore):
                 None,
             ),
         }
-        if self.options.ttl is not None:
-            required["session_store_expiration"] = ((("expires_at", 1),), False, 0)
+        required["session_store_expiration"] = ((("expires_at", 1),), False, 0)
         for name, (keys, unique, expire_after) in required.items():
             index = by_name.get(name)
             if index is None:
@@ -499,15 +501,7 @@ def _restore(document: MongoDocument) -> MongoDBVersionedSession:
         raise MongoDBMappingError(
             "Stored AgentSession payload is invalid; migrate or delete the authorized snapshot."
         )
-    expires_at = document.get("expires_at")
-    if expires_at is not None and (
-        not isinstance(expires_at, datetime)
-        or expires_at.tzinfo is None
-        or expires_at.utcoffset() is None
-    ):
-        raise MongoDBMappingError(
-            "Stored Session Store expires_at is invalid; migrate the authorized snapshot."
-        )
+    expires_at = _stored_expiration(document)
     try:
         session = AgentSession.from_dict(cast(MongoDocument, payload))
     except (KeyError, TypeError, ValueError) as exc:
@@ -518,7 +512,7 @@ def _restore(document: MongoDocument) -> MongoDBVersionedSession:
     return MongoDBVersionedSession(
         session=session,
         version=version,
-        expires_at=expires_at.astimezone(timezone.utc) if expires_at is not None else None,
+        expires_at=expires_at,
     )
 
 
@@ -546,7 +540,20 @@ def _same_snapshot(
 ) -> bool:
     if document.get("payload_hash") != payload_hash:
         return False
-    return not expiration_was_explicit or document.get("expires_at") == expires_at
+    return not expiration_was_explicit or _stored_expiration(document) == expires_at
+
+
+def _stored_expiration(document: MongoDocument) -> datetime | None:
+    value = document.get("expires_at")
+    if value is None:
+        return None
+    if not isinstance(value, datetime):
+        raise MongoDBMappingError(
+            "Stored Session Store expires_at is invalid; migrate the authorized snapshot."
+        )
+    if value.tzinfo is None or value.utcoffset() is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 def _validate_versions(document: MongoDocument) -> None:

@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import pytest
 from agent_framework import AgentSession, SessionStore, register_state_type
+from bson import BSON
 from pymongo import ASCENDING
 from pymongo.errors import ConnectionFailure, DuplicateKeyError
 
@@ -111,6 +112,25 @@ class FakeCollection:
         return FakeIndexCursor(copy.deepcopy(self.regular_indexes))
 
 
+class ReconciliationRaceCollection(FakeCollection):
+    def __init__(self, *, winner_version: int) -> None:
+        super().__init__()
+        self.winner_version = winner_version
+
+    async def replace_one(
+        self,
+        query: dict[str, Any],
+        replacement: dict[str, Any],
+        *,
+        upsert: bool = False,
+    ) -> Result:
+        del query, upsert
+        winner = copy.deepcopy(replacement)
+        winner["version"] = self.winner_version
+        self.documents[0] = winner
+        return Result(matched_count=0)
+
+
 class FakeIndexCursor:
     def __init__(self, indexes: list[dict[str, Any]]) -> None:
         self.indexes = indexes
@@ -210,6 +230,61 @@ async def test_create_and_compare_and_set_are_idempotent_and_detect_conflicts() 
 
 
 @pytest.mark.asyncio
+async def test_compare_and_set_retries_only_the_immediately_following_version() -> None:
+    store = MongoDBSessionStore(cast(Any, FakeCollection()), options=options())
+    first = AgentSession(session_id="framework-session")
+    first.state["turn"] = 1
+    second = AgentSession(session_id="framework-session")
+    second.state["turn"] = 2
+    third = AgentSession(session_id="framework-session")
+    third.state["turn"] = 3
+
+    await store.create("store-key", first)
+    await store.compare_and_set("store-key", second, expected_version=1)
+    await store.compare_and_set("store-key", third, expected_version=2)
+
+    with pytest.raises(MongoDBConcurrencyError, match="expected version 1"):
+        await store.compare_and_set("store-key", third, expected_version=1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("winner_version", "expected_outcome"),
+    [(2, "idempotent"), (3, "conflict")],
+)
+async def test_compare_and_set_post_race_reconciliation_requires_next_version(
+    winner_version: int,
+    expected_outcome: str,
+) -> None:
+    collection = ReconciliationRaceCollection(winner_version=winner_version)
+    store = MongoDBSessionStore(cast(Any, collection), options=options())
+    first = AgentSession(session_id="framework-session")
+    first.state["turn"] = 1
+    second = AgentSession(session_id="framework-session")
+    second.state["turn"] = 2
+    await store.create("store-key", first)
+
+    if expected_outcome == "idempotent":
+        assert await store.compare_and_set("store-key", second, expected_version=1) == 2
+    else:
+        with pytest.raises(MongoDBConcurrencyError, match="changed from expected version 1"):
+            await store.compare_and_set("store-key", second, expected_version=1)
+
+
+@pytest.mark.asyncio
+async def test_create_retry_conflicts_after_version_one_even_when_payload_matches() -> None:
+    store = MongoDBSessionStore(cast(Any, FakeCollection()), options=options())
+    session = AgentSession(session_id="framework-session")
+    session.state["turn"] = 1
+
+    await store.create("store-key", session)
+    assert await store.compare_and_set("store-key", session, expected_version=1) == 2
+
+    with pytest.raises(MongoDBConcurrencyError, match="already exists"):
+        await store.create("store-key", session)
+
+
+@pytest.mark.asyncio
 async def test_compare_and_delete_requires_scope_and_expected_version() -> None:
     collection = FakeCollection()
     store = MongoDBSessionStore(cast(Any, collection), options=options())
@@ -277,12 +352,34 @@ async def test_expiration_is_utc_and_versions_are_migration_gated() -> None:
 
 
 @pytest.mark.asyncio
+async def test_restore_treats_default_bson_naive_datetime_as_utc() -> None:
+    collection = FakeCollection()
+    store = MongoDBSessionStore(cast(Any, collection), options=options())
+    expires_at = datetime(2030, 1, 2, 8, 4, tzinfo=timezone.utc)
+    session = AgentSession()
+    await store.create("store-key", session, expires_at=expires_at)
+
+    bson_document = BSON.encode(collection.documents[0])
+    decoded = BSON(bson_document).decode()
+    assert decoded["expires_at"].tzinfo is None
+    collection.documents[0] = decoded
+
+    restored = await store.get_versioned("store-key")
+    assert restored is not None
+    assert restored.expires_at == expires_at
+    assert restored.expires_at is not None
+    assert restored.expires_at.tzinfo is timezone.utc
+    assert await store.create("store-key", session, expires_at=expires_at) == 1
+
+    collection.documents[0]["expires_at"] = "not-a-datetime"
+    with pytest.raises(MongoDBMappingError, match="expires_at is invalid"):
+        await store.get_versioned("store-key")
+
+
+@pytest.mark.asyncio
 async def test_regular_index_provisioning_is_explicit_and_includes_ttl() -> None:
     collection = FakeCollection()
-    store = MongoDBSessionStore(
-        cast(Any, collection),
-        options=options(ttl=timedelta(days=7)),
-    )
+    store = MongoDBSessionStore(cast(Any, collection), options=options())
 
     assert collection.created_indexes == []
     assert await store.ensure_indexes() == (
