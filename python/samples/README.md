@@ -18,6 +18,12 @@ read-only retrieval, index provisioning, and sample ingestion.
 | `rag_vector_quickstart.py` | vector ANN RAG | explicit index ensure only | no document cleanup |
 | `rag_full_text_quickstart.py` | full-text RAG | explicit index ensure only | no document cleanup |
 | `rag_hybrid_quickstart.py` | native hybrid RRF | explicit index ensures only | no document cleanup |
+| `rag_parent_document.py` | bounded parent hydration | read-only retrieval | no document cleanup |
+| `on_demand_retrieval_tool.py` | query-text-only framework tool | read-only retrieval | no document cleanup |
+| `workflow_retrieval.py` | deterministic workflow retrieval step | read-only retrieval | no document cleanup |
+| `memory_and_rag.py` | one model-free fixture agent with separate Memory and RAG | scoped Memory persistence; read-only RAG | use a unique Memory user scope; no collection cleanup |
+| `structured_metadata_retrieval.py` | typed structured query plan | read-only retrieval | no document cleanup |
+| `document_loader.py` | bounded ingestion-neutral source mapping | read-only source access | no cleanup |
 | `index_provisioning.py` | provisioner-only indexes | creates/updates Search indexes with `--apply` | explicit administrative cleanup only |
 | `session_persistence.py` | complete Session Store | scoped session and indexes | targeted delete unless `--keep` |
 | `workflow_checkpoint_resume.py` | resumable checkpoints | scoped checkpoints/counter and indexes | targeted run clear unless `--keep` |
@@ -124,6 +130,105 @@ python samples\index_provisioning.py --apply --vector-dimensions 1536
 Without `--apply` the command exits before mutation. Expected output names each
 index and its ready state. Run only with an index-provisioning identity.
 Dropping indexes or collections is intentionally not automated.
+
+## Parent-document RAG
+
+`rag_parent_document.py` searches authorized child records and hydrates at most
+three parents with bounded fan-out and context tokens. Set `MONGODB_URI`,
+`MONGODB_DATABASE`, `MONGODB_RAG_COLLECTION`, `MONGODB_RAG_VECTOR_INDEX`, and
+`MONGODB_RAG_TENANT`. The three-dimensional Vector Search index must map
+`embedding`, `tenant_id`, and `record_type`; child records use
+`record_type="child"` and `parent_id`, while parent records use `_id` and
+`content`.
+
+```powershell
+python samples\rag_parent_document.py
+```
+
+Expected output is parent score, source/id, and hydrated parent text. Validation
+and retrieval are read-only. The runtime identity needs index inspection,
+read/aggregate, and Vector Search query privileges.
+
+## On-demand retrieval tool
+
+`on_demand_retrieval_tool.py` creates an Agent Framework `FunctionTool` whose
+schema contains only the natural-language `query` string. Tenant policy, index,
+fields, limits, and typed filters remain application-owned. Set
+`MONGODB_URI`, `MONGODB_DATABASE`, `MONGODB_RAG_COLLECTION`,
+`MONGODB_RAG_SEARCH_INDEX`, and `MONGODB_RAG_TENANT`.
+
+```powershell
+python samples\on_demand_retrieval_tool.py
+```
+
+The model-free fixture invokes the tool directly and prints attributed results.
+It needs read-only Search privileges and performs no cleanup.
+
+## Workflow retrieval
+
+`workflow_retrieval.py` puts direct full-text retrieval in a deterministic
+Agent Framework executor; no model chooses whether or how the database is
+queried. Use the same environment and Search index contract as the on-demand
+sample.
+
+```powershell
+python samples\workflow_retrieval.py
+```
+
+Expected output is the authorized, attributed retrieval result emitted by the
+workflow. The sample is read-only and has no cleanup.
+
+## Memory and RAG
+
+`memory_and_rag.py` constructs one Agent with separate
+`MongoDBMemoryContextProvider` and `MongoDBRAGContextProvider` instances. Its
+local fixture chat client requires no model-provider account and reports the
+provider source attribution it receives. Set `MONGODB_URI`,
+`MONGODB_DATABASE`, `MONGODB_MEMORY_COLLECTION`, `MONGODB_MEMORY_USER_ID`,
+`MONGODB_RAG_COLLECTION`, `MONGODB_RAG_VECTOR_INDEX`, and
+`MONGODB_RAG_TENANT`. Both Memory and RAG Vector Search indexes must use the
+sample's three-dimensional vectors.
+
+```powershell
+python samples\memory_and_rag.py
+```
+
+RAG remains read-only. Memory may persist the fixture turn under application
+`memory-rag-sample` and the configured user, so use a unique user value and
+remove that scope through an authorized Memory cleanup operation after review.
+The sample never drops a collection or index.
+
+## Structured metadata retrieval
+
+`structured_metadata_retrieval.py` translates a closed, typed
+`RetrievalPlan` into `EqualFilter` and `InFilter`; it never accepts a BSON
+document, operator, field path, index, or pipeline from structured output. Set
+`MONGODB_URI`, `MONGODB_DATABASE`, `MONGODB_RAG_COLLECTION`,
+`MONGODB_RAG_SEARCH_INDEX`, and `MONGODB_RAG_TENANT`. The Search index must map
+`content`, `tenant_id`, `metadata.category`, and `visibility`.
+
+```powershell
+python samples\structured_metadata_retrieval.py
+```
+
+Expected output is up to three authorized security-category results. Retrieval
+is read-only and requires no cleanup.
+
+## Bounded document loader
+
+`document_loader.py` maps sample-prefixed source records into
+ingestion-neutral documents with duplicate detection, projection, simple
+binary collation, ascending keyset pagination, and bounded output. Set
+`MONGODB_URI`, `MONGODB_DATABASE`, `MONGODB_INGESTION_SOURCE_COLLECTION`, and
+a unique `MONGODB_RAG_SAMPLE_PREFIX` beginning with `sample-` or `test-`.
+
+```powershell
+python samples\document_loader.py --page-size 100 --max-documents 10
+```
+
+The source identity needs only aggregate and find access. The command prints
+mapping metadata for at most the requested number of records and performs no
+writes or cleanup.
 
 ## Workflow checkpoint resumption
 

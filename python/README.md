@@ -40,6 +40,16 @@ release-tested.
 Applications may combine providers deliberately; provider lifecycles, scopes,
 collections, and authorization remain separate.
 
+Provider-agnostic scenario fixtures cover
+[parent hydration](samples/rag_parent_document.py),
+[on-demand tools](samples/on_demand_retrieval_tool.py),
+[workflow retrieval](samples/workflow_retrieval.py),
+[Memory with RAG](samples/memory_and_rag.py),
+[structured metadata](samples/structured_metadata_retrieval.py), and the
+[bounded document loader](samples/document_loader.py). They need no external
+model-provider identity; MongoDB-backed execution still requires the documented
+deployment and least-privilege credentials.
+
 ## Environment and privileges
 
 All samples require `MONGODB_URI` (except ingestion, which uses
@@ -364,9 +374,6 @@ collection contract, least-privilege split, limits, commands, and cleanup.
 - Credentialed Search and persistence integration evidence, named publishing
   owners, the PyPI trusted-publishing environment, support/security contacts,
   and the organization signing policy remain external release blockers.
-- Required higher-level scenario samples not yet present are tracked as a 1.0
-  gate in the [release checklist](../docs/release/python-release-checklist.md).
-
 See the [developer packaging guide](../docs/development/release/python-packaging.md)
 for artifact policy, API compatibility, dependency evidence, and exact
 validation commands.

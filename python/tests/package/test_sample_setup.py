@@ -15,10 +15,16 @@ _SAMPLES = Path(__file__).resolve().parents[2] / "samples"
     [
         ("history_quickstart.py", [], "MONGODB_HISTORY_APPLICATION_ID"),
         ("memory_quickstart.py", [], "MONGODB_URI"),
+        ("memory_and_rag.py", [], "MONGODB_URI"),
+        ("document_loader.py", [], "MONGODB_URI"),
+        ("on_demand_retrieval_tool.py", [], "MONGODB_RAG_SEARCH_INDEX"),
         ("rag_full_text_quickstart.py", [], "MONGODB_RAG_SEARCH_INDEX"),
         ("rag_hybrid_quickstart.py", [], "MONGODB_RAG_VECTOR_INDEX"),
+        ("rag_parent_document.py", [], "MONGODB_RAG_VECTOR_INDEX"),
         ("rag_vector_quickstart.py", [], "MONGODB_RAG_VECTOR_INDEX"),
         ("session_persistence.py", [], "MONGODB_SESSION_ID"),
+        ("structured_metadata_retrieval.py", [], "MONGODB_RAG_SEARCH_INDEX"),
+        ("workflow_retrieval.py", [], "MONGODB_RAG_SEARCH_INDEX"),
         ("workflow_checkpoint_resume.py", [], "MONGODB_URI"),
         (
             "index_provisioning.py",
@@ -71,3 +77,19 @@ def test_sample_imports_without_credentials(sample: Path) -> None:
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_required_python_scenarios_are_present() -> None:
+    expected = {
+        "document_loader.py",
+        "incremental_ingestion.py",
+        "memory_and_rag.py",
+        "on_demand_retrieval_tool.py",
+        "rag_parent_document.py",
+        "session_persistence.py",
+        "structured_metadata_retrieval.py",
+        "workflow_checkpoint_resume.py",
+        "workflow_retrieval.py",
+    }
+
+    assert expected <= {sample.name for sample in _SAMPLES.glob("*.py")}

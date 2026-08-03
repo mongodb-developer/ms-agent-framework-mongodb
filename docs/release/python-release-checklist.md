@@ -7,8 +7,10 @@ not authorize publication.
 ## Reviewed source and metadata
 
 - [ ] Release commit is reviewed and has no unrelated changes.
-- [ ] `pyproject.toml` version is final and `python-v<version>` is an existing
-  protected tag resolving to that commit.
+- [ ] `pyproject.toml` and `api-baseline.json` contain the same reviewed release
+  version and `python-v<version>` is an existing protected tag resolving to that
+  commit. The current candidate permits only the prerelease tag
+  `python-v0.1.0.dev0`; a different release needs a reviewed version commit.
 - [ ] Distribution/import identities, README, MIT license, author, classifiers,
   dependencies, and source URL match repository facts.
 - [ ] `api-baseline.json` names the first published version and intentional API
@@ -41,9 +43,10 @@ not authorize publication.
 - [ ] Full-text Search has current deployment evidence.
 - [ ] Hybrid native RRF has MongoDB 8.0+ evidence.
 - [ ] Session Store and Workflow Checkpoint Store integration evidence passes.
-- [ ] Required parent-document, on-demand, workflow retrieval, Memory-and-RAG,
+- [ ] Parent-document, on-demand, workflow retrieval, Memory-and-RAG,
   structured metadata, loader, incremental ingestion, session, and checkpoint
-  scenarios are present and pass at their documented support level.
+  scenarios pass against the credentialed release deployment. Their
+  provider-agnostic construction and setup tests pass without credentials.
 
 ## Owner-controlled blockers
 

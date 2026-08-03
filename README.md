@@ -30,6 +30,16 @@ with the same name.
 | Session Store | complete Agent Framework session snapshots | [Session persistence](python/samples/session_persistence.py) |
 | Workflow Checkpoint Store | resumable workflow state and lineage | [Checkpoint resume](python/samples/workflow_checkpoint_resume.py) |
 
+Implementation-owned Python scenarios are also available for
+[parent-document RAG](python/samples/rag_parent_document.py),
+[on-demand retrieval](python/samples/on_demand_retrieval_tool.py),
+[workflow retrieval](python/samples/workflow_retrieval.py),
+[Memory with RAG](python/samples/memory_and_rag.py),
+[structured metadata](python/samples/structured_metadata_retrieval.py), and the
+[bounded document loader](python/samples/document_loader.py). They use local
+model-free fixtures where a model client would otherwise require an
+owner-selected provider.
+
 ## Configuration and safety
 
 Samples use `MONGODB_URI`, `MONGODB_DATABASE`, and feature-specific collection,
