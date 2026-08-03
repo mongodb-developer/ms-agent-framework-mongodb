@@ -2,6 +2,7 @@ using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
 using MongoDB.Bson;
 using System.Runtime.CompilerServices;
+using System.Text;
 using System.Text.Json;
 
 #pragma warning disable MAAI001
@@ -23,7 +24,10 @@ public sealed class MongoDBAgentSessionStoreBehaviorTests
         bag.SetValue("array", new[] { 1, 2, 3 });
         bag.SetValue(
             "unknown_future_field",
-            (object)JsonDocument.Parse("""{"kind":"future","payload":[1,"two",false,null]}""").RootElement);
+            (object)JsonDocument.Parse(
+                """
+                {"kind":"future","payload":[1,"two",false,null],"bigInt":9007199254740993,"trailingZero":1.50000}
+                """).RootElement);
 
         MongoDBAgentSessionRecord created = await store.CreateAsync(
             "session-1",
@@ -34,7 +38,14 @@ public sealed class MongoDBAgentSessionStoreBehaviorTests
         BsonDocument stored = state.Documents.Single();
         Assert.Equal(MongoDBAgentSessionStore.SchemaVersion, stored["schema_version"].AsInt32);
         Assert.Equal(1, stored["framework_version"].AsInt32);
-        Assert.IsType<BsonDocument>(stored["session"]);
+
+        // The public serializer's UTF-8 JSON bytes must be stored verbatim as BSON Binary, not re-parsed through
+        // BsonDocument (which would lossily retype/reformat unusual numeric literals). Prove byte-for-byte
+        // preservation of a bigint beyond double precision and a decimal with a trailing zero.
+        BsonBinaryData storedPayload = Assert.IsType<BsonBinaryData>(stored["session"]);
+        string storedJson = Encoding.UTF8.GetString(storedPayload.Bytes);
+        Assert.Contains("9007199254740993", storedJson, StringComparison.Ordinal);
+        Assert.Contains("1.50000", storedJson, StringComparison.Ordinal);
 
         MongoDBAgentSessionRecord? loaded = await store.GetAsync("session-1", agent);
         Assert.NotNull(loaded);
@@ -46,6 +57,8 @@ public sealed class MongoDBAgentSessionStoreBehaviorTests
         Assert.Equal("future", unknown.GetProperty("kind").GetString());
         Assert.Equal(JsonValueKind.Array, unknown.GetProperty("payload").ValueKind);
         Assert.Equal(4, unknown.GetProperty("payload").GetArrayLength());
+        Assert.Equal("9007199254740993", unknown.GetProperty("bigInt").GetRawText());
+        Assert.Equal("1.50000", unknown.GetProperty("trailingZero").GetRawText());
     }
 
     [Fact]
@@ -352,6 +365,180 @@ public sealed class MongoDBAgentSessionStoreBehaviorTests
         var store = CreateStore(state);
 
         await Assert.ThrowsAsync<MongoDBIndexMissingException>(() => store.ValidateIndexesAsync());
+    }
+
+    [Fact]
+    public async Task CreateAsyncWithIncompatibleExistingSchemaThrowsMigrationExceptionWithoutMutating()
+    {
+        var state = new SessionCollectionState();
+        var store = CreateStore(state);
+        var agent = new FakeSessionAgent();
+        await store.CreateAsync("session-17", new TestSession(), agent);
+        state.Documents[0]["schema_version"] = 999;
+        BsonDocument snapshot = state.Documents[0].DeepClone().AsBsonDocument;
+
+        await Assert.ThrowsAsync<MongoDBMappingException>(() =>
+            store.CreateAsync("session-17", new TestSession(), agent));
+
+        Assert.Single(state.Documents);
+        Assert.Equal(snapshot, state.Documents[0]);
+    }
+
+    [Fact]
+    public async Task SetAsyncUpsertWithIncompatibleExistingSchemaThrowsMigrationExceptionWithoutMutating()
+    {
+        var state = new SessionCollectionState();
+        var store = CreateStore(state);
+        var agent = new FakeSessionAgent();
+        await store.CreateAsync("session-18", new TestSession(), agent);
+        state.Documents[0]["schema_version"] = 999;
+        BsonDocument snapshot = state.Documents[0].DeepClone().AsBsonDocument;
+
+        await Assert.ThrowsAsync<MongoDBMappingException>(() =>
+            store.SetAsync("session-18", new TestSession(), agent));
+
+        Assert.Single(state.Documents);
+        Assert.Equal(snapshot, state.Documents[0]);
+    }
+
+    [Fact]
+    public async Task SetAsyncWithExpectedVersionAndIncompatibleExistingSchemaThrowsMigrationExceptionWithoutMutating()
+    {
+        var state = new SessionCollectionState();
+        var store = CreateStore(state);
+        var agent = new FakeSessionAgent();
+        MongoDBAgentSessionRecord created = await store.CreateAsync("session-19", new TestSession(), agent);
+        state.Documents[0]["framework_version"] = 999;
+        BsonDocument snapshot = state.Documents[0].DeepClone().AsBsonDocument;
+
+        await Assert.ThrowsAsync<MongoDBMappingException>(() =>
+            store.SetAsync("session-19", new TestSession(), agent, expectedVersion: created.Version));
+
+        Assert.Single(state.Documents);
+        Assert.Equal(snapshot, state.Documents[0]);
+    }
+
+    [Fact]
+    public async Task DeleteAsyncWithIncompatibleExistingSchemaThrowsMigrationExceptionWithoutMutating()
+    {
+        var state = new SessionCollectionState();
+        var store = CreateStore(state);
+        var agent = new FakeSessionAgent();
+        await store.CreateAsync("session-20", new TestSession(), agent);
+        state.Documents[0]["schema_version"] = 999;
+        BsonDocument snapshot = state.Documents[0].DeepClone().AsBsonDocument;
+
+        await Assert.ThrowsAsync<MongoDBMappingException>(() => store.DeleteAsync("session-20"));
+        Assert.Single(state.Documents);
+        Assert.Equal(snapshot, state.Documents[0]);
+
+        // The migration check must fire before any CAS-version comparison too -- an incompatible document is
+        // never safely deletable regardless of whether the caller supplied an expectedVersion.
+        await Assert.ThrowsAsync<MongoDBMappingException>(() =>
+            store.DeleteAsync("session-20", expectedVersion: "1"));
+        Assert.Single(state.Documents);
+        Assert.Equal(snapshot, state.Documents[0]);
+    }
+
+    [Fact]
+    public async Task CreateWithIdenticalContentButDifferentExpiryConflicts()
+    {
+        var state = new SessionCollectionState();
+        var store = CreateStore(state);
+        var agent = new FakeSessionAgent();
+        var bag = new AgentSessionStateBag();
+        bag.SetValue("value", "same");
+
+        await store.CreateAsync(
+            "session-21", new TestSession(bag), agent, expiresAt: DateTimeOffset.UtcNow.AddHours(1));
+
+        // Identical content alone must not converge a retry: a different intended expiry is a genuine conflict,
+        // not a duplicate retry of the same logical write.
+        await Assert.ThrowsAsync<MongoDBConcurrencyException>(() =>
+            store.CreateAsync(
+                "session-21", new TestSession(bag), agent, expiresAt: DateTimeOffset.UtcNow.AddHours(2)));
+    }
+
+    [Fact]
+    public async Task SetAsyncRetryWithSameContentButDifferentExpiryConflicts()
+    {
+        var state = new SessionCollectionState();
+        var store = CreateStore(state);
+        var agent = new FakeSessionAgent();
+        var bag = new AgentSessionStateBag();
+        bag.SetValue("value", "converge");
+        MongoDBAgentSessionRecord created = await store.CreateAsync("session-22", new TestSession(bag), agent);
+
+        await store.SetAsync(
+            "session-22",
+            new TestSession(bag),
+            agent,
+            expectedVersion: created.Version,
+            expiresAt: DateTimeOffset.UtcNow.AddHours(1));
+
+        await Assert.ThrowsAsync<MongoDBConcurrencyException>(() =>
+            store.SetAsync(
+                "session-22",
+                new TestSession(bag),
+                agent,
+                expectedVersion: created.Version,
+                expiresAt: DateTimeOffset.UtcNow.AddHours(2)));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData(" ")]
+    [InlineData("\t")]
+    [InlineData(null)]
+    public async Task WhitespaceOnlyOrNullSessionIdIsRejected(string? sessionId)
+    {
+        var state = new SessionCollectionState();
+        var store = CreateStore(state);
+        var agent = new FakeSessionAgent();
+
+        await Assert.ThrowsAsync<MongoDBConfigurationException>(() =>
+            store.CreateAsync(sessionId!, new TestSession(), agent));
+    }
+
+    [Fact]
+    public async Task LeadingAndTrailingWhitespaceSessionIdsAreDistinctAndReachable()
+    {
+        var state = new SessionCollectionState();
+        var store = CreateStore(state);
+        var agent = new FakeSessionAgent();
+
+        await store.CreateAsync(" session-23", new TestSession(), agent);
+        await store.CreateAsync("session-23 ", new TestSession(), agent);
+        await store.CreateAsync("session-23", new TestSession(), agent);
+
+        Assert.Equal(3, state.Documents.Count);
+        MongoDBAgentSessionRecord? leading = await store.GetAsync(" session-23", agent);
+        MongoDBAgentSessionRecord? trailing = await store.GetAsync("session-23 ", agent);
+        MongoDBAgentSessionRecord? plain = await store.GetAsync("session-23", agent);
+
+        Assert.NotNull(leading);
+        Assert.NotNull(trailing);
+        Assert.NotNull(plain);
+        Assert.Equal(" session-23", leading!.SessionId);
+        Assert.Equal("session-23 ", trailing!.SessionId);
+        Assert.Equal("session-23", plain!.SessionId);
+    }
+
+    [Fact]
+    public async Task ListAsyncExcludesExpiredSessions()
+    {
+        var state = new SessionCollectionState();
+        var store = CreateStore(state);
+        var agent = new FakeSessionAgent();
+        await store.CreateAsync("session-24", new TestSession(), agent);
+        await store.CreateAsync(
+            "session-25", new TestSession(), agent, expiresAt: DateTimeOffset.UtcNow.AddHours(1));
+        await store.CreateAsync(
+            "session-26", new TestSession(), agent, expiresAt: DateTimeOffset.UtcNow.AddHours(-1));
+
+        MongoDBAgentSessionPage page = await store.ListAsync(10);
+
+        Assert.Equal(["session-24", "session-25"], page.Items.Select(item => item.SessionId));
     }
 
     private static MongoDBAgentSessionStore CreateStore(

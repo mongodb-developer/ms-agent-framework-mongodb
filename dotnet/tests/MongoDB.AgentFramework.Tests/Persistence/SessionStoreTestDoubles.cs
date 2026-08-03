@@ -156,15 +156,32 @@ internal class SessionCollectionProxy : DispatchProxy
                     return null;
                 }
 
-                document = new BsonDocument();
+                var candidate = new BsonDocument();
                 foreach (BsonElement element in filter)
                 {
+                    if (element.Name is "$and" or "$or")
+                    {
+                        continue;
+                    }
+
                     if (element.Value is not BsonDocument)
                     {
-                        document[element.Name] = element.Value;
+                        candidate[element.Name] = element.Value;
                     }
                 }
 
+                // Mirror real MongoDB: an upsert that would insert at an already-used _id fails with a
+                // duplicate-key error rather than silently creating a second document at the same identity, even
+                // when the filter's non-_id predicates (e.g. schema/framework-version equality) did not match
+                // any existing document.
+                if (candidate.TryGetValue("_id", out BsonValue candidateId) &&
+                    State.Documents.Any(item =>
+                        item.TryGetValue("_id", out BsonValue existingId) && existingId == candidateId))
+                {
+                    throw DuplicateKeyException();
+                }
+
+                document = candidate;
                 State.Documents.Add(document);
             }
 
@@ -257,6 +274,26 @@ internal class SessionCollectionProxy : DispatchProxy
     {
         foreach (BsonElement element in filter)
         {
+            if (element.Name == "$and")
+            {
+                if (element.Value.AsBsonArray.Any(sub => !Matches(document, sub.AsBsonDocument)))
+                {
+                    return false;
+                }
+
+                continue;
+            }
+
+            if (element.Name == "$or")
+            {
+                if (!element.Value.AsBsonArray.Any(sub => Matches(document, sub.AsBsonDocument)))
+                {
+                    return false;
+                }
+
+                continue;
+            }
+
             BsonValue actual = document.TryGetValue(element.Name, out BsonValue value) ? value : BsonNull.Value;
             if (element.Value is BsonDocument operation)
             {

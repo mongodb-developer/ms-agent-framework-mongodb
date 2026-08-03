@@ -303,7 +303,7 @@ public sealed class MongoDBAgentSessionStore : IAsyncDisposable
         return await WithDeadlineAsync(
             async token =>
             {
-                BsonDocument payload = await SerializePayloadAsync(codec, session, token)
+                BsonBinaryData payload = await SerializePayloadAsync(codec, session, token)
                     .ConfigureAwait(false);
                 DateTimeOffset now = DateTimeOffset.UtcNow;
                 DateTimeOffset? effectiveExpiresAt = expiresAt ?? DefaultExpiresAt(now);
@@ -333,7 +333,12 @@ public sealed class MongoDBAgentSessionStore : IAsyncDisposable
                 {
                     BsonDocument? existing = await FindOneAsync(IdentityFilter(scope), token)
                         .ConfigureAwait(false);
-                    if (existing is not null && ContentEquals(existing, payload))
+                    if (existing is not null && !HasCompatibleSchema(existing))
+                    {
+                        throw IncompatibleSchemaException();
+                    }
+
+                    if (existing is not null && ContentEquals(existing, payload, effectiveExpiresAt))
                     {
                         return await ToRecordAsync(existing, codec, token).ConfigureAwait(false);
                     }
@@ -375,11 +380,13 @@ public sealed class MongoDBAgentSessionStore : IAsyncDisposable
         return await WithDeadlineAsync(
             async token =>
             {
-                BsonDocument payload = await SerializePayloadAsync(codec, session, token)
+                BsonBinaryData payload = await SerializePayloadAsync(codec, session, token)
                     .ConfigureAwait(false);
                 DateTimeOffset now = DateTimeOffset.UtcNow;
                 DateTimeOffset? effectiveExpiresAt = expiresAt ?? DefaultExpiresAt(now);
-                FilterDefinition<BsonDocument> filter = IdentityFilter(scope);
+                FilterDefinition<BsonDocument> filter = IdentityFilter(scope) &
+                    Builders<BsonDocument>.Filter.Eq("schema_version", SchemaVersion) &
+                    Builders<BsonDocument>.Filter.Eq("framework_version", FrameworkSerializationVersion);
                 if (parsedExpectedVersion is { } expected)
                 {
                     filter &= Builders<BsonDocument>.Filter.Eq("version", expected);
@@ -401,21 +408,45 @@ public sealed class MongoDBAgentSessionStore : IAsyncDisposable
                     .SetOnInsert("application_id", scope["application_id"])
                     .SetOnInsert("agent_id", scope["agent_id"])
                     .SetOnInsert("user_id", scope["user_id"]);
-                BsonDocument? result = await _collection.FindOneAndUpdateAsync(
-                    filter,
-                    update,
-                    new FindOneAndUpdateOptions<BsonDocument, BsonDocument>
+                bool isUpsert = parsedExpectedVersion is null;
+                BsonDocument? result;
+                try
+                {
+                    result = await _collection.FindOneAndUpdateAsync(
+                        filter,
+                        update,
+                        new FindOneAndUpdateOptions<BsonDocument, BsonDocument>
+                        {
+                            IsUpsert = isUpsert,
+                            ReturnDocument = ReturnDocument.After,
+                        },
+                        token).ConfigureAwait(false);
+                }
+                catch (MongoException exception) when (isUpsert && IsDuplicateKey(exception))
+                {
+                    // The schema/framework-version-scoped filter above never matches an incompatible existing
+                    // document, so an unconditional (no expected version) upsert attempted to insert a new
+                    // document at the same deterministic _id and collided with it. The failed insert did not
+                    // mutate the existing document; detect and reject the incompatibility read-only rather than
+                    // reinterpreting it.
+                    BsonDocument? incompatible = await FindOneAsync(IdentityFilter(scope), token)
+                        .ConfigureAwait(false);
+                    if (incompatible is not null && !HasCompatibleSchema(incompatible))
                     {
-                        IsUpsert = parsedExpectedVersion is null,
-                        ReturnDocument = ReturnDocument.After,
-                    },
-                    token).ConfigureAwait(false);
+                        throw IncompatibleSchemaException();
+                    }
+
+                    throw;
+                }
+
                 if (result is not null)
                 {
                     return await ToRecordAsync(result, codec, token).ConfigureAwait(false);
                 }
 
-                // Only reachable when a specific expected version was required and no document matched it.
+                // Only reachable when a specific expected version was required and no document matched (either
+                // because none exists, because its version differs, or because its schema/framework markers are
+                // incompatible and were therefore excluded by the filter above without being mutated).
                 BsonDocument? existing = await FindOneAsync(IdentityFilter(scope), token)
                     .ConfigureAwait(false);
                 if (existing is null)
@@ -425,8 +456,13 @@ public sealed class MongoDBAgentSessionStore : IAsyncDisposable
                         "Use CreateAsync, or SetAsync without an expected version, to create it.");
                 }
 
+                if (!HasCompatibleSchema(existing))
+                {
+                    throw IncompatibleSchemaException();
+                }
+
                 if (existing["version"].ToInt64() == parsedExpectedVersion!.Value + 1 &&
-                    ContentEquals(existing, payload))
+                    ContentEquals(existing, payload, effectiveExpiresAt))
                 {
                     // The exact write already succeeded on a prior, unacknowledged attempt: converge.
                     return await ToRecordAsync(existing, codec, token).ConfigureAwait(false);
@@ -458,7 +494,9 @@ public sealed class MongoDBAgentSessionStore : IAsyncDisposable
         return await WithDeadlineAsync(
             async token =>
             {
-                FilterDefinition<BsonDocument> filter = IdentityFilter(scope);
+                FilterDefinition<BsonDocument> filter = IdentityFilter(scope) &
+                    Builders<BsonDocument>.Filter.Eq("schema_version", SchemaVersion) &
+                    Builders<BsonDocument>.Filter.Eq("framework_version", FrameworkSerializationVersion);
                 if (parsedExpectedVersion is { } expected)
                 {
                     filter &= Builders<BsonDocument>.Filter.Eq("version", expected);
@@ -477,17 +515,22 @@ public sealed class MongoDBAgentSessionStore : IAsyncDisposable
                     return true;
                 }
 
-                if (parsedExpectedVersion is not null)
+                // Nothing matched the schema/framework-scoped filter above: distinguish not-found from an
+                // incompatible document (rejected read-only, without mutation, regardless of whether an expected
+                // version was supplied) from a genuine compare-and-swap conflict.
+                BsonDocument? existing = await FindOneAsync(IdentityFilter(scope), token)
+                    .ConfigureAwait(false);
+                if (existing is not null && !HasCompatibleSchema(existing))
                 {
-                    BsonDocument? existing = await FindOneAsync(IdentityFilter(scope), token)
-                        .ConfigureAwait(false);
-                    if (existing is not null)
-                    {
-                        throw new MongoDBConcurrencyException(
-                            $"Expected version '{expectedVersion}' does not match the stored version " +
-                            $"'{existing["version"].ToInt64().ToString(CultureInfo.InvariantCulture)}'. " +
-                            "Reload the current session and retry the deletion.");
-                    }
+                    throw IncompatibleSchemaException();
+                }
+
+                if (parsedExpectedVersion is not null && existing is not null)
+                {
+                    throw new MongoDBConcurrencyException(
+                        $"Expected version '{expectedVersion}' does not match the stored version " +
+                        $"'{existing["version"].ToInt64().ToString(CultureInfo.InvariantCulture)}'. " +
+                        "Reload the current session and retry the deletion.");
                 }
 
                 return false;
@@ -517,7 +560,7 @@ public sealed class MongoDBAgentSessionStore : IAsyncDisposable
             {
                 try
                 {
-                    FilterDefinition<BsonDocument> filter = ScopeFilter(IsolationScope());
+                    FilterDefinition<BsonDocument> filter = ScopeFilter(IsolationScope()) & NotExpiredFilter();
                     if (!string.IsNullOrEmpty(continuationToken))
                     {
                         filter &= Builders<BsonDocument>.Filter.Gt("session_id", continuationToken);
@@ -689,6 +732,9 @@ public sealed class MongoDBAgentSessionStore : IAsyncDisposable
 
     private BsonDocument Scope(string sessionId)
     {
+        // sessionId is opaque and must not be trimmed: it is only required to be non-null and not
+        // whitespace-only (enforced by RequireText). Leading/trailing whitespace is significant and must remain
+        // distinct and independently reachable, e.g. " session-1" and "session-1 " are different sessions.
         MongoDBAgentSessionStoreOptions.RequireText(sessionId, nameof(sessionId));
         BsonDocument dimensions = IsolationScope();
         return new BsonDocument
@@ -701,7 +747,7 @@ public sealed class MongoDBAgentSessionStore : IAsyncDisposable
             { "application_id", dimensions["application_id"] },
             { "agent_id", dimensions["agent_id"] },
             { "user_id", dimensions["user_id"] },
-            { "session_id", sessionId.Trim() },
+            { "session_id", sessionId },
         };
     }
 
@@ -715,6 +761,15 @@ public sealed class MongoDBAgentSessionStore : IAsyncDisposable
         Builders<BsonDocument>.Filter.Eq("_id", ScopedId(scope, scope["session_id"].AsString)) &
         ScopeFilter(scope) &
         Builders<BsonDocument>.Filter.Eq("session_id", scope["session_id"]);
+
+    /// <summary>
+    /// A document is not expired when it has no expiration (<c>expires_at</c> is null) or its expiration is
+    /// still in the future. Applied to <see cref="ListAsync"/> so administrative enumeration never surfaces a
+    /// session that is logically expired but has not yet been reaped by the TTL index.
+    /// </summary>
+    private static FilterDefinition<BsonDocument> NotExpiredFilter() =>
+        Builders<BsonDocument>.Filter.Eq("expires_at", BsonNull.Value) |
+        Builders<BsonDocument>.Filter.Gt("expires_at", DateTime.UtcNow);
 
     private DateTimeOffset? DefaultExpiresAt(DateTimeOffset now) =>
         _options.DefaultExpiration is { } defaultExpiration ? now + defaultExpiration : null;
@@ -732,7 +787,7 @@ public sealed class MongoDBAgentSessionStore : IAsyncDisposable
             : null;
     }
 
-    private static async Task<BsonDocument> SerializePayloadAsync(
+    private static async Task<BsonBinaryData> SerializePayloadAsync(
         IAgentSessionCodec codec,
         AgentSession session,
         CancellationToken cancellationToken)
@@ -747,7 +802,13 @@ public sealed class MongoDBAgentSessionStore : IAsyncDisposable
 
         try
         {
-            return BsonDocument.Parse(element.GetRawText());
+            // The public serializer's UTF-8 JSON bytes are persisted verbatim as BSON Binary rather than parsed
+            // into a BsonDocument: BsonDocument.Parse retypes JSON numeric literals through BSON's native numeric
+            // types (int32/int64/double/decimal128) using heuristics, which is lossy for unknown numeric shapes
+            // (large integers, trailing-zero decimals, etc.). Storing the exact bytes and reversing with
+            // JsonDocument.Parse on read guarantees byte-for-byte round-tripping of unknown content.
+            byte[] bytes = Encoding.UTF8.GetBytes(element.GetRawText());
+            return new BsonBinaryData(bytes, BsonBinarySubType.Binary);
         }
         catch (Exception exception) when (exception is FormatException or JsonException)
         {
@@ -795,52 +856,97 @@ public sealed class MongoDBAgentSessionStore : IAsyncDisposable
 
     private static void ValidateSchemaVersion(BsonDocument document)
     {
-        if (!document.TryGetValue("schema_version", out BsonValue schema) ||
-            !schema.IsInt32 ||
-            schema.AsInt32 != SchemaVersion)
+        if (!HasCompatibleSchema(document))
         {
-            throw new MongoDBMappingException(
-                "Unsupported Session Store schema version; run a supported migration before loading this " +
-                "session.");
-        }
-
-        if (!document.TryGetValue("framework_version", out BsonValue framework) ||
-            !framework.IsInt32 ||
-            framework.AsInt32 != FrameworkSerializationVersion)
-        {
-            throw new MongoDBMappingException(
-                "Unsupported Session Store framework serialization version; run a supported migration before " +
-                "loading this session.");
+            throw IncompatibleSchemaException();
         }
     }
 
+    /// <summary>
+    /// Returns whether a stored document's <c>schema_version</c>/<c>framework_version</c> markers match the
+    /// versions this build understands, without throwing. Used before any mutation so an incompatible document
+    /// is detected and rejected read-only, distinct from a not-found or a genuine compare-and-swap conflict.
+    /// </summary>
+    private static bool HasCompatibleSchema(BsonDocument document) =>
+        document.TryGetValue("schema_version", out BsonValue schema) &&
+        schema.IsInt32 && schema.AsInt32 == SchemaVersion &&
+        document.TryGetValue("framework_version", out BsonValue framework) &&
+        framework.IsInt32 && framework.AsInt32 == FrameworkSerializationVersion;
+
+    /// <summary>
+    /// The exception thrown when a stored document exists at the authorized identity but its
+    /// <c>schema_version</c>/<c>framework_version</c> markers are not supported by this build. Reused by every
+    /// load and mutation path so this specific condition is always distinguishable from "not found" and from a
+    /// genuine compare-and-swap version conflict, and is never silently reinterpreted or partially mutated.
+    /// </summary>
+    private static MongoDBMappingException IncompatibleSchemaException() =>
+        new(
+            "The stored session at this authorized identity was written with an unsupported schema_version or " +
+            "framework_version for this build (expected schema_version " +
+            SchemaVersion.ToString(CultureInfo.InvariantCulture) + " and framework_version " +
+            FrameworkSerializationVersion.ToString(CultureInfo.InvariantCulture) +
+            "). No read, update, or delete was attempted against it. Follow the manual remediation in " +
+            "docs/development/persistence/dotnet-session-store-migration.md before retrying.");
+
     private static JsonElement DeserializePayloadElement(BsonDocument document)
     {
-        if (!document.TryGetValue("session", out BsonValue payload) || !payload.IsBsonDocument)
+        if (!document.TryGetValue("session", out BsonValue payload) || payload.BsonType != BsonType.Binary)
         {
             throw new MongoDBMappingException(
-                "Stored Session Store payload is invalid; migration is required.");
+                "Stored Session Store payload is invalid. Follow the manual remediation in " +
+                "docs/development/persistence/dotnet-session-store-migration.md before retrying.");
         }
 
         try
         {
-            string json = payload.AsBsonDocument.ToJson(
-                new JsonWriterSettings { OutputMode = JsonOutputMode.RelaxedExtendedJson });
-            using JsonDocument parsed = JsonDocument.Parse(json);
+            byte[] bytes = payload.AsBsonBinaryData.Bytes;
+            using JsonDocument parsed = JsonDocument.Parse(bytes);
             return parsed.RootElement.Clone();
         }
         catch (Exception exception) when (exception is JsonException or FormatException)
         {
             throw new MongoDBMappingException(
-                "Stored Session Store payload is incompatible; run a supported migration.",
+                "Stored Session Store payload is incompatible. Follow the manual remediation in " +
+                "docs/development/persistence/dotnet-session-store-migration.md before retrying.",
                 exception);
         }
     }
 
-    private static bool ContentEquals(BsonDocument existing, BsonDocument candidatePayload) =>
+    /// <summary>
+    /// Compares stored envelope state against a candidate write for idempotent-retry convergence. Both the exact
+    /// serialized session payload bytes and the normalized (millisecond-truncated) effective expiration must
+    /// match; a retry that resends identical session content but a different intended expiration is treated as a
+    /// genuine conflict rather than silently converging on whichever expiration was written first.
+    /// </summary>
+    private static bool ContentEquals(
+        BsonDocument existing,
+        BsonBinaryData candidatePayload,
+        DateTimeOffset? candidateExpiresAt) =>
         existing.TryGetValue("session", out BsonValue existingPayload) &&
-        existingPayload.IsBsonDocument &&
-        existingPayload.AsBsonDocument.Equals(candidatePayload);
+        existingPayload.BsonType == BsonType.Binary &&
+        existingPayload.AsBsonBinaryData.Bytes.AsSpan().SequenceEqual(candidatePayload.Bytes) &&
+        ExpiresAtEquals(existing, candidateExpiresAt);
+
+    private static bool ExpiresAtEquals(BsonDocument existing, DateTimeOffset? candidateExpiresAt)
+    {
+        bool existingHasExpiry = existing.TryGetValue("expires_at", out BsonValue expires) && !expires.IsBsonNull;
+        if (!existingHasExpiry)
+        {
+            return candidateExpiresAt is null;
+        }
+
+        if (candidateExpiresAt is null)
+        {
+            return false;
+        }
+
+        DateTime existingUtc = expires.ToUniversalTime();
+        DateTime candidateUtc = TruncateToMillisecond(candidateExpiresAt.Value.UtcDateTime);
+        return existingUtc == candidateUtc;
+    }
+
+    private static DateTime TruncateToMillisecond(DateTime value) =>
+        new(value.Ticks - (value.Ticks % TimeSpan.TicksPerMillisecond), value.Kind);
 
     private static long? ParseVersionOrNull(string? version)
     {
