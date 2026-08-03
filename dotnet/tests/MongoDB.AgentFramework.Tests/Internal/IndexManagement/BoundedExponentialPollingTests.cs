@@ -146,6 +146,73 @@ public sealed class BoundedExponentialPollingTests
     }
 
     [Fact]
+    public async Task RunAsync_bounds_a_truly_uncooperative_attempt_that_ignores_its_token()
+    {
+        // Unlike RunAsync_bounds_a_hung_attempt_by_the_remaining_overall_deadline above (whose attempt still
+        // observes its token via Task.Delay(_, token) and therefore self-cancels), this attempt never looks at
+        // the token it is given at all -- simulating a MongoDB call that genuinely never notices cancellation.
+        // Awaiting attempt(token) directly (the pre-fix implementation) would keep RunAsync blocked for the
+        // real, multi-second delay below regardless of `timeout`; RunAsync must still return within the
+        // configured deadline by racing the attempt against its own bound instead of trusting the callback to
+        // cooperate.
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        int attempts = 0;
+
+        InvalidOperationException exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => BoundedExponentialPolling.RunAsync<int>(
+                async _ =>
+                {
+                    Interlocked.Increment(ref attempts);
+                    await Task.Delay(TimeSpan.FromSeconds(30)).ConfigureAwait(false);
+                    return 0;
+                },
+                static _ => false,
+                exception => new InvalidOperationException("bounded timeout", exception),
+                TimeSpan.FromMilliseconds(50),
+                TimeSpan.FromMilliseconds(1),
+                TimeSpan.FromMilliseconds(50),
+                CancellationToken.None));
+
+        stopwatch.Stop();
+        Assert.IsType<TimeoutException>(exception.InnerException);
+        Assert.Equal(1, attempts);
+        Assert.True(
+            stopwatch.Elapsed < TimeSpan.FromSeconds(5),
+            $"Expected the uncooperative attempt to still be bounded by the deadline, but it took {stopwatch.Elapsed}.");
+    }
+
+    [Fact]
+    public async Task RunAsync_propagates_caller_cancellation_even_when_the_uncooperative_attempt_ignores_its_token()
+    {
+        // Distinguishes caller cancellation from a bounded timeout even when the attempt itself never observes
+        // any token: the caller's own cancellationToken firing must still surface as OperationCanceledException,
+        // never as onTimeout's exception, exactly like the cooperative case above.
+        using var cancellation = new CancellationTokenSource();
+        bool onTimeoutCalled = false;
+
+        Task<int> task = BoundedExponentialPolling.RunAsync<int>(
+            async _ =>
+            {
+                cancellation.Cancel();
+                await Task.Delay(TimeSpan.FromSeconds(30)).ConfigureAwait(false);
+                return 0;
+            },
+            static _ => false,
+            exception =>
+            {
+                onTimeoutCalled = true;
+                return new InvalidOperationException("should not be reached", exception);
+            },
+            TimeSpan.FromSeconds(30),
+            TimeSpan.FromMilliseconds(1),
+            TimeSpan.FromMilliseconds(50),
+            cancellation.Token);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => task);
+        Assert.False(onTimeoutCalled);
+    }
+
+    [Fact]
     public async Task RunAsync_rejects_a_non_positive_timeout_configuration()
     {
         await Assert.ThrowsAsync<MongoDBConfigurationException>(() => BoundedExponentialPolling.RunAsync<int>(

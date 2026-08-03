@@ -506,6 +506,35 @@ public sealed class MongoDBRAGIndexManagerTests
     }
 
     [Fact]
+    public async Task WaitUntilVectorSearchIndexReadyThreadsThePerAttemptTokenIntoEveryInspection()
+    {
+        // The private WaitUntilReadyAsync helper previously closed over the caller's own cancellationToken when
+        // building its validateReadyAsync callback instead of receiving BoundedExponentialPolling's per-attempt
+        // token, so a hung call inside ValidateVectorSearchIndexAsync's own FindAsync would not have been
+        // bounded by the per-attempt deadline. Every ListAsync call made while polling (both the one inside
+        // ValidateVectorSearchIndexAsync's RequireIndexAsync and the wait loop's own re-inspection) must
+        // therefore observe a token that is always cancellable (CanBeCanceled == true), proving it is the
+        // bounded per-attempt token and never the caller's un-cancellable default(CancellationToken).
+        BsonDocument building = RAGIndexFixtures.ValidVectorIndex("facade_vector");
+        building["status"] = "BUILDING";
+        building["queryable"] = false;
+        var state = new RAGCollectionState();
+        state.SearchIndexSnapshots.Enqueue([building]);
+        state.SearchIndexSnapshots.Enqueue([building]);
+        state.SearchIndexSnapshots.Enqueue([RAGIndexFixtures.ValidVectorIndex("facade_vector")]);
+        MongoDBRAGIndexManager manager = CreateVectorManager(state);
+
+        MongoDBIndexInfo info = await manager.WaitUntilVectorSearchIndexReadyAsync(
+            timeout: TimeSpan.FromSeconds(5),
+            pollInterval: TimeSpan.FromMilliseconds(1),
+            cancellationToken: CancellationToken.None);
+
+        Assert.Equal(MongoDBIndexStatus.Ready, info.Status);
+        Assert.True(state.SearchIndexListTokens.Count >= 4);
+        Assert.All(state.SearchIndexListTokens, token => Assert.True(token.CanBeCanceled));
+    }
+
+    [Fact]
     public async Task EnsureVectorThrowsFailedExceptionWithoutAutomaticallyRepairingIt()
     {
         BsonDocument failed = RAGIndexFixtures.ValidVectorIndex("facade_vector");

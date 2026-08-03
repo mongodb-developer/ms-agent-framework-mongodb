@@ -82,6 +82,11 @@ internal sealed class RAGCollectionState
 
     public int SearchIndexListCallCount { get; set; }
 
+    /// <summary>Records the <see cref="CancellationToken"/> passed to every ListAsync call, in call order, so a
+    /// test can prove the per-attempt bounded-polling token (rather than the caller's original token) actually
+    /// reaches this inspection.</summary>
+    public List<CancellationToken> SearchIndexListTokens { get; } = [];
+
     public MongoDB.Driver.CreateSearchIndexModel? CreatedSearchIndex { get; set; }
 
     public int CreateOneCallCount { get; set; }
@@ -233,6 +238,8 @@ internal class RAGSearchIndexManagerProxy : DispatchProxy
         if (targetMethod!.Name == "ListAsync")
         {
             State.SearchIndexListCallCount++;
+            CancellationToken token = args?.OfType<CancellationToken>().FirstOrDefault() ?? default;
+            State.SearchIndexListTokens.Add(token);
             if (State.SearchIndexListException is not null)
             {
                 return Task.FromException<IAsyncCursor<BsonDocument>>(State.SearchIndexListException);

@@ -373,7 +373,7 @@ public sealed class MongoDBRAGIndexManager : IAsyncDisposable
         MongoDBVectorSearchIndexDefinition definition = RequireVectorDefinition();
         return WaitUntilReadyAsync(
             definition.IndexName,
-            () => ValidateVectorSearchIndexAsync(true, cancellationToken),
+            token => ValidateVectorSearchIndexAsync(true, token),
             timeout,
             pollInterval,
             cancellationToken);
@@ -393,7 +393,7 @@ public sealed class MongoDBRAGIndexManager : IAsyncDisposable
         MongoDBSearchIndexDefinition definition = RequireSearchDefinition();
         return WaitUntilReadyAsync(
             definition.IndexName,
-            () => ValidateSearchIndexAsync(true, cancellationToken),
+            token => ValidateSearchIndexAsync(true, token),
             timeout,
             pollInterval,
             cancellationToken);
@@ -463,14 +463,19 @@ public sealed class MongoDBRAGIndexManager : IAsyncDisposable
 
     private Task<MongoDBIndexInfo> WaitUntilReadyAsync(
         string indexName,
-        Func<Task<MongoDBIndexComparison>> validateReadyAsync,
+        Func<CancellationToken, Task<MongoDBIndexComparison>> validateReadyAsync,
         TimeSpan? timeout,
         TimeSpan? pollInterval,
         CancellationToken cancellationToken) =>
         BoundedExponentialPolling.RunAsync(
             async token =>
             {
-                await validateReadyAsync().ConfigureAwait(false);
+                // Every inspection made by this attempt -- both the definition/status validation and the
+                // existence re-check below -- must receive the same per-attempt token BoundedExponentialPolling
+                // generates, not the outer cancellationToken closed over by the caller: only the per-attempt
+                // token is bounded by the remaining monotonic deadline, so a hung underlying MongoDB call inside
+                // validateReadyAsync itself would otherwise not be bounded by that deadline at all.
+                await validateReadyAsync(token).ConfigureAwait(false);
                 BsonDocument index = await RequireIndexAsync(indexName, token).ConfigureAwait(false);
                 return ToIndexInfo(index);
             },

@@ -69,42 +69,92 @@ internal static class BoundedExponentialPolling
                     $"The operation exceeded its {timeout} deadline."));
             }
 
-            using var attemptDeadline = new CancellationTokenSource(remainingForAttempt);
-            using CancellationTokenSource linked = CancellationTokenSource.CreateLinkedTokenSource(
+            var attemptDeadline = new CancellationTokenSource(remainingForAttempt);
+            CancellationTokenSource linked = CancellationTokenSource.CreateLinkedTokenSource(
                 cancellationToken, attemptDeadline.Token);
+
+            // Merely handing attempt a token that will be cancelled is not itself a bound: an attempt that never
+            // observes its token (an "uncooperative" hung call) would otherwise keep this loop -- and the
+            // underlying request -- alive forever. Racing the attempt against an unbounded delay tied to the
+            // same linked token guarantees this loop always moves on at the per-attempt deadline (or caller
+            // cancellation) even when attempt() itself never returns. A synchronous throw from attempt is
+            // normalized into a faulted Task so it is still routed through the same catch clauses as an
+            // asynchronous failure below.
+            Task<T> attemptTask;
             try
             {
-                return await attempt(linked.Token).ConfigureAwait(false);
+                attemptTask = attempt(linked.Token);
             }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            catch (Exception exception)
             {
-                // The caller's own token was cancelled, not merely the per-attempt deadline: always propagate
-                // this immediately, regardless of isTransient, matching the un-bounded-attempt behavior below.
-                throw;
+                attemptTask = Task.FromException<T>(exception);
             }
-            catch (OperationCanceledException) when (attemptDeadline.IsCancellationRequested)
+
+            Task unboundedDelay = Task.Delay(Timeout.InfiniteTimeSpan, linked.Token);
+            Task winner = await Task.WhenAny(attemptTask, unboundedDelay).ConfigureAwait(false);
+
+            if (winner == attemptTask)
             {
-                // The individual attempt outlived the remaining overall budget (for example a hung MongoDB call
-                // that never itself observed cancellation promptly). This consumed the entire remaining budget,
-                // so it is always treated as the bounded timeout having elapsed, never retried again. The last
-                // transient exception (if any) is still preferred as onTimeout's context, matching the ordinary
-                // deadline-elapsed branch below, so a stable, meaningful exception is surfaced either way.
-                throw onTimeout(lastTransientException ?? new TimeoutException(
-                    $"The operation exceeded its {timeout} deadline while the last attempt was still in progress."));
-            }
-            catch (Exception exception) when (isTransient(exception))
-            {
-                lastTransientException = exception;
-                TimeSpan remaining = timeout - elapsed.Elapsed;
-                if (remaining <= TimeSpan.Zero)
+                // The attempt itself completed (successfully, faulted, or self-cancelled) before the linked
+                // token was forced to intervene; inspect the outcome exactly as before the race was introduced.
+                // Neither attemptDeadline nor linked is disposed here: unboundedDelay below may still be pending
+                // against the same linked token, and disposing a CancellationTokenSource out from under a
+                // Task.Delay still racing against it is unsafe. Both sources' own timers self-resolve within the
+                // already-bounded remainingForAttempt window regardless, so relying on the finalizer is deliberate.
+                bool deadlineFired = attemptDeadline.IsCancellationRequested;
+                try
                 {
-                    throw onTimeout(exception);
+                    return await attemptTask.ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    // The caller's own token was cancelled, not merely the per-attempt deadline: always
+                    // propagate this immediately, regardless of isTransient.
+                    throw;
+                }
+                catch (OperationCanceledException) when (deadlineFired)
+                {
+                    // The individual attempt outlived the remaining overall budget (for example a hung MongoDB
+                    // call that observed cancellation, just not promptly). This consumed the entire remaining
+                    // budget, so it is always treated as the bounded timeout having elapsed, never retried again.
+                    throw onTimeout(lastTransientException ?? new TimeoutException(
+                        $"The operation exceeded its {timeout} deadline while the last attempt was still in progress."));
+                }
+                catch (Exception exception) when (isTransient(exception))
+                {
+                    lastTransientException = exception;
+                    TimeSpan remaining = timeout - elapsed.Elapsed;
+                    if (remaining <= TimeSpan.Zero)
+                    {
+                        throw onTimeout(exception);
+                    }
+
+                    TimeSpan wait = delay < remaining ? delay : remaining;
+                    await Task.Delay(wait, cancellationToken).ConfigureAwait(false);
+                    TimeSpan doubled = delay + delay;
+                    delay = doubled < maxInterval ? doubled : maxInterval;
+                }
+            }
+            else
+            {
+                // The linked token was cancelled (caller cancellation or the per-attempt deadline) while
+                // attempt() was still running: it is abandoned here -- never awaited again -- but its eventual
+                // completion (including any fault) must still be safely observed so it never surfaces as an
+                // unobserved task exception. Neither per-attempt token source is disposed for the same reason as
+                // the attempt-wins branch above.
+                _ = attemptTask.ContinueWith(
+                    static task => _ = task.Exception,
+                    CancellationToken.None,
+                    TaskContinuationOptions.ExecuteSynchronously,
+                    TaskScheduler.Default);
+
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    throw new OperationCanceledException(cancellationToken);
                 }
 
-                TimeSpan wait = delay < remaining ? delay : remaining;
-                await Task.Delay(wait, cancellationToken).ConfigureAwait(false);
-                TimeSpan doubled = delay + delay;
-                delay = doubled < maxInterval ? doubled : maxInterval;
+                throw onTimeout(lastTransientException ?? new TimeoutException(
+                    $"The operation exceeded its {timeout} deadline while the last attempt was still in progress."));
             }
         }
     }

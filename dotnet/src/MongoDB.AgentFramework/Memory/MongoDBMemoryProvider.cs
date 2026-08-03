@@ -1,5 +1,4 @@
 using System.Globalization;
-using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -497,36 +496,28 @@ public sealed class MongoDBMemoryProvider : AIContextProvider, IAsyncDisposable
 
         TimeSpan deadline = timeout ?? TimeSpan.FromSeconds(60);
         TimeSpan delay = pollInterval ?? TimeSpan.FromSeconds(1);
-        if (deadline <= TimeSpan.Zero || delay <= TimeSpan.Zero)
-        {
-            throw new MongoDBConfigurationException(
-                "timeout and pollInterval must be positive.");
-        }
 
-        var elapsed = Stopwatch.StartNew();
-        while (true)
-        {
-            try
+        // Delegates to the shared BoundedExponentialPolling primitive (rather than this method's own previous
+        // hand-rolled loop) so this legacy path gets the same per-attempt cancellation-linked deadline as every
+        // other index-readiness wait in this package: a hung MongoDB call inside ValidateVectorSearchIndexAsync
+        // can no longer keep this loop alive past the deadline, even if that call never itself observes
+        // cancellation promptly. initialInterval and maxInterval are both set to the caller's single
+        // pollInterval, preserving this method's original fixed (non-doubling) polling cadence exactly.
+        return await BoundedExponentialPolling.RunAsync(
+            async token =>
             {
-                await ValidateVectorSearchIndexAsync(true, cancellationToken).ConfigureAwait(false);
+                await ValidateVectorSearchIndexAsync(true, token).ConfigureAwait(false);
                 return _options.IndexName;
-            }
-            catch (MongoDBIndexException exception) when (
-                exception is MongoDBIndexNotReadyException ||
-                created && exception is MongoDBIndexMissingException)
-            {
-                TimeSpan remaining = deadline - elapsed.Elapsed;
-                if (remaining <= TimeSpan.Zero)
-                {
-                    throw new MongoDBTimeoutException(
-                        $"Vector Search index '{_options.IndexName}' was not ready before timeout.",
-                        exception);
-                }
-
-                await Task.Delay(remaining < delay ? remaining : delay, cancellationToken)
-                    .ConfigureAwait(false);
-            }
-        }
+            },
+            exception => exception is MongoDBIndexNotReadyException ||
+                (created && exception is MongoDBIndexMissingException),
+            exception => new MongoDBTimeoutException(
+                $"Vector Search index '{_options.IndexName}' was not ready before timeout.",
+                exception),
+            deadline,
+            delay,
+            delay,
+            cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Validates the Vector Search index without mutating MongoDB.</summary>
