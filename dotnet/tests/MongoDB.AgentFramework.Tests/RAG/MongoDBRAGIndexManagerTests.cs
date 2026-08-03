@@ -530,8 +530,57 @@ public sealed class MongoDBRAGIndexManagerTests
             cancellationToken: CancellationToken.None);
 
         Assert.Equal(MongoDBIndexStatus.Ready, info.Status);
-        Assert.True(state.SearchIndexListTokens.Count >= 4);
+        Assert.True(state.SearchIndexListTokens.Count >= 3);
         Assert.All(state.SearchIndexListTokens, token => Assert.True(token.CanBeCanceled));
+    }
+
+    [Fact]
+    public async Task WaitUntilVectorSearchIndexReadyMakesExactlyOneInspectionPerAttemptAndReturnsTheValidatedSnapshot()
+    {
+        // A prior version validated the index and then performed a second, separate re-fetch of the same index
+        // just to build the returned MongoDBIndexInfo. If a concurrent mutation landed between those two
+        // fetches, the returned info would silently reflect a *different* document than the one actually proven
+        // ready -- an atomicity gap. Here, the index is READY on the very first (and only expected) inspection,
+        // but a second, differently-shaped document (not queryable) is queued right behind it: if the fix
+        // regressed back to a double fetch, that extra fetch would consume this second document, so the
+        // returned info would report Queryable == false and the call count would be 2 instead of 1.
+        BsonDocument ready = RAGIndexFixtures.ValidVectorIndex("facade_vector");
+        BsonDocument mutatedAfterValidation = RAGIndexFixtures.ValidVectorIndex("facade_vector");
+        mutatedAfterValidation["queryable"] = false;
+        var state = new RAGCollectionState();
+        state.SearchIndexSnapshots.Enqueue([ready]);
+        state.SearchIndexSnapshots.Enqueue([mutatedAfterValidation]);
+        MongoDBRAGIndexManager manager = CreateVectorManager(state);
+
+        MongoDBIndexInfo info = await manager.WaitUntilVectorSearchIndexReadyAsync(
+            timeout: TimeSpan.FromSeconds(5),
+            pollInterval: TimeSpan.FromMilliseconds(1));
+
+        Assert.Equal(MongoDBIndexStatus.Ready, info.Status);
+        Assert.True(info.Queryable);
+        Assert.Equal(1, state.SearchIndexListCallCount);
+    }
+
+    [Fact]
+    public async Task WaitUntilSearchIndexReadyMakesExactlyOneInspectionPerAttemptAndReturnsTheValidatedSnapshot()
+    {
+        // Mirrors WaitUntilVectorSearchIndexReadyMakesExactlyOneInspectionPerAttemptAndReturnsTheValidatedSnapshot
+        // for the Search index's independent ValidateSearchSnapshotAsync helper.
+        BsonDocument ready = RAGIndexFixtures.ValidSearchIndex("facade_search");
+        BsonDocument mutatedAfterValidation = RAGIndexFixtures.ValidSearchIndex("facade_search");
+        mutatedAfterValidation["queryable"] = false;
+        var state = new RAGCollectionState();
+        state.SearchIndexSnapshots.Enqueue([ready]);
+        state.SearchIndexSnapshots.Enqueue([mutatedAfterValidation]);
+        MongoDBRAGIndexManager manager = CreateSearchManager(state);
+
+        MongoDBIndexInfo info = await manager.WaitUntilSearchIndexReadyAsync(
+            timeout: TimeSpan.FromSeconds(5),
+            pollInterval: TimeSpan.FromMilliseconds(1));
+
+        Assert.Equal(MongoDBIndexStatus.Ready, info.Status);
+        Assert.True(info.Queryable);
+        Assert.Equal(1, state.SearchIndexListCallCount);
     }
 
     [Fact]

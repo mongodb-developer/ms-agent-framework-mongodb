@@ -374,6 +374,33 @@ public sealed class MongoDBMemoryIndexManagerTests
     }
 
     [Fact]
+    public async Task WaitUntilReadyMakesExactlyOneInspectionPerAttemptAndReturnsTheValidatedSnapshot()
+    {
+        // WaitUntilReadyAsync must never perform a second, separate re-fetch of the index just to build the
+        // returned MongoDBIndexInfo after validating it: a second fetch would let a concurrent mutation land
+        // between the validation and that second fetch, so the returned info would silently no longer reflect
+        // the snapshot actually proven ready. Here, the index is READY on the very first inspection, but a
+        // second, differently-shaped document (not queryable) is queued right behind it: if this regressed to a
+        // double fetch, that extra fetch would consume the second document, and the returned info would report
+        // Queryable == false with a call count of 2 instead of 1.
+        BsonDocument ready = MemoryIndexFixtures.ValidVectorIndex("facade_vector", "embedding", 3);
+        BsonDocument mutatedAfterValidation = MemoryIndexFixtures.ValidVectorIndex(
+            "facade_vector", "embedding", 3, queryable: false);
+        var state = new MemoryCollectionState();
+        state.SearchIndexSnapshots.Enqueue([ready]);
+        state.SearchIndexSnapshots.Enqueue([mutatedAfterValidation]);
+        MongoDBMemoryIndexManager manager = CreateManager(state);
+
+        MongoDBIndexInfo info = await manager.WaitUntilReadyAsync(
+            timeout: TimeSpan.FromSeconds(5),
+            pollInterval: TimeSpan.FromMilliseconds(1));
+
+        Assert.Equal(MongoDBIndexStatus.Ready, info.Status);
+        Assert.True(info.Queryable);
+        Assert.Equal(1, state.ListCallCount);
+    }
+
+    [Fact]
     public async Task EnsureThrowsFailedExceptionWithoutAutomaticallyRepairingIt()
     {
         var state = new MemoryCollectionState

@@ -158,12 +158,8 @@ public sealed class MongoDBRAGIndexManager : IAsyncDisposable
     /// <exception cref="MongoDBIndexNotReadyException"><paramref name="requireReady"/> is <see langword="true"/> and the index is not queryable.</exception>
     public async Task<MongoDBIndexComparison> ValidateVectorSearchIndexAsync(
         bool requireReady = true,
-        CancellationToken cancellationToken = default)
-    {
-        MongoDBVectorSearchIndexDefinition definition = RequireVectorDefinition();
-        BsonDocument index = await RequireIndexAsync(definition.IndexName, cancellationToken).ConfigureAwait(false);
-        return ValidateVector(index, definition, requireReady);
-    }
+        CancellationToken cancellationToken = default) =>
+        (await ValidateVectorSnapshotAsync(requireReady, cancellationToken).ConfigureAwait(false)).Comparison;
 
     /// <summary>
     /// Validates the configured Search index against <see cref="SearchDefinition"/> without ever mutating
@@ -176,12 +172,8 @@ public sealed class MongoDBRAGIndexManager : IAsyncDisposable
     /// <exception cref="MongoDBIndexNotReadyException"><paramref name="requireReady"/> is <see langword="true"/> and the index is not queryable.</exception>
     public async Task<MongoDBIndexComparison> ValidateSearchIndexAsync(
         bool requireReady = true,
-        CancellationToken cancellationToken = default)
-    {
-        MongoDBSearchIndexDefinition definition = RequireSearchDefinition();
-        BsonDocument index = await RequireIndexAsync(definition.IndexName, cancellationToken).ConfigureAwait(false);
-        return ValidateSearch(index, definition, requireReady);
-    }
+        CancellationToken cancellationToken = default) =>
+        (await ValidateSearchSnapshotAsync(requireReady, cancellationToken).ConfigureAwait(false)).Comparison;
 
     /// <summary>
     /// Validates that both the configured Vector Search and Search indexes exist and match their definitions --
@@ -373,7 +365,7 @@ public sealed class MongoDBRAGIndexManager : IAsyncDisposable
         MongoDBVectorSearchIndexDefinition definition = RequireVectorDefinition();
         return WaitUntilReadyAsync(
             definition.IndexName,
-            token => ValidateVectorSearchIndexAsync(true, token),
+            async token => (await ValidateVectorSnapshotAsync(true, token).ConfigureAwait(false)).Index,
             timeout,
             pollInterval,
             cancellationToken);
@@ -393,7 +385,7 @@ public sealed class MongoDBRAGIndexManager : IAsyncDisposable
         MongoDBSearchIndexDefinition definition = RequireSearchDefinition();
         return WaitUntilReadyAsync(
             definition.IndexName,
-            token => ValidateSearchIndexAsync(true, token),
+            async token => (await ValidateSearchSnapshotAsync(true, token).ConfigureAwait(false)).Index,
             timeout,
             pollInterval,
             cancellationToken);
@@ -463,20 +455,22 @@ public sealed class MongoDBRAGIndexManager : IAsyncDisposable
 
     private Task<MongoDBIndexInfo> WaitUntilReadyAsync(
         string indexName,
-        Func<CancellationToken, Task<MongoDBIndexComparison>> validateReadyAsync,
+        Func<CancellationToken, Task<BsonDocument>> validateReadyAndSnapshotAsync,
         TimeSpan? timeout,
         TimeSpan? pollInterval,
         CancellationToken cancellationToken) =>
         BoundedExponentialPolling.RunAsync(
             async token =>
             {
-                // Every inspection made by this attempt -- both the definition/status validation and the
-                // existence re-check below -- must receive the same per-attempt token BoundedExponentialPolling
-                // generates, not the outer cancellationToken closed over by the caller: only the per-attempt
-                // token is bounded by the remaining monotonic deadline, so a hung underlying MongoDB call inside
-                // validateReadyAsync itself would otherwise not be bounded by that deadline at all.
-                await validateReadyAsync(token).ConfigureAwait(false);
-                BsonDocument index = await RequireIndexAsync(indexName, token).ConfigureAwait(false);
+                // validateReadyAndSnapshotAsync both validates and returns the exact BsonDocument it validated,
+                // so this attempt makes exactly one inspection: there is no second, separate re-fetch here to
+                // build the returned MongoDBIndexInfo from. A second, independent fetch would let a concurrent
+                // mutation land between the two calls, so the info this method returns would silently no longer
+                // be the snapshot that was actually proven ready/compatible -- an atomicity gap this single-fetch
+                // shape closes entirely. The per-attempt token flows into validateReadyAndSnapshotAsync so its
+                // underlying MongoDB call is bounded by the remaining monotonic deadline exactly like every other
+                // inspection here.
+                BsonDocument index = await validateReadyAndSnapshotAsync(token).ConfigureAwait(false);
                 return ToIndexInfo(index);
             },
             static exception => exception is MongoDBIndexNotReadyException or MongoDBIndexMissingException,
@@ -497,6 +491,33 @@ public sealed class MongoDBRAGIndexManager : IAsyncDisposable
 
     private Task<BsonDocument?> FindAsync(string indexName, CancellationToken cancellationToken) =>
         MongoDBSearchIndexes.FindAsync(_collection.SearchIndexes, indexName, MapInspectionException, cancellationToken);
+
+    /// <summary>
+    /// Fetches the configured Vector Search index exactly once and validates it, returning both the exact
+    /// inspected snapshot and the comparison -- so a caller that also needs the snapshot (for example
+    /// <see cref="WaitUntilVectorSearchIndexReadyAsync"/>) never performs a second, separate re-fetch just to
+    /// build a return value, which would otherwise let a concurrent mutation land between the validation and
+    /// that second fetch.
+    /// </summary>
+    private async Task<(BsonDocument Index, MongoDBIndexComparison Comparison)> ValidateVectorSnapshotAsync(
+        bool requireReady, CancellationToken cancellationToken)
+    {
+        MongoDBVectorSearchIndexDefinition definition = RequireVectorDefinition();
+        BsonDocument index = await RequireIndexAsync(definition.IndexName, cancellationToken).ConfigureAwait(false);
+        return (index, ValidateVector(index, definition, requireReady));
+    }
+
+    /// <summary>
+    /// Fetches the configured Search index exactly once and validates it, returning both the exact inspected
+    /// snapshot and the comparison -- mirroring <see cref="ValidateVectorSnapshotAsync"/> for the same reason.
+    /// </summary>
+    private async Task<(BsonDocument Index, MongoDBIndexComparison Comparison)> ValidateSearchSnapshotAsync(
+        bool requireReady, CancellationToken cancellationToken)
+    {
+        MongoDBSearchIndexDefinition definition = RequireSearchDefinition();
+        BsonDocument index = await RequireIndexAsync(definition.IndexName, cancellationToken).ConfigureAwait(false);
+        return (index, ValidateSearch(index, definition, requireReady));
+    }
 
     private static MongoDBIndexComparison ValidateVector(
         BsonDocument index, MongoDBVectorSearchIndexDefinition definition, bool requireReady) =>

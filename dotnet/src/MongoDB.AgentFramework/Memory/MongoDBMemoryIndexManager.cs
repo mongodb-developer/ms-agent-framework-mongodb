@@ -130,11 +130,8 @@ public sealed class MongoDBMemoryIndexManager : IAsyncDisposable
     /// <exception cref="MongoDBIndexNotReadyException"><paramref name="requireReady"/> is <see langword="true"/> and the index is not queryable.</exception>
     public async Task<MongoDBIndexComparison> ValidateIndexAsync(
         bool requireReady = true,
-        CancellationToken cancellationToken = default)
-    {
-        BsonDocument index = await RequireIndexAsync(cancellationToken).ConfigureAwait(false);
-        return Validate(index, requireReady);
-    }
+        CancellationToken cancellationToken = default) =>
+        (await ValidateSnapshotAsync(requireReady, cancellationToken).ConfigureAwait(false)).Comparison;
 
     /// <summary>
     /// Creates the configured index. Fails immediately if it already exists (docs/spec/features/index-management.md
@@ -243,8 +240,13 @@ public sealed class MongoDBMemoryIndexManager : IAsyncDisposable
         BoundedExponentialPolling.RunAsync(
             async token =>
             {
-                BsonDocument index = await RequireIndexAsync(token).ConfigureAwait(false);
-                Validate(index, requireReady: true);
+                // ValidateSnapshotAsync both validates and returns the exact BsonDocument it validated, so this
+                // attempt makes exactly one inspection: there is no second, separate re-fetch here to build the
+                // returned MongoDBIndexInfo from. A second, independent fetch would let a concurrent mutation
+                // land between the two calls, so the info this method returns would silently no longer be the
+                // snapshot that was actually proven ready/compatible -- an atomicity gap this single-fetch shape
+                // closes entirely.
+                (BsonDocument index, _) = await ValidateSnapshotAsync(requireReady: true, token).ConfigureAwait(false);
                 return ToIndexInfo(index);
             },
             static exception => exception is MongoDBIndexNotReadyException or MongoDBIndexMissingException,
@@ -290,6 +292,19 @@ public sealed class MongoDBMemoryIndexManager : IAsyncDisposable
             Definition.IndexName,
             MapInspectionException,
             cancellationToken);
+
+    /// <summary>
+    /// Fetches the configured index exactly once and validates it, returning both the exact inspected snapshot
+    /// and the comparison -- so a caller that also needs the snapshot (for example
+    /// <see cref="WaitUntilReadyAsync"/>) never performs a second, separate re-fetch just to build a return
+    /// value, which would otherwise let a concurrent mutation land between the validation and that second fetch.
+    /// </summary>
+    private async Task<(BsonDocument Index, MongoDBIndexComparison Comparison)> ValidateSnapshotAsync(
+        bool requireReady, CancellationToken cancellationToken)
+    {
+        BsonDocument index = await RequireIndexAsync(cancellationToken).ConfigureAwait(false);
+        return (index, Validate(index, requireReady));
+    }
 
     private MongoDBIndexComparison Validate(BsonDocument index, bool requireReady) =>
         VectorSearchIndexEquivalence.Validate(index, Definition, requireReady);
