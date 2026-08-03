@@ -93,14 +93,25 @@ Primary sources:
   `Microsoft.Agents.AI.Abstractions.dll` (methodology above; no third-party
   documentation substitutes for the shipped binary and its embedded XML docs).
 
-## Decision
+## Decision (interim implementation note, not a specification or ADR change)
 
-Per [ADR 0018](../../decisions/0018-version-gate-persistence-contracts.md),
-because no public session-hosting contract exists in the resolved and verified
-version range, `MongoDBAgentSessionStore` does **not** implement any Agent
-Framework interface (there is none to implement) and does **not** invent one.
-Instead it is a narrow, standalone facade over `AIAgent.SerializeSessionAsync`
-/ `DeserializeSessionAsync`:
+This finding creates a real gap against the mapped slice's normative
+requirement in [Session Store](../../spec/features/persistence.md) and
+[implementation map slice 16](../../spec/implementation-map.md), which both
+require `MongoDBAgentSessionStore` to implement the supported public Agent
+Framework session-hosting contract. That requirement is **not weakened or
+reworded** by this research note; the specification and implementation map
+retain their original text, and
+[ADR 0018](../../decisions/0018-version-gate-persistence-contracts.md)
+remains `proposed` and unmodified -- this note does not self-accept it or use
+it to authorize a lower bar.
+
+Absent an accepted decision to relax that requirement, or a
+`Microsoft.Agents.AI.Abstractions` release that publishes a real
+session-hosting contract, `MongoDBAgentSessionStore` ships as a
+**compatibility-blocked, interim** facade over `AIAgent.SerializeSessionAsync`
+/ `DeserializeSessionAsync` rather than as a complete implementation of the
+mapped slice:
 
 - The store's public methods (`GetAsync`, `CreateAsync`, `SetAsync`) accept an
   `AIAgent` parameter used solely to (de)serialize the session payload; the
@@ -108,8 +119,8 @@ Instead it is a narrow, standalone facade over `AIAgent.SerializeSessionAsync`
 - Storage, authorization, optimistic concurrency, TTL, and indexing are handled
   entirely by `MongoDBAgentSessionStore` against a stable BSON envelope; only
   the `session` sub-document's shape is agent-defined and treated as opaque by
-  the store (parsed and stored losslessly, never inspected or mapped field by
-  field).
+  the store (stored losslessly as the serializer's exact bytes, never
+  inspected, retyped, or mapped field by field).
 - The internal `Internal.Persistence.IAgentSessionCodec` seam isolates the
   "serialize/deserialize a session" concern from the rest of the store. If a
   future `Microsoft.Agents.AI.Abstractions` version publishes a real
@@ -118,12 +129,35 @@ Instead it is a narrow, standalone facade over `AIAgent.SerializeSessionAsync`
   changing the store's storage schema, its BSON envelope, or any already-stored
   documents.
 - If a future package version changes the `AgentSession` JSON shape in an
-  incompatible way, `MongoDBAgentSessionStore` will still refuse to load
-  mismatched documents: every stored envelope carries `schema_version` and
-  `framework_version` markers, and loading a document that does not match the
-  version this build understands throws `MongoDBMappingException` rather than
-  attempting a lossy or silent migration.
+  incompatible way, `MongoDBAgentSessionStore` will still refuse to load,
+  update, or delete mismatched documents: every stored envelope carries
+  `schema_version` and `framework_version` markers, and any operation against
+  a document whose markers do not match the version this build understands
+  throws a migration-guidance exception (see
+  [dotnet-session-store-migration.md](dotnet-session-store-migration.md))
+  rather than attempting a lossy or silent migration, and without mutating the
+  incompatible document.
+- The package additionally pins and runtime-verifies the resolved
+  `Microsoft.Agents.AI.Abstractions` version (see "Runtime version
+  enforcement" below); a caller running against an unverified version gets an
+  explicit rejection rather than silent, unverified behavior.
 
-This decision will be revisited if a later `Microsoft.Agents.AI.Abstractions`
-release publishes a session-hosting contract; re-run the reflection
-methodology above against the newly resolved version before adding an adapter.
+This note will be revisited -- and the normative specification/ADR change
+requested through the proper proposed-ADR process -- if a later
+`Microsoft.Agents.AI.Abstractions` release publishes a session-hosting
+contract; re-run the reflection methodology above against the newly resolved
+version first.
+
+## Runtime version enforcement
+
+Because this research is a point-in-time reflection sample, not a permanent
+guarantee, the package additionally narrows
+`Microsoft.Agents.AI.Abstractions` to the verified range
+`[1.13.0,1.17.0)` (the pinned floor through the verified next-minor
+exclusive upper bound) in
+`dotnet/src/MongoDB.AgentFramework/MongoDB.AgentFramework.csproj`, and
+`MongoDBAgentSessionStore` inspects the loaded `AIAgent` assembly's
+informational version at construction, rejecting any resolved version outside
+`[1.13.0,1.17.0)` with a clear `MongoDBConfigurationException` naming the
+detected and required versions, rather than silently trusting an unverified
+build.

@@ -10,17 +10,35 @@ rationale without overriding those specifications.
 [dotnet-contract-research.md](dotnet-contract-research.md) records the
 primary-source verification behind the design decision summarized here.
 
-## Contract decision
+## Compatibility status: blocked, not 1.0-complete
 
-`Microsoft.Agents.AI.Abstractions` (resolved and verified at the pinned floor
-1.13.0, and unchanged through the latest published 1.16.0) does not expose a
-public session-hosting persistence contract. `MongoDBAgentSessionStore` is
-therefore **not** an implementation of any Agent Framework interface -- there
-is none to implement -- and is not a fabricated one either. It is a narrow
-facade over the public `AIAgent.SerializeSessionAsync` /
-`DeserializeSessionAsync` serialization surface. See
+**`MongoDBAgentSessionStore` is compatibility-blocked and is not a complete
+implementation of the mapped slice's normative public-type requirement.**
+[Session Store](../../spec/features/persistence.md) and
+[implementation map slice 16](../../spec/implementation-map.md) require
+`MongoDBAgentSessionStore` to implement the supported public Agent Framework
+session-hosting contract. `Microsoft.Agents.AI.Abstractions` (resolved and
+verified at the pinned floor 1.13.0, and unchanged through the latest
+published 1.16.0) does not expose one -- see
 [dotnet-contract-research.md](dotnet-contract-research.md) for the full
-verification methodology and finding.
+verification methodology and finding. This is an upstream framework gap, not
+a design choice this repository can resolve unilaterally: closing the
+specification's requirement needs either a `Microsoft.Agents.AI.Abstractions`
+release that publishes a session-hosting contract, or an accepted decision
+(not a self-accepted one -- see
+[ADR 0018](../../decisions/0018-version-gate-persistence-contracts.md), which
+remains `proposed`) to change the requirement itself.
+
+Until then, this implementation ships as an **interim, narrow facade** over
+the public `AIAgent.SerializeSessionAsync`/`DeserializeSessionAsync`
+serialization surface, documented here as development-doc detail rather than
+as a change to the normative specification. It is isolated behind the
+internal `IAgentSessionCodec` seam specifically so a real adapter against a
+future published contract can replace it without changing the storage schema
+or any already-stored documents. Re-run the reflection methodology in
+[dotnet-contract-research.md](dotnet-contract-research.md) against any newly
+resolved `Microsoft.Agents.AI.Abstractions` version before treating this gap
+as closed.
 
 ## Public surface and ownership
 

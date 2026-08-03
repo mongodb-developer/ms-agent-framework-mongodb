@@ -14,13 +14,7 @@ state such as recent-message windows and counters that exact Chat History alone 
 Public types:
 
 - Python: `MongoDBSessionStore(SessionStore)`
-- .NET: `MongoDBAgentSessionStore` implementing the supported public Agent Framework hosting/session persistence
-  contract. Verified: `Microsoft.Agents.AI.Abstractions` 1.13.0-1.16.0 (the resolved and supported range) exposes no
-  such contract, only `AgentSession`/`AgentSessionStateBag` and `AIAgent.SerializeSessionAsync`/
-  `DeserializeSessionAsync`; per ADR [0018](../../decisions/0018-version-gate-persistence-contracts.md),
-  `MongoDBAgentSessionStore` is therefore a version-gated facade over that public serialization surface rather than
-  an implementation of an invented contract. See
-  [dotnet-contract-research.md](../../development/persistence/dotnet-contract-research.md).
+- .NET: `MongoDBAgentSessionStore` implementing the supported public Agent Framework hosting/session persistence contract
 
 Required API semantics:
 
