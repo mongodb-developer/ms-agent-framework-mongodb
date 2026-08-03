@@ -96,6 +96,45 @@ scope in its MongoDB filter. Index provisioning and authorized deletion are
 explicit. See `samples\session_persistence.py` and
 [`docs/development/persistence/python-session-store.md`](../docs/development/persistence/python-session-store.md).
 
+## Workflow Checkpoint Store quickstart
+
+Workflow Checkpoint Store persists immutable resumable workflow history,
+including pending approvals, executor state, and parent lineage. It is separate
+from complete Session Store snapshots and exact Chat History.
+
+```python
+from agent_framework_mongodb import (
+    MongoDBCheckpointStorage,
+    MongoDBCheckpointStorageOptions,
+)
+
+checkpoints = MongoDBCheckpointStorage(
+    connection_string=os.environ["MONGODB_URI"],
+    database_name=os.environ["MONGODB_DATABASE"],
+    collection_name=os.environ["MONGODB_CHECKPOINT_COLLECTION"],
+    options=MongoDBCheckpointStorageOptions(
+        tenant_id=os.environ["MONGODB_CHECKPOINT_TENANT_ID"],
+        workflow_name="approval-workflow",
+        session_id="run-123",
+        ttl=timedelta(days=7),
+    ),
+)
+await checkpoints.ensure_indexes()
+workflow = WorkflowBuilder(
+    name="approval-workflow",
+    start_executor=approval_executor,
+    checkpoint_storage=checkpoints,
+).build()
+```
+
+The package exports `MongoDBCheckpointStorage`,
+`MongoDBCheckpointStorageOptions`, `MongoDBCheckpointPage`, and
+`MongoDBCheckpointNotFoundError`. The exact `CheckpointStorage` list methods
+return the configured bounded first page; `list_checkpoint_page()` follows
+opaque cursors. Every operation uses the immutable tenant/workflow/session scope.
+See `samples\workflow_checkpoint_resume.py` and
+[`docs/development/persistence/python-checkpoints.md`](../docs/development/persistence/python-checkpoints.md).
+
 ## Vector RAG quickstart
 
 Vector RAG performs read-only retrieval from a pre-ingested knowledge collection.
