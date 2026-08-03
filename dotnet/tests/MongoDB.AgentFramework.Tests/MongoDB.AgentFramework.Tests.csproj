@@ -12,6 +12,14 @@
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
     <PackageReference Include="xunit" Version="2.9.3" />
     <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+    <!--
+      Explicit, not just transitive through the ProjectReference below: building this test project directly
+      from a clean restore (e.g. `dotnet test .\dotnet\MongoDB.AgentFramework.slnx` from the repo root) does not
+      reliably flow MongoDB.AgentFramework's own PackageReference compile-time assets to this project's compiler
+      through the ProjectReference alone in every restore graph. Pinned to the same verified range as
+      MongoDB.AgentFramework.csproj (see docs/development/persistence/dotnet-checkpoint-contract-research.md).
+    -->
+    <PackageReference Include="Microsoft.Agents.AI.Workflows" Version="[1.13.0,1.17.0)" />
   </ItemGroup>
 
   <ItemGroup>

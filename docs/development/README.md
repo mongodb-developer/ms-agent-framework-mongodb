@@ -40,3 +40,5 @@ This documentation explains the implemented system at the code level. The
 
 - [.NET Session Store contract verification](persistence/dotnet-contract-research.md)
 - [.NET Session Store implementation](persistence/dotnet-session-store.md)
+- [.NET Workflow Checkpoint Store contract verification](persistence/dotnet-checkpoint-contract-research.md)
+- [.NET Workflow Checkpoint Store implementation](persistence/dotnet-checkpoint-store.md)

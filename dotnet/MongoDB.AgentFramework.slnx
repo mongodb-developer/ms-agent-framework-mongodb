@@ -11,6 +11,7 @@
     <Project Path="samples/ParentDocumentRAGQuickstart/ParentDocumentRAGQuickstart.csproj" />
     <Project Path="samples/RAGQuickstart/RAGQuickstart.csproj" />
     <Project Path="samples/SessionPersistenceQuickstart/SessionPersistenceQuickstart.csproj" />
+    <Project Path="samples/WorkflowCheckpointResumeQuickstart/WorkflowCheckpointResumeQuickstart.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/IngestionSamples.Tests/IngestionSamples.Tests.csproj" />
