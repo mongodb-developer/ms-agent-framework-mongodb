@@ -6,6 +6,9 @@ on:
       - "python/**"
       - ".github/workflows/codeql.yml"
   push:
+    branches:
+      - "main"
+      - "feature/python-implementation"
     paths:
       - "python/**"
       - ".github/workflows/codeql.yml"

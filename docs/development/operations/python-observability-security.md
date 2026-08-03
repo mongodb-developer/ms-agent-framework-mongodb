@@ -83,8 +83,15 @@ or deployment secrets. It executes tests and coverage, Ruff, MyPy, Pyright, pack
 build and Twine validation, and imports from the exact wheel and source distribution in
 fresh environments. Separate workflows run the local high-confidence
 credential-pattern scanner on every change and GitHub-native CodeQL for Python and
-dependency review. Actions receive only their minimum declared token permissions, and
-checkout does not persist credentials.
+dependency review. A distinct pull-request and scheduled workflow installs the package
+and all transitive runtime dependencies in a clean Python 3.10 environment, then audits
+that environment with the maintained `pip-audit` tool pinned to version 2.10.1. Known
+vulnerabilities fail the workflow. The unpublished project distribution and environment
+bootstrap tools are removed from the audit target after dependency resolution, leaving
+the installed transitive runtime dependency set. Actions receive only their minimum
+declared token permissions, and checkout does not persist credentials. CodeQL push
+analysis is limited to `main` and
+`feature/python-implementation`; pull-request analysis remains enabled.
 
 Repository administrators must enable GitHub secret scanning and push protection for
 the repository and its supported secret patterns. This platform control is a release
