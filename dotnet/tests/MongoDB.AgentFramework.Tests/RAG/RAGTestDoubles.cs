@@ -69,6 +69,14 @@ internal sealed class RAGCollectionState
     public List<BsonDocument> Results { get; set; } = [];
 
     public Exception? AggregateException { get; set; }
+
+    public List<BsonDocument> SearchIndexes { get; set; } = [];
+
+    public Queue<List<BsonDocument>> SearchIndexSnapshots { get; } = [];
+
+    public Exception? SearchIndexListException { get; set; }
+
+    public int SearchIndexListCallCount { get; set; }
 }
 
 internal class RAGCollectionProxy : DispatchProxy
@@ -86,6 +94,15 @@ internal class RAGCollectionProxy : DispatchProxy
         if (method == "get_Settings")
         {
             return new MongoCollectionSettings();
+        }
+
+        if (method == "get_SearchIndexes")
+        {
+            var manager = DispatchProxy.Create<
+                MongoDB.Driver.Search.IMongoSearchIndexManager,
+                RAGSearchIndexManagerProxy>();
+            ((RAGSearchIndexManagerProxy)(object)manager).State = State;
+            return manager;
         }
 
         if (method == "AggregateAsync")
@@ -120,6 +137,40 @@ internal class RAGCollectionProxy : DispatchProxy
             DispatchProxy.Create<IMongoCollection<BsonDocument>, RAGCollectionProxy>();
         ((RAGCollectionProxy)(object)collection).State = state;
         return collection;
+    }
+}
+
+/// <summary>
+/// Fakes <see cref="MongoDB.Driver.Search.IMongoSearchIndexManager.ListAsync"/> only, mirroring the Memory test
+/// double's <c>SearchIndexManagerProxy</c>: <see cref="RAGCollectionState.SearchIndexSnapshots"/> lets a test queue
+/// successive result sets to simulate an index transitioning across repeated calls (for example, missing then
+/// ready), and <see cref="RAGCollectionState.SearchIndexListCallCount"/> proves whether a bounded cache actually
+/// avoided a network round trip.
+/// </summary>
+internal class RAGSearchIndexManagerProxy : DispatchProxy
+{
+    public RAGCollectionState State { get; set; } = null!;
+
+    protected override object? Invoke(MethodInfo? targetMethod, object?[]? args)
+    {
+        if (targetMethod!.Name == "ListAsync")
+        {
+            State.SearchIndexListCallCount++;
+            if (State.SearchIndexListException is not null)
+            {
+                return Task.FromException<IAsyncCursor<BsonDocument>>(State.SearchIndexListException);
+            }
+
+            if (State.SearchIndexSnapshots.Count > 0)
+            {
+                State.SearchIndexes = State.SearchIndexSnapshots.Dequeue();
+            }
+
+            return Task.FromResult<IAsyncCursor<BsonDocument>>(
+                new ListCursor<BsonDocument>(State.SearchIndexes));
+        }
+
+        throw new NotSupportedException($"Unexpected search-index call: {targetMethod}");
     }
 }
 
@@ -174,6 +225,17 @@ internal class FakeMongoClientProxy : DispatchProxy
     }
 }
 
+/// <summary>
+/// A settable clock used to deterministically test the bounded Search-index validation cache without waiting on
+/// real time or a real network call.
+/// </summary>
+internal sealed class FakeTimeProvider : TimeProvider
+{
+    public DateTimeOffset UtcNow { get; set; } = DateTimeOffset.UtcNow;
+
+    public override DateTimeOffset GetUtcNow() => UtcNow;
+}
+
 internal sealed class ListCursor<T>(IReadOnlyList<T> values) : IAsyncCursor<T>
 {
     private bool _moved;
@@ -200,4 +262,33 @@ internal sealed class ListCursor<T>(IReadOnlyList<T> values) : IAsyncCursor<T>
     public void Dispose()
     {
     }
+}
+
+/// <summary>
+/// An <see cref="IReadOnlyList{T}"/> that tolerates only a bounded number of enumerations before throwing,
+/// simulating a caller-controlled collection that changes shape or becomes invalid across repeated reads. Used to
+/// prove that construction never enumerates an options list a second time after an owned client already exists.
+/// </summary>
+internal sealed class SingleUseFieldNames(IReadOnlyList<string> values, int toleratedEnumerations) :
+    IReadOnlyList<string>
+{
+    private int _enumerations;
+
+    public int Count => values.Count;
+
+    public string this[int index] => values[index];
+
+    public IEnumerator<string> GetEnumerator()
+    {
+        _enumerations++;
+        if (_enumerations > toleratedEnumerations)
+        {
+            throw new InvalidOperationException(
+                $"This list was enumerated more than the tolerated {toleratedEnumerations} time(s).");
+        }
+
+        return values.GetEnumerator();
+    }
+
+    System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
 }

@@ -1,20 +1,25 @@
 using MongoDB.Bson;
 using MongoDB.Bson.Serialization;
 using MongoDB.Driver;
+using MongoDB.Driver.Search;
 
 namespace MongoDB.AgentFramework.Internal;
 
 /// <summary>
-/// Builds the <c>$vectorSearch</c>-first aggregation pipeline shared by <see cref="MongoDBSearchMode.VectorAnn"/>
-/// and <see cref="MongoDBSearchMode.VectorEnn"/>, per the pipeline pseudocode in
-/// <c>docs/spec/features/rag.md</c>. The <c>$vectorSearch</c> stage itself is rendered from the typed
-/// <see cref="PipelineStageDefinitionBuilder.VectorSearch{TInput}"/> builder, as required by the specification's
-/// "typed MongoDB.Driver builders for supported stages" rule; the trailing score stage, which the driver has no
-/// dedicated typed builder for in this context, is assembled directly as BSON. The pipeline intentionally does
-/// <b>not</b> include a narrowing <c>$project</c> stage: <see cref="MongoDBRAGResult.RawDocument"/> must preserve
-/// the complete original document, so the only field this pipeline adds beyond the original document is the
-/// reserved <see cref="FieldPath.ReservedScoreAlias"/> score alias, which <c>MongoDBRAGProvider.MapResult</c> reads
-/// and then strips before constructing the public result.
+/// Builds the <c>$vectorSearch</c>-first and <c>$search</c>-first aggregation pipelines for
+/// <see cref="MongoDBSearchMode.VectorAnn"/>/<see cref="MongoDBSearchMode.VectorEnn"/> and
+/// <see cref="MongoDBSearchMode.FullText"/> respectively, per the pipeline pseudocode in
+/// <c>docs/spec/features/rag.md</c>. Each stage envelope is rendered from a typed <c>MongoDB.Driver</c> builder
+/// (<see cref="PipelineStageDefinitionBuilder.VectorSearch{TInput}"/> or
+/// <see cref="PipelineStageDefinitionBuilder.Search{TInput}(SearchDefinition{TInput}, SearchOptions{TInput})"/>), as
+/// required by the specification's "typed MongoDB.Driver builders for supported stages" rule; the <c>compound</c>
+/// filter body a mandatory filter translates to has no dedicated typed sub-builder, so it is wrapped as a
+/// <see cref="BsonDocumentSearchDefinition{TDocument}"/>, and the trailing score stages, which the driver has no
+/// dedicated typed builder for in this context, are assembled directly as BSON. Neither pipeline includes a
+/// narrowing <c>$project</c> stage: <see cref="MongoDBRAGResult.RawDocument"/> must preserve the complete original
+/// document, so the only field either pipeline adds beyond the original document is the reserved
+/// <see cref="FieldPath.ReservedScoreAlias"/> score alias, which <c>MongoDBRAGProvider.MapResult</c> reads and then
+/// strips before constructing the public result.
 /// </summary>
 internal static class RAGPipelineBuilder
 {
@@ -81,4 +86,61 @@ internal static class RAGPipelineBuilder
                 new BsonDocument(FieldPath.ReservedScoreAlias, new BsonDocument("$meta", "vectorSearchScore"))),
         ];
     }
+
+    /// <summary>
+    /// Builds the complete <see cref="MongoDBSearchMode.FullText"/> retrieval pipeline: <c>$search</c> first (a
+    /// single <c>compound.must</c> text clause against <paramref name="textFieldNames"/>, plus the translated
+    /// mandatory filter placed inside <c>compound.filter</c> so authorization narrows the candidate set MongoDB
+    /// Search itself scores, not a post-hoc application-side filter), then <c>$limit</c> to
+    /// <paramref name="limit"/> (topK), then a <c>$set</c> stage capturing MongoDB's native
+    /// <c>{ $meta: "searchScore" }</c> under the reserved <see cref="FieldPath.ReservedScoreAlias"/> alias. Like
+    /// <see cref="BuildVectorSearchPipeline"/>, no stage narrows the document, so
+    /// <see cref="MongoDBRAGResult.RawDocument"/> preserves the complete original document alongside the added
+    /// score alias.
+    /// </summary>
+    /// <param name="indexName">The configured Search index name.</param>
+    /// <param name="textFieldNames">
+    /// The configured full-text field paths. A single entry renders as a scalar <c>path</c>; more than one renders
+    /// as an array, matching the <c>$search</c> <c>text</c> operator's own scalar/array duality.
+    /// </param>
+    /// <param name="queryText">The natural-language query text.</param>
+    /// <param name="limit">The final result limit (<c>topK</c>).</param>
+    /// <param name="filter">
+    /// The translated <c>compound.filter</c> array, or <see langword="null"/> to omit the property entirely when
+    /// there is no effective mandatory filter.
+    /// </param>
+    public static BsonDocument[] BuildFullTextSearchPipeline(
+        string indexName,
+        IReadOnlyList<string> textFieldNames,
+        string queryText,
+        int limit,
+        BsonArray? filter)
+    {
+        var textClause = new BsonDocument(
+            "text",
+            new BsonDocument { { "query", queryText }, { "path", TextPath(textFieldNames) } });
+        var compound = new BsonDocument("must", new BsonArray { textClause });
+        if (filter is not null)
+        {
+            compound.Add("filter", filter);
+        }
+
+        var searchOptions = new SearchOptions<BsonDocument> { IndexName = indexName };
+        PipelineStageDefinition<BsonDocument, BsonDocument> searchStage =
+            PipelineStageDefinitionBuilder.Search<BsonDocument>(
+                new BsonDocumentSearchDefinition<BsonDocument>(new BsonDocument("compound", compound)),
+                searchOptions);
+
+        return
+        [
+            searchStage.Render(RenderArgs).Document,
+            new BsonDocument("$limit", limit),
+            new BsonDocument(
+                "$set",
+                new BsonDocument(FieldPath.ReservedScoreAlias, new BsonDocument("$meta", "searchScore"))),
+        ];
+    }
+
+    private static BsonValue TextPath(IReadOnlyList<string> textFieldNames) =>
+        textFieldNames.Count == 1 ? textFieldNames[0] : new BsonArray(textFieldNames);
 }

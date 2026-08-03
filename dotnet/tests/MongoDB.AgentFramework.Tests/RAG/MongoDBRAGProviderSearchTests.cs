@@ -178,7 +178,6 @@ public sealed class MongoDBRAGProviderSearchTests
     }
 
     [Theory]
-    [InlineData(MongoDBSearchMode.FullText)]
     [InlineData(MongoDBSearchMode.HybridRrf)]
     public async Task UnsupportedModesAreRejectedBeforeAnyEmbeddingOrNetworkCall(MongoDBSearchMode mode)
     {
@@ -324,6 +323,119 @@ public sealed class MongoDBRAGProviderSearchTests
         await provider.SearchAsync("query");
     }
 
+    [Fact]
+    public async Task FullTextSearchBuildsASearchStageWithTheConfiguredIndexAndTextFields()
+    {
+        var state = new RAGCollectionState
+        {
+            Results = [new BsonDocument { { "_id", "chunk-1" }, { "text", "chunk" }, { "_ragScore", 1.5 } }],
+        };
+        var options = new MongoDBRAGProviderOptions
+        {
+            SearchMode = MongoDBSearchMode.FullText,
+            SearchIndexName = "search_index",
+            SearchTextFieldNames = ["title", "body"],
+            TopK = 4,
+        };
+        MongoDBRAGProvider provider = CreateFullTextProvider(state, options);
+
+        await provider.SearchAsync("blue widgets");
+
+        BsonDocument search = state.AggregateStages[0]["$search"].AsBsonDocument;
+        Assert.Equal("search_index", search["index"].AsString);
+        BsonDocument textClause = search["compound"]["must"].AsBsonArray[0].AsBsonDocument["text"].AsBsonDocument;
+        Assert.Equal("blue widgets", textClause["query"].AsString);
+        Assert.Equal(new BsonArray(["title", "body"]), textClause["path"].AsBsonArray);
+        Assert.Equal(new BsonDocument("$limit", 4), state.AggregateStages[1]);
+    }
+
+    [Fact]
+    public async Task FullTextSearchPlacesTheMandatoryFilterInsideCompoundFilter()
+    {
+        var state = new RAGCollectionState
+        {
+            Results = [new BsonDocument { { "_id", "chunk-1" }, { "text", "chunk" }, { "_ragScore", 1.5 } }],
+        };
+        var options = new MongoDBRAGProviderOptions
+        {
+            SearchMode = MongoDBSearchMode.FullText,
+            MandatoryFilter = MongoDBRAGFilter.Equal("tenant_id", "tenant-a"),
+        };
+        MongoDBRAGProvider provider = CreateFullTextProvider(state, options);
+
+        await provider.SearchAsync("blue widgets");
+
+        BsonArray filter = state.AggregateStages[0]["$search"]["compound"]["filter"].AsBsonArray;
+        Assert.Equal(
+            BsonDocument.Parse("""{"equals":{"path":"tenant_id","value":"tenant-a"}}"""),
+            filter[0].AsBsonDocument);
+    }
+
+    [Fact]
+    public async Task FullTextSearchDoesNotRequireOrInvokeAnEmbeddingGeneratorEvenWhenOneIsConfigured()
+    {
+        var state = new RAGCollectionState
+        {
+            Results = [new BsonDocument { { "_id", "chunk-1" }, { "text", "chunk" }, { "_ragScore", 1.5 } }],
+        };
+        var embeddings = new RecordingEmbeddingGenerator();
+        var options = new MongoDBRAGProviderOptions { SearchMode = MongoDBSearchMode.FullText };
+        // Uses the vector-family constructor (which still accepts an embedding generator) with FullText mode, to
+        // prove EmbedAsync is never invoked for this mode regardless of which constructor family was used.
+        MongoDBRAGProvider provider = CreateProvider(state, embeddings, options);
+
+        await provider.SearchAsync("blue widgets");
+
+        Assert.Empty(embeddings.Calls);
+    }
+
+    [Fact]
+    public async Task FullTextSearchUsesTheNativeSearchScoreAndPreservesTheRawDocument()
+    {
+        var state = new RAGCollectionState
+        {
+            Results =
+            [
+                new BsonDocument
+                {
+                    { "_id", "chunk-1" },
+                    { "text", "Example chunk." },
+                    { "_ragScore", 4.2 },
+                    { "category", "docs" },
+                },
+            ],
+        };
+        var options = new MongoDBRAGProviderOptions
+        {
+            SearchMode = MongoDBSearchMode.FullText,
+            MetadataFieldNames = ["category"],
+        };
+        MongoDBRAGProvider provider = CreateFullTextProvider(state, options);
+
+        MongoDBRAGResult result = Assert.Single(await provider.SearchAsync("blue widgets"));
+
+        Assert.Equal(4.2, result.Score);
+        Assert.Equal("docs", result.RawDocument["category"].AsString);
+        Assert.False(result.RawDocument.Contains("_ragScore"));
+    }
+
+    [Fact]
+    public async Task FullTextSearchDoesNotIncludeANarrowingProjectStage()
+    {
+        var state = new RAGCollectionState
+        {
+            Results = [new BsonDocument { { "_id", "chunk-1" }, { "text", "chunk" }, { "_ragScore", 1.0 } }],
+        };
+        MongoDBRAGProvider provider = CreateFullTextProvider(
+            state,
+            new MongoDBRAGProviderOptions { SearchMode = MongoDBSearchMode.FullText });
+
+        await provider.SearchAsync("query");
+
+        Assert.Equal(3, state.AggregateStages.Count);
+        Assert.DoesNotContain(state.AggregateStages, stage => stage.Contains("$project"));
+    }
+
     private static MongoDBRAGProvider CreateProvider(
         RAGCollectionState state,
         RecordingEmbeddingGenerator? embeddings = null,
@@ -333,4 +445,11 @@ public sealed class MongoDBRAGProviderSearchTests
             embeddings ?? new RecordingEmbeddingGenerator(),
             3,
             options ?? new MongoDBRAGProviderOptions { SearchMode = MongoDBSearchMode.VectorAnn });
+
+    private static MongoDBRAGProvider CreateFullTextProvider(
+        RAGCollectionState state,
+        MongoDBRAGProviderOptions? options = null) =>
+        new(
+            RAGCollectionProxy.Create(state),
+            options ?? new MongoDBRAGProviderOptions { SearchMode = MongoDBSearchMode.FullText });
 }

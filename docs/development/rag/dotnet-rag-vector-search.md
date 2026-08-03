@@ -13,7 +13,9 @@ specification.
 This slice adds live `VectorAnn`/`VectorEnn` retrieval through `MongoDBRAGProvider.SearchAsync` and a before-invoke
 `MongoDBRAGContextProvider` adapter. It intentionally does **not** implement `FullText` or `HybridRrf` modes, Vector
 Search index provisioning, on-demand retrieval tools, or a `TextSearchProvider` composition adapter. Those remain
-later implementation-map slices (10, 12, 13).
+later implementation-map slices (10, 12, 13). `FullText` is now implemented in
+[slice 10](dotnet-rag-full-text-search.md), which builds directly on this slice's `SearchAsync`/context-adapter seams
+and reuses this document's result-mapping, cancellation, and citation sections unchanged.
 
 ## Public surface
 
@@ -129,8 +131,9 @@ When `NumCandidates` is not explicitly configured for `VectorAnn`, `MongoDBRAGPr
 
 ## Errors and cancellation
 
-- `RequireVectorMode()` is checked **before** any embedding call or network round-trip, so `FullText`/`HybridRrf`
-  configurations fail fast with `MongoDBCapabilityException` rather than partially executing.
+- `RequireSupportedMode()` is checked **before** any embedding call or network round-trip, so an `HybridRrf`
+  configuration fails fast with `MongoDBCapabilityException` rather than partially executing. `VectorAnn`,
+  `VectorEnn`, and `FullText` (see [slice 10](dotnet-rag-full-text-search.md)) are all accepted here.
 - Embedding failures and invalid vectors (dimension mismatch, non-finite values) surface as
   `MongoDBEmbeddingException` through the shared `Internal.EmbeddingValidator`, reused unchanged from Memory.
   `MongoDBEmbeddingException` inherits `MongoDBRetrievalException`, which the fail-open catch list treats uniformly.
@@ -233,7 +236,7 @@ the sample's header comment) since this slice does not provision indexes.
 
 ## Deferred to later slices
 
-- `FullText` and `HybridRrf` retrieval modes (slices 10, 12).
+- `HybridRrf` retrieval mode (slice 12).
 - Vector Search index provisioning/`EnsureVectorSearchIndexAsync`-equivalent for RAG (slice 13).
 - The `TextSearchProvider` composition/citation adapter, once a resolved package version exposes it.
 - On-demand retrieval tool exposure and structured `MetadataQueryPlan` retrieval.
