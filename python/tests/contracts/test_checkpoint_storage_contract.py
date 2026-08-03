@@ -1,0 +1,41 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any, cast
+
+from agent_framework import CheckpointStorage
+
+from agent_framework_mongodb import (
+    MongoDBCheckpointStorage,
+    MongoDBCheckpointStorageOptions,
+)
+
+
+def test_checkpoint_storage_contract_matches_public_surface() -> None:
+    fixture_path = Path(__file__).parent / "fixtures" / "checkpoint_storage_contract.json"
+    contract = cast(dict[str, Any], json.loads(fixture_path.read_text(encoding="utf-8")))
+
+    assert CheckpointStorage in MongoDBCheckpointStorage.__mro__
+    assert contract["schema_version"] == MongoDBCheckpointStorage.SCHEMA_VERSION
+    assert (
+        contract["framework_serialization"]
+        == MongoDBCheckpointStorage.FRAMEWORK_SERIALIZATION_VERSION
+    )
+    assert contract["payload_versions"] == sorted(
+        MongoDBCheckpointStorage.SUPPORTED_PAYLOAD_VERSIONS
+    )
+    assert contract["collection_default"] == MongoDBCheckpointStorage.DEFAULT_COLLECTION_NAME
+    defaults = MongoDBCheckpointStorageOptions(
+        tenant_id="tenant",
+        workflow_name="workflow",
+        session_id="session",
+    )
+    assert contract["pagination"]["default_page_size"] == defaults.page_size
+    assert contract["pagination"]["maximum_page_size"] == defaults.max_page_size
+    assert [item["name"] for item in contract["indexes"]] == [
+        "checkpoint_scope_identity",
+        "checkpoint_scope_sequence",
+        "checkpoint_scope_lineage",
+        "checkpoint_expiration",
+    ]

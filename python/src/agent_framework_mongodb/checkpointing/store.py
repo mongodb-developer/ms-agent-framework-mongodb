@@ -1,0 +1,774 @@
+"""MongoDB-backed Agent Framework workflow checkpoints."""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import hashlib
+import io
+import json
+import logging
+import pickle  # nosec B403 -- restricted unpickling of authorized checkpoint storage
+import time
+from collections.abc import Mapping
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from types import TracebackType
+from typing import Any, ClassVar, TypeAlias, cast
+
+from agent_framework import (
+    CheckpointID,
+    CheckpointStorage,
+    WorkflowCheckpoint,
+    WorkflowCheckpointException,
+)
+from bson.binary import Binary
+from pymongo import ASCENDING, DESCENDING, AsyncMongoClient, ReturnDocument
+from pymongo.asynchronous.collection import AsyncCollection
+from pymongo.errors import (
+    ConnectionFailure,
+    DuplicateKeyError,
+    OperationFailure,
+    PyMongoError,
+    ServerSelectionTimeoutError,
+)
+
+from .._shared.client import MongoClientHandle
+from ..errors import (
+    MongoDBAuthorizationError,
+    MongoDBConcurrencyError,
+    MongoDBConfigurationError,
+    MongoDBIndexMismatchError,
+    MongoDBIndexMissingError,
+    MongoDBMappingError,
+    MongoDBPersistenceError,
+    MongoDBRetrievalError,
+    MongoDBTransientPersistenceError,
+    MongoDBTransientRetrievalError,
+)
+
+MongoDocument: TypeAlias = dict[str, Any]
+_LOGGER = logging.getLogger(__name__)
+
+_SAFE_GLOBALS = frozenset(
+    {
+        "builtins:object",
+        "builtins:complex",
+        "builtins:range",
+        "builtins:slice",
+        "builtins:int",
+        "builtins:float",
+        "builtins:str",
+        "builtins:bytes",
+        "builtins:bytearray",
+        "builtins:bool",
+        "builtins:set",
+        "builtins:frozenset",
+        "builtins:list",
+        "builtins:dict",
+        "builtins:tuple",
+        "copyreg:_reconstructor",
+        "datetime:datetime",
+        "datetime:date",
+        "datetime:time",
+        "datetime:timedelta",
+        "datetime:timezone",
+        "decimal:Decimal",
+        "uuid:UUID",
+        "collections:OrderedDict",
+        "collections:defaultdict",
+        "collections:deque",
+    }
+)
+
+
+class MongoDBCheckpointNotFoundError(
+    MongoDBRetrievalError,
+    WorkflowCheckpointException,
+):
+    """Raised when no checkpoint exists in the complete authorized scope."""
+
+
+def _required_scope(value: object, name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise MongoDBConfigurationError(f"{name} must be a non-empty string.")
+    return value.strip()
+
+
+@dataclass(frozen=True, slots=True)
+class MongoDBCheckpointStorageOptions:
+    """Immutable workflow, run, authorization, retention, and paging settings."""
+
+    tenant_id: str = ""
+    workflow_name: str = ""
+    session_id: str = ""
+    application_id: str | None = None
+    ttl: timedelta | None = None
+    page_size: int = 100
+    max_page_size: int = 1000
+    allowed_checkpoint_types: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        for name in ("tenant_id", "workflow_name", "session_id"):
+            object.__setattr__(self, name, _required_scope(getattr(self, name), name))
+        if self.application_id is not None:
+            object.__setattr__(
+                self,
+                "application_id",
+                _required_scope(self.application_id, "application_id"),
+            )
+        if self.ttl is not None and (type(self.ttl) is not timedelta or self.ttl <= timedelta(0)):
+            raise MongoDBConfigurationError("ttl must be a positive duration.")
+        if type(self.page_size) is not int or self.page_size < 1:
+            raise MongoDBConfigurationError("page_size must be a positive integer.")
+        if type(self.max_page_size) is not int or self.max_page_size < 1:
+            raise MongoDBConfigurationError("max_page_size must be a positive integer.")
+        if self.page_size > self.max_page_size:
+            raise MongoDBConfigurationError("page_size must not exceed max_page_size.")
+        normalized_types: list[str] = []
+        for type_key in self.allowed_checkpoint_types:
+            if ":" not in type_key or not all(part.strip() for part in type_key.split(":", 1)):
+                raise MongoDBConfigurationError(
+                    "allowed_checkpoint_types entries must use 'module:qualname' format."
+                )
+            normalized_types.append(type_key.strip())
+        object.__setattr__(self, "allowed_checkpoint_types", tuple(normalized_types))
+
+
+@dataclass(frozen=True, slots=True)
+class MongoDBCheckpointPage:
+    """One bounded, deterministic page of checkpoints."""
+
+    checkpoints: tuple[WorkflowCheckpoint, ...]
+    next_cursor: str | None
+
+
+class MongoDBCheckpointStorage(CheckpointStorage):
+    """Persist immutable checkpoints in one constructor-bound authorized run."""
+
+    SCHEMA_VERSION: ClassVar[int] = 1
+    CURSOR_VERSION: ClassVar[int] = 1
+    FRAMEWORK_SERIALIZATION_VERSION: ClassVar[str] = (
+        "agent-framework-core/1:WorkflowCheckpoint.to_dict/v1"
+    )
+    SUPPORTED_PAYLOAD_VERSIONS: ClassVar[frozenset[str]] = frozenset({"1.0"})
+    DEFAULT_DATABASE_NAME: ClassVar[str] = "agent_framework"
+    DEFAULT_COLLECTION_NAME: ClassVar[str] = "workflow_checkpoints"
+
+    def __init__(
+        self,
+        collection: AsyncCollection[MongoDocument] | None = None,
+        *,
+        options: MongoDBCheckpointStorageOptions,
+        connection_string: str = "mongodb://localhost:27017",
+        database_name: str = DEFAULT_DATABASE_NAME,
+        collection_name: str = DEFAULT_COLLECTION_NAME,
+        mongo_client: AsyncMongoClient[MongoDocument] | None = None,
+    ) -> None:
+        if collection is not None and mongo_client is not None:
+            raise MongoDBConfigurationError("Provide either collection or mongo_client, not both.")
+        self.options = options
+        self.database_name = _required_scope(database_name, "database_name")
+        self.collection_name = _required_scope(collection_name, "collection_name")
+        self._scope_discriminator = _canonical_hash(
+            {
+                "version": 1,
+                "tenant_id": options.tenant_id,
+                "application_id": options.application_id,
+                "workflow_name": options.workflow_name,
+                "session_id": options.session_id,
+            }
+        )
+        self._allowed_types = frozenset(options.allowed_checkpoint_types)
+        self._client_handle: MongoClientHandle | None
+        if collection is not None:
+            self._client_handle = None
+            self.collection = collection
+        else:
+            self._client_handle = (
+                MongoClientHandle.from_client(mongo_client)
+                if mongo_client is not None
+                else MongoClientHandle.from_uri(connection_string)
+            )
+            client = cast(AsyncMongoClient[MongoDocument], self._client_handle.client)
+            self.collection = client[self.database_name][self.collection_name]
+
+    @property
+    def owns_client(self) -> bool:
+        """Return whether this storage created its MongoDB client."""
+        return self._client_handle is not None and self._client_handle.owns_client
+
+    def _validate_workflow(self, workflow_name: str) -> str:
+        workflow_name = _required_scope(workflow_name, "workflow_name")
+        if workflow_name != self.options.workflow_name:
+            raise MongoDBConfigurationError(
+                "workflow_name must match the constructor-bound workflow_name."
+            )
+        return workflow_name
+
+    def _partition(self, workflow_name: str) -> MongoDocument:
+        return {
+            "_kind": "workflow_checkpoint",
+            "scope_discriminator": self._scope_discriminator,
+            "tenant_id": self.options.tenant_id,
+            "application_id": self.options.application_id,
+            "workflow_name": self._validate_workflow(workflow_name),
+            "session_id": self.options.session_id,
+        }
+
+    def _identity(self, checkpoint_id: CheckpointID) -> MongoDocument:
+        checkpoint_id = _required_scope(checkpoint_id, "checkpoint_id")
+        partition = self._partition(self.options.workflow_name)
+        return {
+            "_id": _canonical_hash(
+                {
+                    "kind": "workflow_checkpoint",
+                    "scope_discriminator": self._scope_discriminator,
+                    "workflow_name": self.options.workflow_name,
+                    "session_id": self.options.session_id,
+                    "checkpoint_id": checkpoint_id,
+                }
+            ),
+            **partition,
+            "checkpoint_id": checkpoint_id,
+        }
+
+    async def save(self, checkpoint: WorkflowCheckpoint) -> CheckpointID:
+        """Save once, return the stable ID on an identical retry, and reject conflicts."""
+        if type(checkpoint) is not WorkflowCheckpoint:
+            raise TypeError("checkpoint must be a WorkflowCheckpoint.")
+        self._validate_workflow(checkpoint.workflow_name)
+        if checkpoint.previous_checkpoint_id == checkpoint.checkpoint_id:
+            raise MongoDBConfigurationError("A checkpoint cannot be its own parent.")
+        identity = self._identity(checkpoint.checkpoint_id)
+        payload, payload_hash = _serialize(checkpoint)
+        _validate_payload_version(checkpoint.version)
+        existing = await self._find_one(identity)
+        if existing is not None:
+            _validate_versions(existing)
+            if existing.get("payload_hash") == payload_hash:
+                return checkpoint.checkpoint_id
+            raise MongoDBConcurrencyError(
+                "The checkpoint ID already exists with a different payload."
+            )
+
+        sequence = await self._allocate_sequence()
+        now = _to_bson_utc_milliseconds(datetime.now(timezone.utc))
+        document: MongoDocument = {
+            **identity,
+            "schema_version": self.SCHEMA_VERSION,
+            "framework_version": self.FRAMEWORK_SERIALIZATION_VERSION,
+            "payload_version": checkpoint.version,
+            "parent_checkpoint_id": checkpoint.previous_checkpoint_id,
+            "sequence": sequence,
+            "created_at": now,
+            "checkpoint": payload,
+            "payload_hash": payload_hash,
+        }
+        if self.options.ttl is not None:
+            document["expires_at"] = _to_bson_utc_milliseconds(now + self.options.ttl)
+        started = time.monotonic()
+        try:
+            await self.collection.insert_one(document)
+        except DuplicateKeyError:
+            winner = await self._find_one(identity)
+            if winner is not None:
+                _validate_versions(winner)
+                if winner.get("payload_hash") == payload_hash:
+                    return checkpoint.checkpoint_id
+            raise MongoDBConcurrencyError(
+                "The checkpoint ID or sequence was claimed by a conflicting save."
+            ) from None
+        except PyMongoError as exc:
+            _log_failure("persist", started, _error_category(exc, "persistence"))
+            raise _translate_mongo_error(exc, "persistence") from exc
+        _log_success("persist", started, 1)
+        return checkpoint.checkpoint_id
+
+    async def load(self, checkpoint_id: CheckpointID) -> WorkflowCheckpoint:
+        """Load one checkpoint from the complete authorized scope."""
+        started = time.monotonic()
+        document = await self._find_one(self._identity(checkpoint_id))
+        if document is None:
+            _log_success("load", started, 0)
+            raise MongoDBCheckpointNotFoundError(
+                "No checkpoint was found in the authorized workflow session."
+            )
+        restored = self._restore(document)
+        _log_success("load", started, 1)
+        return restored
+
+    async def list_checkpoints(self, *, workflow_name: str) -> list[WorkflowCheckpoint]:
+        """Return the first bounded page in monotonic sequence order."""
+        page = await self.list_checkpoint_page(workflow_name=workflow_name)
+        return list(page.checkpoints)
+
+    async def list_checkpoint_page(
+        self,
+        *,
+        workflow_name: str,
+        cursor: str | None = None,
+        limit: int | None = None,
+    ) -> MongoDBCheckpointPage:
+        """Return a bounded page and an opaque cursor for the next page."""
+        workflow_name = self._validate_workflow(workflow_name)
+        effective_limit = self.options.page_size if limit is None else limit
+        if (
+            type(effective_limit) is not int
+            or not 1 <= effective_limit <= self.options.max_page_size
+        ):
+            raise MongoDBConfigurationError(
+                f"limit must be between 1 and {self.options.max_page_size}."
+            )
+        query = self._partition(workflow_name)
+        if cursor is not None:
+            sequence, checkpoint_id = _decode_cursor(cursor)
+            query = {
+                **query,
+                "$or": [
+                    {"sequence": {"$gt": sequence}},
+                    {"sequence": sequence, "checkpoint_id": {"$gt": checkpoint_id}},
+                ],
+            }
+        documents = await self._find_many(query, effective_limit + 1)
+        has_more = len(documents) > effective_limit
+        selected = documents[:effective_limit]
+        checkpoints = tuple(self._restore(document) for document in selected)
+        next_cursor = None
+        if has_more and selected:
+            last = selected[-1]
+            next_cursor = _encode_cursor(
+                _document_sequence(last),
+                cast(str, last["checkpoint_id"]),
+            )
+        return MongoDBCheckpointPage(checkpoints=checkpoints, next_cursor=next_cursor)
+
+    async def delete(self, checkpoint_id: CheckpointID) -> bool:
+        """Delete one checkpoint from the complete authorized scope."""
+        started = time.monotonic()
+        try:
+            result = await self.collection.delete_one(self._identity(checkpoint_id))
+        except PyMongoError as exc:
+            _log_failure("delete", started, _error_category(exc, "persistence"))
+            raise _translate_mongo_error(exc, "persistence") from exc
+        _log_success("delete", started, result.deleted_count)
+        return result.deleted_count == 1
+
+    async def get_latest(self, *, workflow_name: str) -> WorkflowCheckpoint | None:
+        """Load the greatest monotonic sequence in the authorized workflow session."""
+        started = time.monotonic()
+        document = await self._find_one(
+            self._partition(workflow_name),
+            sort=[("sequence", DESCENDING), ("checkpoint_id", DESCENDING)],
+        )
+        if document is None:
+            _log_success("load", started, 0)
+            return None
+        restored = self._restore(document)
+        _log_success("load", started, 1)
+        return restored
+
+    async def list_checkpoint_ids(self, *, workflow_name: str) -> list[CheckpointID]:
+        """Return IDs from the first bounded page in monotonic sequence order."""
+        page = await self.list_checkpoint_page(workflow_name=workflow_name)
+        return [checkpoint.checkpoint_id for checkpoint in page.checkpoints]
+
+    async def _allocate_sequence(self) -> int:
+        counter_identity = {
+            "_id": _canonical_hash(
+                {
+                    "kind": "workflow_checkpoint_counter",
+                    "scope_discriminator": self._scope_discriminator,
+                    "workflow_name": self.options.workflow_name,
+                    "session_id": self.options.session_id,
+                }
+            ),
+            "_kind": "workflow_checkpoint_counter",
+            "scope_discriminator": self._scope_discriminator,
+            "tenant_id": self.options.tenant_id,
+            "application_id": self.options.application_id,
+            "workflow_name": self.options.workflow_name,
+            "session_id": self.options.session_id,
+        }
+        try:
+            counter = await self.collection.find_one_and_update(
+                counter_identity,
+                {
+                    "$inc": {"sequence": 1},
+                    "$setOnInsert": {"created_at": datetime.now(timezone.utc)},
+                },
+                upsert=True,
+                return_document=ReturnDocument.AFTER,
+            )
+        except PyMongoError as exc:
+            raise _translate_mongo_error(exc, "persistence") from exc
+        if counter is None:
+            raise MongoDBPersistenceError(
+                "MongoDB Workflow Checkpoint sequence allocation returned no document."
+            )
+        return _document_sequence(counter)
+
+    async def _find_one(
+        self,
+        query: MongoDocument,
+        *,
+        sort: list[tuple[str, int]] | None = None,
+    ) -> MongoDocument | None:
+        try:
+            return await self.collection.find_one(query, sort=sort)
+        except PyMongoError as exc:
+            raise _translate_mongo_error(exc, "retrieval") from exc
+
+    async def _find_many(self, query: MongoDocument, limit: int) -> list[MongoDocument]:
+        started = time.monotonic()
+        try:
+            cursor = self.collection.find(query)
+            cursor = cursor.sort([("sequence", ASCENDING), ("checkpoint_id", ASCENDING)])
+            cursor = cursor.limit(limit)
+            documents = await cursor.to_list(length=limit)
+        except PyMongoError as exc:
+            _log_failure("list", started, _error_category(exc, "retrieval"))
+            raise _translate_mongo_error(exc, "retrieval") from exc
+        _log_success("list", started, len(documents))
+        return documents
+
+    def _restore(self, document: MongoDocument) -> WorkflowCheckpoint:
+        _validate_versions(document)
+        _document_sequence(document)
+        payload_version = document.get("payload_version")
+        _validate_payload_version(payload_version)
+        payload = document.get("checkpoint")
+        if not isinstance(payload, (bytes, Binary)):
+            raise MongoDBMappingError(
+                "Stored checkpoint payload is invalid; migrate or delete the authorized checkpoint."
+            )
+        try:
+            decoded = _restricted_loads(bytes(payload), self._allowed_types)
+        except Exception as exc:
+            if isinstance(exc, MongoDBMappingError):
+                raise
+            raise MongoDBMappingError(
+                "Stored checkpoint payload cannot be restored; "
+                "migrate or delete the authorized checkpoint."
+            ) from exc
+        if not isinstance(decoded, dict):
+            raise MongoDBMappingError(
+                "Stored checkpoint payload is not a public WorkflowCheckpoint dictionary; "
+                "migrate the authorized checkpoint."
+            )
+        try:
+            checkpoint = WorkflowCheckpoint.from_dict(cast(dict[str, Any], decoded))
+        except WorkflowCheckpointException as exc:
+            raise MongoDBMappingError(
+                "Stored checkpoint payload cannot be restored; "
+                "migrate or delete the authorized checkpoint."
+            ) from exc
+        if (
+            checkpoint.checkpoint_id != document.get("checkpoint_id")
+            or checkpoint.workflow_name != document.get("workflow_name")
+            or checkpoint.previous_checkpoint_id != document.get("parent_checkpoint_id")
+            or checkpoint.version != payload_version
+        ):
+            raise MongoDBMappingError(
+                "Stored checkpoint envelope and payload disagree; "
+                "migrate the authorized checkpoint."
+            )
+        return checkpoint
+
+    async def ensure_indexes(self) -> tuple[str, ...]:
+        """Explicitly create checkpoint identity, ordering, lineage, and TTL indexes."""
+        partial = {
+            "_kind": "workflow_checkpoint",
+            "scope_discriminator": {"$type": "string"},
+        }
+        prefix = [
+            ("scope_discriminator", ASCENDING),
+            ("workflow_name", ASCENDING),
+            ("session_id", ASCENDING),
+        ]
+        definitions: list[tuple[list[tuple[str, int]], dict[str, Any]]] = [
+            (
+                [*prefix, ("checkpoint_id", ASCENDING)],
+                {
+                    "name": "checkpoint_scope_identity",
+                    "unique": True,
+                    "collation": {"locale": "simple"},
+                    "partialFilterExpression": partial,
+                },
+            ),
+            (
+                [*prefix, ("sequence", ASCENDING)],
+                {
+                    "name": "checkpoint_scope_sequence",
+                    "unique": True,
+                    "collation": {"locale": "simple"},
+                    "partialFilterExpression": partial,
+                },
+            ),
+            (
+                [*prefix, ("parent_checkpoint_id", ASCENDING)],
+                {
+                    "name": "checkpoint_scope_lineage",
+                    "collation": {"locale": "simple"},
+                    "partialFilterExpression": partial,
+                },
+            ),
+            (
+                [("expires_at", ASCENDING)],
+                {
+                    "name": "checkpoint_expiration",
+                    "expireAfterSeconds": 0,
+                    "partialFilterExpression": partial,
+                },
+            ),
+        ]
+        try:
+            return tuple(
+                [await self.collection.create_index(keys, **kwargs) for keys, kwargs in definitions]
+            )
+        except PyMongoError as exc:
+            raise _translate_mongo_error(exc, "persistence") from exc
+
+    async def validate_indexes(self) -> None:
+        """Validate required regular indexes without mutating MongoDB."""
+        try:
+            cursor = await self.collection.list_indexes()
+            indexes = await cursor.to_list(length=None)
+        except asyncio.CancelledError:
+            raise
+        except PyMongoError as exc:
+            raise _translate_mongo_error(exc, "retrieval") from exc
+        by_name = {str(index.get("name")): index for index in indexes}
+        partial = {
+            "_kind": "workflow_checkpoint",
+            "scope_discriminator": {"$type": "string"},
+        }
+        prefix = (
+            ("scope_discriminator", 1),
+            ("workflow_name", 1),
+            ("session_id", 1),
+        )
+        required = {
+            "checkpoint_scope_identity": ((*prefix, ("checkpoint_id", 1)), True, None),
+            "checkpoint_scope_sequence": ((*prefix, ("sequence", 1)), True, None),
+            "checkpoint_scope_lineage": (
+                (*prefix, ("parent_checkpoint_id", 1)),
+                False,
+                None,
+            ),
+            "checkpoint_expiration": ((("expires_at", 1),), False, 0),
+        }
+        for name, (keys, unique, expire_after) in required.items():
+            index = by_name.get(name)
+            if index is None:
+                raise MongoDBIndexMissingError(
+                    f"Regular index '{name}' does not exist; create it explicitly."
+                )
+            if (
+                _index_keys(index) != keys
+                or bool(index.get("unique", False)) is not unique
+                or index.get("partialFilterExpression") != partial
+                or (expire_after is None and not _has_simple_collation(index))
+                or (expire_after is not None and index.get("expireAfterSeconds") != expire_after)
+            ):
+                raise MongoDBIndexMismatchError(
+                    f"Regular index '{name}' is incompatible; recreate it with ensure_indexes()."
+                )
+
+    async def close(self) -> None:
+        """Close only the client created by this storage."""
+        if self._client_handle is not None:
+            await self._client_handle.close()
+
+    async def __aenter__(self) -> MongoDBCheckpointStorage:
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        await self.close()
+
+
+class _RestrictedCheckpointUnpickler(pickle.Unpickler):  # nosec B301
+    def __init__(self, payload: bytes, allowed_types: frozenset[str]) -> None:
+        super().__init__(io.BytesIO(payload))
+        self._allowed_types = allowed_types
+
+    def find_class(self, module: str, name: str) -> Any:
+        key = f"{module}:{name}"
+        if key in _SAFE_GLOBALS or key in self._allowed_types:
+            resolved = super().find_class(module, name)  # nosec B301
+            if isinstance(resolved, type) or key in _SAFE_GLOBALS:
+                return resolved
+        if module.startswith("agent_framework."):
+            resolved = super().find_class(module, name)  # nosec B301
+            if isinstance(resolved, type):
+                return resolved
+        raise pickle.UnpicklingError(
+            f"Checkpoint deserialization blocked for type '{key}'. "
+            "Add the application type to allowed_checkpoint_types before loading."
+        )
+
+
+def _serialize(checkpoint: WorkflowCheckpoint) -> tuple[Binary, str]:
+    public_payload = checkpoint.to_dict()
+    try:
+        encoded = pickle.dumps(public_payload, protocol=pickle.HIGHEST_PROTOCOL)
+    except (pickle.PickleError, TypeError, AttributeError) as exc:
+        raise MongoDBMappingError(
+            "Checkpoint public state cannot be serialized; "
+            "store only serializable workflow and executor state."
+        ) from exc
+    return Binary(encoded), hashlib.sha256(encoded).hexdigest()
+
+
+def _restricted_loads(payload: bytes, allowed_types: frozenset[str]) -> Any:
+    return _RestrictedCheckpointUnpickler(payload, allowed_types).load()
+
+
+def _canonical_hash(value: object) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _encode_cursor(sequence: int, checkpoint_id: str) -> str:
+    payload = json.dumps(
+        {"v": MongoDBCheckpointStorage.CURSOR_VERSION, "s": sequence, "i": checkpoint_id},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+
+def _decode_cursor(cursor: str) -> tuple[int, str]:
+    if not cursor:
+        raise MongoDBConfigurationError("cursor must be a non-empty string.")
+    try:
+        padding = "=" * (-len(cursor) % 4)
+        decoded = cast(
+            object,
+            json.loads(base64.b64decode(cursor + padding, altchars=b"-_", validate=True)),
+        )
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise MongoDBConfigurationError("cursor is invalid or incompatible.") from exc
+    if not isinstance(decoded, dict):
+        raise MongoDBConfigurationError("cursor is invalid or incompatible.")
+    values = cast(dict[str, object], decoded)
+    version = values.get("v")
+    sequence = values.get("s")
+    checkpoint_id = values.get("i")
+    if (
+        version != MongoDBCheckpointStorage.CURSOR_VERSION
+        or type(sequence) is not int
+        or sequence < 1
+        or not isinstance(checkpoint_id, str)
+        or not checkpoint_id
+    ):
+        raise MongoDBConfigurationError("cursor is invalid or incompatible.")
+    return sequence, checkpoint_id
+
+
+def _document_sequence(document: Mapping[str, Any]) -> int:
+    sequence = document.get("sequence")
+    if type(sequence) is not int or sequence < 1:
+        raise MongoDBMappingError(
+            "Stored checkpoint sequence is invalid; migrate the authorized workflow session."
+        )
+    return sequence
+
+
+def _validate_payload_version(version: object) -> None:
+    if version not in MongoDBCheckpointStorage.SUPPORTED_PAYLOAD_VERSIONS:
+        raise MongoDBMappingError(
+            f"Unsupported WorkflowCheckpoint payload version {version!r}; "
+            "migrate it with a supported Agent Framework version before loading."
+        )
+
+
+def _validate_versions(document: Mapping[str, Any]) -> None:
+    schema_version = document.get("schema_version")
+    if schema_version != MongoDBCheckpointStorage.SCHEMA_VERSION:
+        raise MongoDBMappingError(
+            f"Unsupported checkpoint schema version {schema_version!r}; "
+            "migrate the authorized checkpoint to schema version 1 before loading it."
+        )
+    framework_version = document.get("framework_version")
+    if framework_version != MongoDBCheckpointStorage.FRAMEWORK_SERIALIZATION_VERSION:
+        raise MongoDBMappingError(
+            "Unsupported WorkflowCheckpoint framework serialization version "
+            f"{framework_version!r}; "
+            "migrate the authorized checkpoint with a supported Agent Framework version."
+        )
+
+
+def _to_bson_utc_milliseconds(value: datetime) -> datetime:
+    normalized = value.astimezone(timezone.utc)
+    return normalized.replace(microsecond=(normalized.microsecond // 1000) * 1000)
+
+
+def _index_keys(index: Mapping[str, Any]) -> tuple[tuple[str, int], ...]:
+    raw = index.get("key")
+    if not isinstance(raw, Mapping):
+        return ()
+    keys = cast(Mapping[str, int], raw)
+    return tuple((name, value) for name, value in keys.items())
+
+
+def _has_simple_collation(index: Mapping[str, Any]) -> bool:
+    raw = index.get("collation")
+    if raw is None:
+        return True
+    if not isinstance(raw, Mapping):
+        return False
+    collation = cast(Mapping[str, object], raw)
+    return collation.get("locale") == "simple"
+
+
+def _translate_mongo_error(error: PyMongoError, operation: str) -> Exception:
+    if isinstance(error, OperationFailure) and error.code in {13, 18}:
+        return MongoDBAuthorizationError("MongoDB authorization failed.")
+    transient = isinstance(error, (ConnectionFailure, ServerSelectionTimeoutError))
+    if operation == "retrieval":
+        if transient:
+            return MongoDBTransientRetrievalError(
+                "MongoDB Workflow Checkpoint retrieval failed transiently."
+            )
+        return MongoDBRetrievalError("MongoDB Workflow Checkpoint retrieval failed.")
+    if transient:
+        return MongoDBTransientPersistenceError(
+            "MongoDB Workflow Checkpoint persistence failed transiently."
+        )
+    return MongoDBPersistenceError("MongoDB Workflow Checkpoint persistence failed.")
+
+
+def _error_category(error: PyMongoError, operation: str) -> str:
+    return _translate_mongo_error(error, operation).__class__.__name__
+
+
+def _log_success(operation: str, started: float, count: int) -> None:
+    _LOGGER.info(
+        "MongoDB Workflow Checkpoint operation completed",
+        extra={
+            "feature": "checkpoint_store",
+            "operation": operation,
+            "outcome": "success" if count else "empty",
+            "result_count": count,
+            "duration_ms": round((time.monotonic() - started) * 1000),
+        },
+    )
+
+
+def _log_failure(operation: str, started: float, category: str) -> None:
+    _LOGGER.warning(
+        "MongoDB Workflow Checkpoint operation failed",
+        extra={
+            "feature": "checkpoint_store",
+            "operation": operation,
+            "outcome": "failed",
+            "error_category": category,
+            "duration_ms": round((time.monotonic() - started) * 1000),
+        },
+    )
