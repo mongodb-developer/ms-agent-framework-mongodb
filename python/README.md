@@ -202,3 +202,19 @@ be MongoDB 8.0 or later with Search, Vector Search, and native `$rankFusion`
 enabled. Explicit index ensure needs provisioner privileges. Normal retrieval
 needs index inspection, read/aggregate, and Search query privileges and performs
 no writes.
+
+## Sample-only incremental ingestion
+
+Runtime RAG is read-only. The separately run
+[`samples\incremental_ingestion.py`](samples/README.md) demonstration uses a
+dedicated write-capable identity to load only uniquely sample-prefixed source
+records, skip unchanged hashes, replace changed records, process tombstones, and
+perform prefix-targeted cleanup. It waits for an existing Vector Search index but
+never creates one. Prefix reads and cleanup force simple binary collation, and a
+Unicode-successor upper bound safely includes supplementary IDs. A duplicate
+source-ID preflight fails before any target write.
+
+The sample requires explicit connection, collection, index, model, dimensions,
+embedding-factory, and unique-prefix environment configuration and refuses to
+write without `--apply`. See [`samples\README.md`](samples/README.md) for the
+collection contract, least-privilege split, limits, commands, and cleanup.

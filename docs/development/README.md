@@ -27,3 +27,7 @@ This documentation explains the implemented system at the code level. The
 - [Python Vector Search implementation](rag/python-vector.md)
 - [Python full-text Search implementation](rag/python-full-text.md)
 - [Python native hybrid RRF implementation](rag/python-hybrid.md)
+
+## Ingestion samples
+
+- [Python sample ingestion](ingestion/python-sample-ingestion.md)
