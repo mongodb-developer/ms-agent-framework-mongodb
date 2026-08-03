@@ -9,11 +9,10 @@ from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any, Protocol, TypeVar, cast
 
-from pymongo.errors import ConnectionFailure, OperationFailure, PyMongoError
+from pymongo.errors import PyMongoError
 from pymongo.operations import SearchIndexModel
 
 from ..errors import (
-    MongoDBAuthorizationError,
     MongoDBCapabilityError,
     MongoDBConfigurationError,
     MongoDBIndexFailedError,
@@ -31,6 +30,8 @@ from ..indexing import (
     MongoDBSearchIndexDefinition,
     MongoDBVectorIndexDefinition,
 )
+from .error_handling import translate_pymongo_error
+from .observability import instrument
 
 
 class _Cursor(Protocol):
@@ -146,6 +147,7 @@ class VectorIndexManager:
             filter_paths=self.expected.filter_paths,
         )
 
+    @instrument("indexing", "list")
     async def list(self) -> tuple[MongoDBIndexResult, ...]:
         """List Vector Search indexes without mutation."""
         try:
@@ -171,6 +173,7 @@ class VectorIndexManager:
         inspected = await self.validate(require_ready=require_ready)
         return _vector_result(inspected, self.definition)
 
+    @instrument("indexing", "ensure_index")
     async def create(self) -> MongoDBIndexResult:
         """Explicitly submit index creation without reporting command acceptance as ready."""
         try:
@@ -187,6 +190,7 @@ class VectorIndexManager:
             raise _translate_index_error(exc) from exc
         return MongoDBIndexResult(self.definition, MongoDBIndexState.BUILDING, "ACCEPTED", False)
 
+    @instrument("indexing", "ensure_index")
     async def update(self) -> MongoDBIndexResult:
         """Explicitly submit an update to the expected definition."""
         try:
@@ -197,6 +201,7 @@ class VectorIndexManager:
             raise _translate_index_error(exc) from exc
         return MongoDBIndexResult(self.definition, MongoDBIndexState.BUILDING, "ACCEPTED", False)
 
+    @instrument("indexing", "delete")
     async def drop(self) -> None:
         """Explicitly drop the configured index."""
         try:
@@ -206,6 +211,7 @@ class VectorIndexManager:
         except PyMongoError as exc:
             raise _translate_index_error(exc) from exc
 
+    @instrument("indexing", "validate_index")
     async def inspect(self) -> Mapping[str, Any] | None:
         try:
             cursor = await self._collection.list_search_indexes(name=self.expected.name)
@@ -408,21 +414,7 @@ class VectorIndexManager:
 
 
 def _translate_index_error(error: PyMongoError) -> Exception:
-    if isinstance(error, OperationFailure):
-        if error.code in {13, 18}:
-            return MongoDBAuthorizationError("MongoDB index authorization failed.")
-        if error.code in {59, 303}:
-            return MongoDBCapabilityError("MongoDB Vector Search indexes are unavailable.")
-        if error.code == 27:
-            return MongoDBIndexMissingError("The required MongoDB Vector Search index is missing.")
-    if isinstance(error, ConnectionFailure) or (
-        isinstance(error, OperationFailure)
-        and error.code in {6, 7, 89, 91, 189, 262, 9001, 10107, 11600, 11602}
-    ):
-        return MongoDBTransientRetrievalError(
-            "MongoDB Vector Search index operation failed transiently."
-        )
-    return MongoDBRetrievalError("MongoDB Vector Search index operation failed.")
+    return translate_pymongo_error(error, "retrieval", feature="indexing")
 
 
 @dataclass(frozen=True, slots=True)
@@ -473,6 +465,7 @@ class SearchIndexManager:
             search_analyzer=self.expected.analyzer,
         )
 
+    @instrument("indexing", "list")
     async def list(self) -> tuple[MongoDBIndexResult, ...]:
         """List MongoDB Search indexes without mutation."""
         try:
@@ -496,6 +489,7 @@ class SearchIndexManager:
         inspected = await self.validate(require_ready=require_ready)
         return _search_result(inspected, self.definition)
 
+    @instrument("indexing", "ensure_index")
     async def create(self) -> MongoDBIndexResult:
         try:
             await self._collection.create_search_index(
@@ -507,6 +501,7 @@ class SearchIndexManager:
             raise _translate_search_index_error(exc) from exc
         return MongoDBIndexResult(self.definition, MongoDBIndexState.BUILDING, "ACCEPTED", False)
 
+    @instrument("indexing", "ensure_index")
     async def update(self) -> MongoDBIndexResult:
         try:
             await self._collection.update_search_index(self.expected.name, self.expected.document())
@@ -516,6 +511,7 @@ class SearchIndexManager:
             raise _translate_search_index_error(exc) from exc
         return MongoDBIndexResult(self.definition, MongoDBIndexState.BUILDING, "ACCEPTED", False)
 
+    @instrument("indexing", "delete")
     async def drop(self) -> None:
         try:
             await self._collection.drop_search_index(self.expected.name)
@@ -524,6 +520,7 @@ class SearchIndexManager:
         except PyMongoError as exc:
             raise _translate_search_index_error(exc) from exc
 
+    @instrument("indexing", "validate_index")
     async def inspect(self) -> Mapping[str, Any] | None:
         try:
             cursor = await self._collection.list_search_indexes(name=self.expected.name)
@@ -1004,6 +1001,7 @@ class RegularIndexManager:
         self._collection = collection
         self.expected = expected
 
+    @instrument("indexing", "list")
     async def list(self) -> tuple[MongoDBIndexResult, ...]:
         try:
             cursor = await self._collection.list_indexes()
@@ -1014,6 +1012,7 @@ class RegularIndexManager:
             raise _translate_index_error(exc) from exc
         return tuple(self._result(document) for document in documents)
 
+    @instrument("indexing", "validate_index")
     async def inspect(self, name: str) -> MongoDBIndexResult:
         listed = await self.list()
         result = next((item for item in listed if item.definition.name == name), None)
@@ -1040,6 +1039,7 @@ class RegularIndexManager:
             validated.append(actual)
         return tuple(validated)
 
+    @instrument("indexing", "ensure_index")
     async def create(self) -> tuple[MongoDBIndexResult, ...]:
         results: list[MongoDBIndexResult] = []
         for definition in self.expected:
@@ -1072,10 +1072,12 @@ class RegularIndexManager:
                 await self.update(expected.name)
         return await self.validate()
 
+    @instrument("indexing", "ensure_index")
     async def update(self, name: str) -> MongoDBIndexResult:
         await self.drop(name)
         return await self.create_named(name)
 
+    @instrument("indexing", "delete")
     async def drop(self, name: str) -> None:
         self._expected(name)
         try:

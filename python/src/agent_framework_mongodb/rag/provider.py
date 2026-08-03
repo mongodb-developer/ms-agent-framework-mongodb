@@ -14,17 +14,19 @@ from agent_framework import ContextProvider, Message, SupportsGetEmbeddings
 from pymongo import AsyncMongoClient
 from pymongo import version as pymongo_version
 from pymongo.asynchronous.collection import AsyncCollection
-from pymongo.errors import ConnectionFailure, OperationFailure, PyMongoError
+from pymongo.errors import OperationFailure, PyMongoError
 
 from .._shared.capabilities import CapabilityResult
 from .._shared.client import MongoClientHandle
 from .._shared.embeddings import normalize_embeddings
+from .._shared.error_handling import translate_pymongo_error
 from .._shared.indexes import (
     SearchIndexDefinition,
     SearchIndexManager,
     VectorIndexDefinition,
     VectorIndexManager,
 )
+from .._shared.observability import instrument
 from ..errors import (
     MongoDBAuthorizationError,
     MongoDBCapabilityError,
@@ -36,7 +38,6 @@ from ..errors import (
     MongoDBIndexNotReadyError,
     MongoDBIntegrationError,
     MongoDBMappingError,
-    MongoDBRetrievalError,
     MongoDBTimeoutError,
     MongoDBTransientRetrievalError,
 )
@@ -152,6 +153,16 @@ class MongoDBRAGProvider:
         except Exception as exc:
             raise MongoDBEmbeddingGenerationError("Query embedding generation failed.") from exc
 
+    @instrument(
+        "rag",
+        "retrieve",
+        mode=lambda provider: {
+            MongoDBSearchMode.VECTOR_ANN: "ann",
+            MongoDBSearchMode.VECTOR_ENN: "enn",
+            MongoDBSearchMode.FULL_TEXT: "full_text",
+            MongoDBSearchMode.HYBRID_RRF: "hybrid_rrf",
+        }.get(provider.options.mode),
+    )
     async def search(
         self,
         query: str,
@@ -999,10 +1010,6 @@ class MongoDBRAGContextProvider(ContextProvider):
         except asyncio.CancelledError:
             raise
         except (MongoDBTransientRetrievalError, MongoDBTimeoutError):
-            _LOGGER.warning(
-                "MongoDB RAG adapter operation failed",
-                extra={"feature": "rag", "operation": "retrieve", "outcome": "failed"},
-            )
             return
         if not results:
             return
@@ -1070,60 +1077,7 @@ def _non_empty(value: object, name: str) -> str:
 
 
 def _translate_mongo_error(error: PyMongoError) -> MongoDBIntegrationError:
-    if isinstance(error, OperationFailure):
-        details: Mapping[str, object]
-        if isinstance(error.details, Mapping):
-            details = cast(Mapping[str, object], error.details)
-        else:
-            details = cast(Mapping[str, object], {})
-        raw_code_name = details.get("codeName")
-        code_name = raw_code_name if isinstance(raw_code_name, str) else None
-        if error.code in {13, 18}:
-            return MongoDBAuthorizationError("MongoDB authentication or authorization failed.")
-        if error.code == 27 or code_name in {"IndexNotFound", "SearchIndexNotFound"}:
-            return MongoDBIndexMissingError(
-                "The required MongoDB Search/Vector Search index is missing."
-            )
-        if error.code in {85, 86} or code_name in {
-            "IndexOptionsConflict",
-            "IndexKeySpecsConflict",
-        }:
-            return MongoDBIndexMismatchError(
-                "The configured MongoDB Search/Vector Search index definition does not match."
-            )
-        if code_name in {"SearchIndexNotReady", "IndexBuildAlreadyInProgress"}:
-            return MongoDBIndexNotReadyError(
-                "The required MongoDB Search/Vector Search index is not ready."
-            )
-        if error.code in {59, 303} or code_name in {
-            "CommandNotFound",
-            "Location303",
-        }:
-            return MongoDBCapabilityError("The requested MongoDB Search mode is unavailable.")
-        if error.code in {2, 9, 14, 72} or code_name in {
-            "BadValue",
-            "FailedToParse",
-            "InvalidOptions",
-            "TypeMismatch",
-        }:
-            return MongoDBConfigurationError("MongoDB rejected the configured RAG operation.")
-        if error.code in {
-            6,
-            7,
-            89,
-            91,
-            189,
-            262,
-            9001,
-            10107,
-            11600,
-            11601,
-            11602,
-        } or code_name in {"Interrupted", "InterruptedAtShutdown"}:
-            return MongoDBTransientRetrievalError("MongoDB RAG retrieval failed transiently.")
-    if isinstance(error, ConnectionFailure):
-        return MongoDBTransientRetrievalError("MongoDB RAG retrieval failed transiently.")
-    return MongoDBRetrievalError("MongoDB RAG retrieval failed.")
+    return translate_pymongo_error(error, "retrieval", feature="rag")
 
 
 def _filter_paths(expression: MongoDBFilter | None) -> set[str]:

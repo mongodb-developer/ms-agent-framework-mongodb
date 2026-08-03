@@ -10,7 +10,6 @@ import io
 import json
 import logging
 import pickle  # nosec B403 -- restricted unpickling of authorized checkpoint storage
-import time
 from collections.abc import Callable, Mapping, Set
 from dataclasses import dataclass, fields, is_dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -32,16 +31,14 @@ from bson.binary import Binary
 from pymongo import ASCENDING, DESCENDING, AsyncMongoClient, ReturnDocument
 from pymongo.asynchronous.collection import AsyncCollection
 from pymongo.errors import (
-    ConnectionFailure,
     DuplicateKeyError,
-    OperationFailure,
     PyMongoError,
-    ServerSelectionTimeoutError,
 )
 
 from .._shared.client import MongoClientHandle
+from .._shared.error_handling import OperationKind, translate_pymongo_error
+from .._shared.observability import instrument
 from ..errors import (
-    MongoDBAuthorizationError,
     MongoDBConcurrencyError,
     MongoDBConfigurationError,
     MongoDBIndexMismatchError,
@@ -50,8 +47,6 @@ from ..errors import (
     MongoDBPersistenceError,
     MongoDBRetrievalError,
     MongoDBSerializationError,
-    MongoDBTransientPersistenceError,
-    MongoDBTransientRetrievalError,
 )
 
 MongoDocument: TypeAlias = dict[str, Any]
@@ -250,6 +245,7 @@ class MongoDBCheckpointStorage(CheckpointStorage):
             "checkpoint_id": checkpoint_id,
         }
 
+    @instrument("checkpoint_store", "persist")
     async def save(self, checkpoint: WorkflowCheckpoint) -> CheckpointID:
         """Save once, return the stable ID on an identical retry, and reject conflicts."""
         if type(checkpoint) is not WorkflowCheckpoint:
@@ -290,7 +286,6 @@ class MongoDBCheckpointStorage(CheckpointStorage):
         }
         if expires_at is not None:
             document["expires_at"] = expires_at
-        started = time.monotonic()
         try:
             await self.collection.insert_one(document)
         except DuplicateKeyError:
@@ -303,22 +298,18 @@ class MongoDBCheckpointStorage(CheckpointStorage):
                 "The checkpoint ID or sequence was claimed by a conflicting save."
             ) from None
         except PyMongoError as exc:
-            _log_failure("persist", started, _error_category(exc, "persistence"))
             raise _translate_mongo_error(exc, "persistence") from exc
-        _log_success("persist", started, 1)
         return checkpoint.checkpoint_id
 
+    @instrument("checkpoint_store", "load")
     async def load(self, checkpoint_id: CheckpointID) -> WorkflowCheckpoint:
         """Load one checkpoint from the complete authorized scope."""
-        started = time.monotonic()
         document = await self._find_one(self._identity(checkpoint_id))
         if document is None:
-            _log_success("load", started, 0)
             raise MongoDBCheckpointNotFoundError(
                 "No checkpoint was found in the authorized workflow session."
             )
         restored = self._restore(document)
-        _log_success("load", started, 1)
         return restored
 
     async def list_checkpoints(self, *, workflow_name: str) -> list[WorkflowCheckpoint]:
@@ -335,6 +326,7 @@ class MongoDBCheckpointStorage(CheckpointStorage):
                 return checkpoints
             cursor = page.next_cursor
 
+    @instrument("checkpoint_store", "list")
     async def list_checkpoint_page(
         self,
         *,
@@ -375,48 +367,42 @@ class MongoDBCheckpointStorage(CheckpointStorage):
             )
         return MongoDBCheckpointPage(checkpoints=checkpoints, next_cursor=next_cursor)
 
+    @instrument("checkpoint_store", "delete")
     async def delete(self, checkpoint_id: CheckpointID) -> bool:
         """Delete one checkpoint from the complete authorized scope."""
-        started = time.monotonic()
         try:
             result = await self.collection.delete_one(self._identity(checkpoint_id))
         except PyMongoError as exc:
-            _log_failure("delete", started, _error_category(exc, "persistence"))
             raise _translate_mongo_error(exc, "persistence") from exc
-        _log_success("delete", started, result.deleted_count)
         return result.deleted_count == 1
 
+    @instrument("checkpoint_store", "delete")
     async def clear_run(self) -> MongoDBCheckpointClearResult:
         """Best-effort delete all records in this exact authorized workflow run."""
         partition = self._partition(self.options.workflow_name)
         counter_identity = self._counter_identity()
-        started = time.monotonic()
         try:
             checkpoints_result = await self.collection.delete_many(partition)
             counter_result = await self.collection.delete_one(counter_identity)
         except PyMongoError as exc:
-            _log_failure("clear", started, _error_category(exc, "persistence"))
             raise _translate_mongo_error(exc, "persistence") from exc
         checkpoints_deleted = _acknowledged_delete_count(checkpoints_result)
         counter_deleted = _acknowledged_delete_count(counter_result)
-        _log_success("clear", started, checkpoints_deleted + counter_deleted)
         return MongoDBCheckpointClearResult(
             checkpoints_deleted=checkpoints_deleted,
             counter_deleted=counter_deleted,
         )
 
+    @instrument("checkpoint_store", "load")
     async def get_latest(self, *, workflow_name: str) -> WorkflowCheckpoint | None:
         """Load the greatest monotonic sequence in the authorized workflow session."""
-        started = time.monotonic()
         document = await self._find_one(
             self._partition(workflow_name),
             sort=[("sequence", DESCENDING), ("checkpoint_id", DESCENDING)],
         )
         if document is None:
-            _log_success("load", started, 0)
             return None
         restored = self._restore(document)
-        _log_success("load", started, 1)
         return restored
 
     async def list_checkpoint_ids(self, *, workflow_name: str) -> list[CheckpointID]:
@@ -488,16 +474,13 @@ class MongoDBCheckpointStorage(CheckpointStorage):
             raise _translate_mongo_error(exc, "retrieval") from exc
 
     async def _find_many(self, query: MongoDocument, limit: int) -> list[MongoDocument]:
-        started = time.monotonic()
         try:
             cursor = self.collection.find(query)
             cursor = cursor.sort([("sequence", ASCENDING), ("checkpoint_id", ASCENDING)])
             cursor = cursor.limit(limit)
             documents = await cursor.to_list(length=limit)
         except PyMongoError as exc:
-            _log_failure("list", started, _error_category(exc, "retrieval"))
             raise _translate_mongo_error(exc, "retrieval") from exc
-        _log_success("list", started, len(documents))
         return documents
 
     def _restore(self, document: MongoDocument) -> WorkflowCheckpoint:
@@ -551,6 +534,7 @@ class MongoDBCheckpointStorage(CheckpointStorage):
             )
         return checkpoint
 
+    @instrument("indexing", "ensure_index")
     async def ensure_indexes(self) -> tuple[str, ...]:
         """Explicitly create checkpoint identity, ordering, lineage, and TTL indexes."""
         partial = {
@@ -617,6 +601,7 @@ class MongoDBCheckpointStorage(CheckpointStorage):
         except PyMongoError as exc:
             raise _translate_mongo_error(exc, "persistence") from exc
 
+    @instrument("indexing", "validate_index")
     async def validate_indexes(self) -> None:
         """Validate required regular indexes without mutating MongoDB."""
         try:
@@ -1339,48 +1324,5 @@ def _acknowledged_delete_count(result: object) -> int:
     return deleted_count
 
 
-def _translate_mongo_error(error: PyMongoError, operation: str) -> Exception:
-    if isinstance(error, OperationFailure) and error.code in {13, 18}:
-        return MongoDBAuthorizationError("MongoDB authorization failed.")
-    transient = isinstance(error, (ConnectionFailure, ServerSelectionTimeoutError))
-    if operation == "retrieval":
-        if transient:
-            return MongoDBTransientRetrievalError(
-                "MongoDB Workflow Checkpoint retrieval failed transiently."
-            )
-        return MongoDBRetrievalError("MongoDB Workflow Checkpoint retrieval failed.")
-    if transient:
-        return MongoDBTransientPersistenceError(
-            "MongoDB Workflow Checkpoint persistence failed transiently."
-        )
-    return MongoDBPersistenceError("MongoDB Workflow Checkpoint persistence failed.")
-
-
-def _error_category(error: PyMongoError, operation: str) -> str:
-    return _translate_mongo_error(error, operation).__class__.__name__
-
-
-def _log_success(operation: str, started: float, count: int) -> None:
-    _LOGGER.info(
-        "MongoDB Workflow Checkpoint operation completed",
-        extra={
-            "feature": "checkpoint_store",
-            "operation": operation,
-            "outcome": "success" if count else "empty",
-            "result_count": count,
-            "duration_ms": round((time.monotonic() - started) * 1000),
-        },
-    )
-
-
-def _log_failure(operation: str, started: float, category: str) -> None:
-    _LOGGER.warning(
-        "MongoDB Workflow Checkpoint operation failed",
-        extra={
-            "feature": "checkpoint_store",
-            "operation": operation,
-            "outcome": "failed",
-            "error_category": category,
-            "duration_ms": round((time.monotonic() - started) * 1000),
-        },
-    )
+def _translate_mongo_error(error: PyMongoError, operation: OperationKind) -> Exception:
+    return translate_pymongo_error(error, operation, feature="checkpoint_store")

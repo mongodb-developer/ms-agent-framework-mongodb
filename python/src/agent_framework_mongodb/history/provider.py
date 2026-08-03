@@ -6,7 +6,6 @@ import asyncio
 import hashlib
 import json
 import logging
-import time
 import uuid
 from collections.abc import Awaitable, Mapping, Sequence
 from dataclasses import dataclass
@@ -18,25 +17,20 @@ from agent_framework import AgentSession, HistoryProvider, Message, SessionConte
 from pymongo import ASCENDING, DESCENDING, AsyncMongoClient, ReturnDocument
 from pymongo.asynchronous.collection import AsyncCollection
 from pymongo.errors import (
-    ConnectionFailure,
     DuplicateKeyError,
-    OperationFailure,
     PyMongoError,
-    ServerSelectionTimeoutError,
 )
 
 from .._shared.client import MongoClientHandle
+from .._shared.error_handling import OperationKind, translate_pymongo_error
+from .._shared.observability import instrument
 from ..errors import (
-    MongoDBAuthorizationError,
     MongoDBConfigurationError,
     MongoDBIndexMismatchError,
     MongoDBIndexMissingError,
     MongoDBMappingError,
     MongoDBPersistenceError,
-    MongoDBRetrievalError,
     MongoDBTimeoutError,
-    MongoDBTransientPersistenceError,
-    MongoDBTransientRetrievalError,
 )
 
 MongoDocument = dict[str, Any]
@@ -245,6 +239,7 @@ class MongoDBHistoryProvider(HistoryProvider):
         self._reject_service_managed_history(context)
         await super().after_run(agent=agent, session=session, context=context, state=state)
 
+    @instrument("history", "load")
     async def get_messages(
         self,
         session_id: str | None,
@@ -255,7 +250,6 @@ class MongoDBHistoryProvider(HistoryProvider):
         """Load the latest authorized messages and return them chronologically."""
         del state, kwargs
         scope = self._session_scope(session_id)
-        started = time.monotonic()
         try:
             messages = await _with_timeout(
                 self._get_messages(scope),
@@ -267,9 +261,7 @@ class MongoDBHistoryProvider(HistoryProvider):
         except (MongoDBMappingError, MongoDBTimeoutError):
             raise
         except PyMongoError as exc:
-            _log_failure("load", started, _error_category(exc, "retrieval"))
             raise _translate_mongo_error(exc, "retrieval") from exc
-        _log_success("load", started, len(messages))
         return messages
 
     async def _get_messages(self, scope: MongoDocument) -> list[Message]:
@@ -317,6 +309,11 @@ class MongoDBHistoryProvider(HistoryProvider):
                 "schema version 2 with a canonical scope discriminator before replay."
             )
 
+    @instrument(
+        "history",
+        "persist",
+        result_count=lambda args, _kwargs, _result: len(cast(Sequence[object], args[2])),
+    )
     async def save_messages(
         self,
         session_id: str | None,
@@ -330,7 +327,6 @@ class MongoDBHistoryProvider(HistoryProvider):
         scope = self._session_scope(session_id)
         if not messages:
             return
-        started = time.monotonic()
         try:
             await _with_timeout(
                 self._save_messages(scope, messages, state),
@@ -342,9 +338,7 @@ class MongoDBHistoryProvider(HistoryProvider):
         except (MongoDBMappingError, MongoDBTimeoutError):
             raise
         except PyMongoError as exc:
-            _log_failure("persist", started, _error_category(exc, "persistence"))
             raise _translate_mongo_error(exc, "persistence") from exc
-        _log_success("persist", started, len(messages))
 
     async def _save_messages(
         self,
@@ -505,10 +499,10 @@ class MongoDBHistoryProvider(HistoryProvider):
             raise MongoDBPersistenceError("MongoDB History sequence allocation returned no value.")
         return cast(int, counter["sequence"]) - count + 1
 
+    @instrument("history", "delete")
     async def clear_messages(self, session_id: str | None = None) -> int:
         """Clear exactly one authorized session and return acknowledged message count."""
         scope = self._session_scope(session_id)
-        started = time.monotonic()
         try:
             result = await _with_timeout(
                 self.collection.delete_many({"_kind": "message", **scope}),
@@ -532,12 +526,11 @@ class MongoDBHistoryProvider(HistoryProvider):
         except MongoDBTimeoutError:
             raise
         except PyMongoError as exc:
-            _log_failure("delete", started, _error_category(exc, "persistence"))
             raise _translate_mongo_error(exc, "persistence") from exc
         count = int(result.deleted_count)
-        _log_success("delete", started, count)
         return count
 
+    @instrument("indexing", "ensure_index")
     async def ensure_indexes(self) -> tuple[str, ...]:
         """Explicitly create regular uniqueness, ordering, and optional TTL indexes."""
         scope_keys = [
@@ -601,6 +594,7 @@ class MongoDBHistoryProvider(HistoryProvider):
         except PyMongoError as exc:
             raise _translate_mongo_error(exc, "persistence") from exc
 
+    @instrument("indexing", "validate_index")
     async def validate_indexes(self) -> None:
         """Validate required regular indexes without mutating MongoDB."""
         try:
@@ -1029,45 +1023,5 @@ def _has_simple_collation(index: Mapping[str, Any]) -> bool:
     )
 
 
-def _error_category(error: PyMongoError, operation: str) -> str:
-    translated = _translate_mongo_error(error, operation)
-    return translated.__class__.__name__
-
-
-def _translate_mongo_error(error: PyMongoError, operation: str) -> Exception:
-    if isinstance(error, OperationFailure) and error.code in {13, 18}:
-        return MongoDBAuthorizationError("MongoDB authorization failed.")
-    transient = isinstance(error, (ConnectionFailure, ServerSelectionTimeoutError))
-    if operation == "retrieval":
-        if transient:
-            return MongoDBTransientRetrievalError("MongoDB History retrieval failed transiently.")
-        return MongoDBRetrievalError("MongoDB History retrieval failed.")
-    if transient:
-        return MongoDBTransientPersistenceError("MongoDB History persistence failed transiently.")
-    return MongoDBPersistenceError("MongoDB History persistence failed.")
-
-
-def _log_success(operation: str, started: float, count: int) -> None:
-    _LOGGER.info(
-        "MongoDB History operation completed",
-        extra={
-            "feature": "history",
-            "operation": operation,
-            "outcome": "success",
-            "result_count": count,
-            "duration_ms": round((time.monotonic() - started) * 1000),
-        },
-    )
-
-
-def _log_failure(operation: str, started: float, category: str) -> None:
-    _LOGGER.warning(
-        "MongoDB History operation failed",
-        extra={
-            "feature": "history",
-            "operation": operation,
-            "outcome": "failed",
-            "error_category": category,
-            "duration_ms": round((time.monotonic() - started) * 1000),
-        },
-    )
+def _translate_mongo_error(error: PyMongoError, operation: OperationKind) -> Exception:
+    return translate_pymongo_error(error, operation, feature="history")
