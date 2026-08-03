@@ -266,4 +266,118 @@ public sealed class MongoDBRAGIntegrationTests
                 Builders<BsonDocument>.Filter.In("_id", new[] { tenantAId, tenantBId }));
         }
     }
+
+    [MongoIntegrationFact]
+    [Trait("Category", "integration-rag-hybrid")]
+    public async Task HybridRrfSearchIsolatesTenantsOnPreProvisionedIndexes()
+    {
+        string? uri = Environment.GetEnvironmentVariable("MONGODB_URI");
+        string? databaseName = Environment.GetEnvironmentVariable("MONGODB_DATABASE");
+        string collectionName = Environment.GetEnvironmentVariable("MONGODB_RAG_COLLECTION") ??
+            "af_rag_dotnet_integration";
+        string vectorIndexName = Environment.GetEnvironmentVariable("MONGODB_RAG_VECTOR_INDEX") ??
+            "agent_framework_rag_vector";
+        string searchIndexName = Environment.GetEnvironmentVariable("MONGODB_RAG_SEARCH_INDEX") ??
+            "agent_framework_rag_search";
+        Assert.False(string.IsNullOrWhiteSpace(uri));
+        Assert.False(string.IsNullOrWhiteSpace(databaseName));
+
+        using var client = new MongoClient(uri!);
+        IMongoCollection<BsonDocument> collection = client
+            .GetDatabase(databaseName!)
+            .GetCollection<BsonDocument>(collectionName);
+        string prefix = $"af_rag_dotnet_test_{Guid.NewGuid():N}_";
+        string tenantAId = $"{prefix}a";
+        string tenantBId = $"{prefix}b";
+
+        // No MandatoryFilter: used only to independently confirm both tenant documents are searchable through
+        // *each* of Hybrid's two input branches (vector and text) before the tenant-A-scoped Hybrid provider's
+        // exclusion of tenant B is asserted below. Without proving both branches are ready on their own, that
+        // exclusion assertion could pass vacuously merely because tenant B was never indexed/searchable via one
+        // or both branches in the first place, rather than because the mandatory filter actually excluded it.
+        var vectorReadinessOptions = new MongoDBRAGProviderOptions
+        {
+            SearchMode = MongoDBSearchMode.VectorAnn,
+            VectorIndexName = vectorIndexName,
+            TopK = 10,
+        };
+        await using MongoDBRAGProvider vectorReadinessProvider = new(
+            client, databaseName!, collectionName, new RecordingEmbeddingGenerator(), 3, vectorReadinessOptions);
+        var textReadinessOptions = new MongoDBRAGProviderOptions
+        {
+            SearchMode = MongoDBSearchMode.FullText,
+            SearchIndexName = searchIndexName,
+            SearchTextFieldNames = ["text"],
+            TopK = 10,
+        };
+        await using MongoDBRAGProvider textReadinessProvider = new(
+            client, databaseName!, collectionName, textReadinessOptions);
+
+        var hybridOptions = new MongoDBRAGProviderOptions
+        {
+            SearchMode = MongoDBSearchMode.HybridRrf,
+            VectorIndexName = vectorIndexName,
+            SearchIndexName = searchIndexName,
+            SearchTextFieldNames = ["text"],
+            TopK = 10,
+            MandatoryFilter = MongoDBRAGFilter.Equal("tenant_id", "tenant-a"),
+        };
+        await using MongoDBRAGProvider hybridProvider = new(
+            client, databaseName!, collectionName, new RecordingEmbeddingGenerator(), 3, hybridOptions);
+        try
+        {
+            await collection.InsertManyAsync(
+            [
+                new BsonDocument
+                {
+                    { "_id", tenantAId },
+                    { "text", "Widgets ship in blue for tenant A." },
+                    { "embedding", new BsonArray([1.0, 0.0, 0.0]) },
+                    { "tenant_id", "tenant-a" },
+                },
+                new BsonDocument
+                {
+                    { "_id", tenantBId },
+                    { "text", "Widgets also ship in blue for tenant B." },
+                    { "embedding", new BsonArray([1.0, 0.0, 0.0]) },
+                    { "tenant_id", "tenant-b" },
+                },
+            ]);
+
+            await PollUntilSearchableAsync(
+                vectorReadinessProvider,
+                "blue widgets",
+                results => results.Any(r => r.Id == tenantAId) && results.Any(r => r.Id == tenantBId),
+                timeout: TimeSpan.FromSeconds(30),
+                pollInterval: TimeSpan.FromSeconds(1));
+            await PollUntilSearchableAsync(
+                textReadinessProvider,
+                "blue widgets",
+                results => results.Any(r => r.Id == tenantAId) && results.Any(r => r.Id == tenantBId),
+                timeout: TimeSpan.FromSeconds(30),
+                pollInterval: TimeSpan.FromSeconds(1));
+
+            IReadOnlyList<MongoDBRAGResult> results = await PollUntilSearchableAsync(
+                hybridProvider,
+                "blue widgets",
+                tenantAId,
+                timeout: TimeSpan.FromSeconds(30),
+                pollInterval: TimeSpan.FromSeconds(1));
+            Assert.Contains(results, result => result.Id == tenantAId);
+            Assert.DoesNotContain(results, result => result.Id == tenantBId);
+
+            // RawDocument must preserve the complete original document against a real MongoDB deployment, and
+            // neither the reserved score nor scoreDetails aliases may leak into it.
+            MongoDBRAGResult tenantAResult = Assert.Single(results, result => result.Id == tenantAId);
+            Assert.Equal("tenant-a", tenantAResult.RawDocument["tenant_id"].AsString);
+            Assert.False(tenantAResult.RawDocument.Contains("_ragScore"));
+            Assert.False(tenantAResult.RawDocument.Contains("_ragScoreDetails"));
+        }
+        finally
+        {
+            Assert.StartsWith("af_rag_dotnet_test_", prefix);
+            await collection.DeleteManyAsync(
+                Builders<BsonDocument>.Filter.In("_id", new[] { tenantAId, tenantBId }));
+        }
+    }
 }

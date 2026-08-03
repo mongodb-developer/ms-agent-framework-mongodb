@@ -26,3 +26,4 @@ This documentation explains the implemented system at the code level. The
 - [.NET RAG contracts and typed filters](rag/dotnet-rag.md)
 - [.NET Vector RAG (ANN/ENN) direct search and context adapter](rag/dotnet-rag-vector-search.md)
 - [.NET FullText RAG direct search](rag/dotnet-rag-full-text-search.md)
+- [.NET HybridRrf RAG direct search](rag/dotnet-rag-hybrid-rrf.md)
