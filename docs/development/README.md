@@ -32,6 +32,7 @@ This documentation explains the implemented system at the code level. The
 
 - [Persistence implementation index](persistence/README.md)
 - [Python Session Store implementation](persistence/python-session-store.md)
+- [Python Workflow Checkpoint Store implementation](persistence/python-checkpoints.md)
 
 ## Ingestion samples
 

@@ -1,5 +1,12 @@
 """MongoDB integrations for Microsoft Agent Framework."""
 
+from .checkpointing import (
+    MongoDBCheckpointClearResult,
+    MongoDBCheckpointNotFoundError,
+    MongoDBCheckpointPage,
+    MongoDBCheckpointStorage,
+    MongoDBCheckpointStorageOptions,
+)
 from .errors import (
     MongoDBAuthorizationError,
     MongoDBCapabilityError,
@@ -17,6 +24,7 @@ from .errors import (
     MongoDBMappingError,
     MongoDBPersistenceError,
     MongoDBRetrievalError,
+    MongoDBSerializationError,
     MongoDBTimeoutError,
     MongoDBTransientPersistenceError,
     MongoDBTransientRetrievalError,
@@ -61,6 +69,11 @@ __all__ = [
     "InFilter",
     "LessThanFilter",
     "LessThanOrEqualFilter",
+    "MongoDBCheckpointNotFoundError",
+    "MongoDBCheckpointClearResult",
+    "MongoDBCheckpointPage",
+    "MongoDBCheckpointStorage",
+    "MongoDBCheckpointStorageOptions",
     "MongoDBAuthorizationError",
     "MongoDBCapabilityError",
     "MongoDBConfigurationError",
@@ -91,6 +104,7 @@ __all__ = [
     "MongoDBRAGSearchOptions",
     "MongoDBRegularIndexDefinition",
     "MongoDBRetrievalError",
+    "MongoDBSerializationError",
     "MongoDBSearchIndexDefinition",
     "MongoDBSearchMode",
     "MongoDBSessionStore",

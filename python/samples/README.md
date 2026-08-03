@@ -3,6 +3,38 @@
 These programs are demonstrations, not production ingestion or orchestration APIs.
 Runtime RAG remains read-only.
 
+## Workflow checkpoint resumption
+
+`workflow_checkpoint_resume.py` runs an Agent Framework workflow until a pending
+deployment approval is checkpointed, creates a new workflow instance, resumes it
+from the latest checkpoint with an approval response, inspects a bounded page,
+and clears only the authorized run's checkpoints and sequence counter unless
+`--keep` is passed.
+It preserves pending requests, executor state, and lineage through the public
+Agent Framework 1.13 checkpoint contract.
+
+Set `MONGODB_URI`, `MONGODB_DATABASE`, `MONGODB_CHECKPOINT_COLLECTION`,
+`MONGODB_CHECKPOINT_TENANT_ID`, `MONGODB_CHECKPOINT_WORKFLOW_NAME`, and
+`MONGODB_CHECKPOINT_SESSION_ID`. `MONGODB_CHECKPOINT_APPLICATION_ID` is optional
+and `MONGODB_CHECKPOINT_TTL_SECONDS` defaults to 3600. Use a unique session ID
+for each sample run.
+
+From `python`:
+
+```powershell
+python samples\workflow_checkpoint_resume.py
+python samples\workflow_checkpoint_resume.py --keep
+```
+
+Runtime needs find, insert, atomic update/upsert, and targeted delete privileges.
+The sample explicitly creates regular indexes and therefore also needs
+index-provisioning privileges; production should provision separately.
+MongoDB TTL cleanup is eventual, covers checkpoints and their refreshed scoped
+counter, and can leave lineage gaps. The default `clear_run()` cleanup applies
+the complete constructor-bound tenant/workflow/session scope and never drops the
+collection. Expected output reports only status and bounded acknowledged counts,
+not IDs, scope values, or checkpoint state.
+
 ## Session persistence
 
 `session_persistence.py` saves a complete public Agent Framework `AgentSession`,

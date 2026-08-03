@@ -25,6 +25,10 @@ class MongoDBMappingError(MongoDBIntegrationError):
     """Raised when a MongoDB document cannot be mapped safely."""
 
 
+class MongoDBSerializationError(MongoDBMappingError):
+    """Raised when a value cannot be serialized without losing identity semantics."""
+
+
 class MongoDBFilterTranslationError(MongoDBIntegrationError):
     """Raised when a mandatory filter cannot be translated completely."""
 
