@@ -131,10 +131,11 @@ CancellationToken)` seam, mirroring `ValidateSearchIndexAsync`'s ([slice 10](dot
   `RAGFilterFieldReferences.Enumerate`, covering nested AND/OR) against **both** indexes:
   `ValidateVectorFilterFields` requires each referenced field be declared as a Vector Search `type: "filter"` field
   (Vector Search has no dynamic-filter equivalent, so this check always definitively throws or passes), and
-  `ValidateSearchFilterFields` requires each referenced field be mapped to an operator-compatible Search type
-  (`Range` needs `number`/`date`/`numberFacet`/`dateFacet`; `Equality`/`Membership` accept
-  `token`/`string`/`boolean`/`number`/`date`/`objectId`/`uuid`) when the Search mapping is non-dynamic. A dynamic
-  Search mapping cannot be statically verified per field, so it is accepted **without** being treated as verified.
+  `ValidateSearchFilterFields` requires each referenced field be mapped, **value-category by value-category**, to a
+  compatible Search type when the Search mapping is non-dynamic (see
+  [Value-category-aware Search filter compatibility](#value-category-aware-search-filter-compatibility-review-fix)
+  below). A dynamic Search mapping cannot be statically verified per field, so it is accepted **without** being
+  treated as verified.
 - `requireReady` (default `true`) requires both indexes to report queryable/`READY`.
 - `SearchAsync` now calls this method itself before every `HybridRrf` aggregation (first call validates; a
   successful, fully-field-verified result is cached for `HybridCapabilityValidationCacheDuration` (30 seconds), so a
@@ -143,7 +144,10 @@ CancellationToken)` seam, mirroring `ValidateSearchIndexAsync`'s ([slice 10](dot
   (`requireReady: false`) result never silently satisfies a later strict call. Critically, a successful validation is
   **not cached** when the Search-index mapping is dynamic and `MandatoryFilter` references at least one field —
   since that combination cannot be statically verified, every call re-validates rather than risk caching an
-  unverified authorization filter as "safe".
+  unverified authorization filter as "safe". Conversely, if a *prior* call had cached success and a later call
+  (typically `refresh: true`) discovers the mapping has since become dynamic/unverifiable, the stale cached success
+  is **explicitly cleared** rather than left in place (see
+  [Explicit cache invalidation on refresh](#explicit-cache-invalidation-on-refresh-review-fix) below).
 - Calling this method against a mode other than `HybridRrf` throws `MongoDBCapabilityException` without any network
   call (`RunCommandCallCount`/`SearchIndexListCallCount` both remain `0`).
 - `OperationCanceledException` always propagates unchanged, never wrapped.
@@ -168,6 +172,64 @@ incompatible Search field, nested AND/OR coverage, and the no-cache-on-unverifie
 aggregating when it fails), reusing the cache across calls, and wrapping a recognized `$rankFusion`-unsupported
 command error as `MongoDBCapabilityException` while an unrelated command error still becomes
 `MongoDBRetrievalException`.
+
+### Value-category-aware Search filter compatibility (review fix)
+
+The original field-mapping compatibility check was operator-category-only: it accepted any of
+`token`/`string`/`boolean`/`number`/`date`/`objectId`/`uuid` for an `Equality`/`Membership` reference regardless of
+the filter *value's* actual BSON type. That is unsound for Atlas Search: a `string`-mapped field is full-text
+analyzed and cannot support exact-match filtering — only `token` does — so a string equality/membership value
+against a `string`-mapped field would previously pass validation and then fail (or silently mis-match) at query
+time.
+
+- The internal `FilterFieldReference` (`Internal/RAGFilterFieldReferences.cs`) now carries a `FilterValueCategory`
+  `[Flags]` bitmask alongside its field path and `FilterOperatorCategory`, computed from the filter's actual BSON
+  value(s) via `BsonValueCategories.Of`: `String`, `Boolean`, `Number`, `Date`, `ObjectId`, and a defensive `Uuid`
+  category (not reachable through any public `MongoDBRAGFilter` factory today, since
+  `Internal/RAGFilterValues.ToBsonValue` does not accept `Guid`; retained so the category set is complete and
+  forward-compatible without another breaking enum change). A bitmask (not a list) was chosen specifically so the
+  record struct's default structural equality keeps working correctly for `RAGFilterFieldReferences.Enumerate`'s
+  `.Distinct()` call. `Equality` filters get a single category; `Membership` filters OR together every value's
+  category (so a mixed-type `in` list is flagged as referencing more than one category); `Range` filters take
+  whichever bound is present, relying on a new eager check described below.
+- `MongoDBRAGFilter.RangeFilter`'s internal constructor now throws `MongoDBConfigurationException` if both
+  `Minimum` and `Maximum` are present but have different value categories (for example a numeric minimum with a
+  date maximum). Neither public `Range` overload can construct this today (each always produces same-category
+  bounds), so this is a defensive invariant consistent with the class's documented "eagerly validated, always fully
+  translatable" guarantee, reachable in tests only through the internal constructor directly.
+- `ValidateSearchFilterFields`/`IsFilterValueCategoryCompatible` (`RAG/MongoDBRAGProvider.cs`) now check
+  compatibility **per individual value-category flag**, requiring every flag present in a reference's
+  `ValueCategories` to be satisfied by *at least one* mapping definition in the field's (possibly multi-type-array)
+  mapping list — not necessarily the same definition for every flag. This directly supports "a mapping array may
+  satisfy multiple categories" for heterogeneous membership filters. The compatibility table is: `Equality`/
+  `Membership` — `String → token`, `Boolean → boolean`, `Number → number`, `Date → date`, `ObjectId → objectId`,
+  `Uuid → uuid`; `Range` — `Number → number|numberFacet`, `Date → date|dateFacet` (`Range` can only ever produce a
+  `Number` or `Date` category, so any other case is structurally unreachable but still defensively rejected rather
+  than silently accepted).
+- New tests (`MongoDBRAGFilterTests`, `RAGFilterFieldReferencesTests`, `MongoDBRAGHybridCapabilityValidationTests`)
+  cover: the mismatched-Range-bound-category rejection; heterogeneous membership category unions and nested-filter
+  category propagation; a string value rejected against a `string`-mapped field and accepted against a
+  `token`-mapped field; a numeric value rejected against a `token`-only mapping; a mixed string/numeric membership
+  filter rejected against a single-type mapping and accepted against a multi-type mapping array (extending
+  `RAGIndexFixtures.ValidSearchIndex` with a new `multiTypeFilterFieldTypes` parameter); and nested AND/OR filters
+  carrying different value categories per branch.
+
+### Explicit cache invalidation on refresh (review fix)
+
+The original "do not cache an unverified dynamic-mapping result" logic only *skipped* updating
+`_hybridCapabilityValidation` when the Search mapping was dynamic — it never cleared a *prior* cached success. If an
+index's mapping later changed from static to dynamic (for example an operator edited it in Atlas), a `refresh: true`
+call correctly re-validated and correctly detected the mapping as now-unverifiable, but the stale cached success
+from before the change remained in place, so the very next plain (non-refresh) call could still short-circuit on it
+and skip re-validating an authorization surface that was no longer statically verifiable.
+
+`ValidateHybridSearchCapabilityAsync` now explicitly sets `_hybridCapabilityValidation = null` whenever
+`searchFilterFieldsVerified` is `false`, regardless of whether a prior cache entry existed, guaranteeing every
+subsequent call re-validates from scratch until the mapping becomes statically verifiable again. A new regression
+test, `ValidateClearsAPriorCachedSuccessWhenRefreshFindsAnUnverifiableDynamicMapping`, proves this: it caches a
+success, mutates the Search index to a dynamic mapping, calls with `refresh: true` (asserting the round trip still
+happens), then calls again *without* `refresh` and asserts a third round trip occurs rather than the stale cache
+being reused.
 
 ## Vector candidate relationship validation
 

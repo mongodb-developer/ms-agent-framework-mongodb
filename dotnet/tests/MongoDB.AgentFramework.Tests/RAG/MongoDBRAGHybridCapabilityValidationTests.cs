@@ -434,6 +434,184 @@ public sealed class MongoDBRAGHybridCapabilityValidationTests
     }
 
     [Fact]
+    public async Task ValidateRejectsAStringEqualityValueMappedAsSearchStringRatherThanToken()
+    {
+        // Atlas Search "string" fields are full-text analyzed, not exact-match compatible; only "token" supports
+        // equality/membership filtering.
+        var state = new RAGCollectionState
+        {
+            SearchIndexes =
+            [
+                RAGIndexFixtures.ValidVectorIndex(filterFieldPaths: ["tenant_id"]),
+                RAGIndexFixtures.ValidSearchIndex(filterFieldTypes: new Dictionary<string, string>
+                {
+                    ["tenant_id"] = "string",
+                }),
+            ],
+        };
+        MongoDBRAGProvider provider = CreateProvider(state, MongoDBRAGFilter.Equal("tenant_id", "acme"));
+
+        MongoDBIndexMismatchException exception = await Assert.ThrowsAsync<MongoDBIndexMismatchException>(
+            () => provider.ValidateHybridSearchCapabilityAsync());
+        Assert.Contains("tenant_id", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ValidateAcceptsAStringEqualityValueMappedAsSearchToken()
+    {
+        var state = new RAGCollectionState
+        {
+            SearchIndexes =
+            [
+                RAGIndexFixtures.ValidVectorIndex(filterFieldPaths: ["tenant_id"]),
+                RAGIndexFixtures.ValidSearchIndex(filterFieldTypes: new Dictionary<string, string>
+                {
+                    ["tenant_id"] = "token",
+                }),
+            ],
+        };
+        MongoDBRAGProvider provider = CreateProvider(state, MongoDBRAGFilter.Equal("tenant_id", "acme"));
+
+        await provider.ValidateHybridSearchCapabilityAsync();
+    }
+
+    [Fact]
+    public async Task ValidateRejectsANumericEqualityValueMappedOnlyAsSearchToken()
+    {
+        var state = new RAGCollectionState
+        {
+            SearchIndexes =
+            [
+                RAGIndexFixtures.ValidVectorIndex(filterFieldPaths: ["priority"]),
+                RAGIndexFixtures.ValidSearchIndex(filterFieldTypes: new Dictionary<string, string>
+                {
+                    ["priority"] = "token",
+                }),
+            ],
+        };
+        MongoDBRAGProvider provider = CreateProvider(state, MongoDBRAGFilter.Equal("priority", 1));
+
+        MongoDBIndexMismatchException exception = await Assert.ThrowsAsync<MongoDBIndexMismatchException>(
+            () => provider.ValidateHybridSearchCapabilityAsync());
+        Assert.Contains("priority", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ValidateRejectsAHeterogeneousMembershipFilterAgainstASingleTypeSearchMapping()
+    {
+        // The "in" list mixes a string and a numeric value; a field mapped only to "token" satisfies the string
+        // category but not the numeric one, so this must be rejected rather than accepted because at least one
+        // value category matched.
+        var state = new RAGCollectionState
+        {
+            SearchIndexes =
+            [
+                RAGIndexFixtures.ValidVectorIndex(filterFieldPaths: ["mixed_id"]),
+                RAGIndexFixtures.ValidSearchIndex(filterFieldTypes: new Dictionary<string, string>
+                {
+                    ["mixed_id"] = "token",
+                }),
+            ],
+        };
+        MongoDBRAGProvider provider = CreateProvider(state, MongoDBRAGFilter.In("mixed_id", ["acme", 42]));
+
+        MongoDBIndexMismatchException exception = await Assert.ThrowsAsync<MongoDBIndexMismatchException>(
+            () => provider.ValidateHybridSearchCapabilityAsync());
+        Assert.Contains("mixed_id", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ValidateAcceptsAHeterogeneousMembershipFilterAgainstAMultiTypeSearchMappingArray()
+    {
+        // A single field path may have multiple Atlas Search mapping definitions (one per type); the union of
+        // definitions must cover every referenced value category, even though no single definition covers both.
+        var state = new RAGCollectionState
+        {
+            SearchIndexes =
+            [
+                RAGIndexFixtures.ValidVectorIndex(filterFieldPaths: ["mixed_id"]),
+                RAGIndexFixtures.ValidSearchIndex(multiTypeFilterFieldTypes: new Dictionary<string, string[]>
+                {
+                    ["mixed_id"] = ["token", "number"],
+                }),
+            ],
+        };
+        MongoDBRAGProvider provider = CreateProvider(state, MongoDBRAGFilter.In("mixed_id", ["acme", 42]));
+
+        await provider.ValidateHybridSearchCapabilityAsync();
+    }
+
+    [Fact]
+    public async Task ValidateRejectsMismatchedValueCategoriesAcrossNestedAndOrOperands()
+    {
+        MongoDBRAGFilter filter = MongoDBRAGFilter.And(
+            MongoDBRAGFilter.Equal("tenant_id", "acme"),
+            MongoDBRAGFilter.Or(
+                MongoDBRAGFilter.Equal("priority", 1),
+                MongoDBRAGFilter.Range("published_at", minimum: 0, maximum: null)));
+        var state = new RAGCollectionState
+        {
+            SearchIndexes =
+            [
+                RAGIndexFixtures.ValidVectorIndex(filterFieldPaths: ["tenant_id", "priority", "published_at"]),
+                RAGIndexFixtures.ValidSearchIndex(filterFieldTypes: new Dictionary<string, string>
+                {
+                    ["tenant_id"] = "token",
+                    // "priority" is mapped only as "token", which is not compatible with its numeric equality
+                    // value even though the field itself is mapped -- only reachable through the nested Or
+                    // operand, exercising both nested recursion and value-category checking together.
+                    ["priority"] = "token",
+                    ["published_at"] = "number",
+                }),
+            ],
+        };
+        MongoDBRAGProvider provider = CreateProvider(state, filter);
+
+        MongoDBIndexMismatchException exception = await Assert.ThrowsAsync<MongoDBIndexMismatchException>(
+            () => provider.ValidateHybridSearchCapabilityAsync());
+        Assert.Contains("priority", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ValidateClearsAPriorCachedSuccessWhenRefreshFindsAnUnverifiableDynamicMapping()
+    {
+        var state = new RAGCollectionState
+        {
+            SearchIndexes =
+            [
+                RAGIndexFixtures.ValidVectorIndex(filterFieldPaths: ["tenant_id"]),
+                RAGIndexFixtures.ValidSearchIndex(filterFieldTypes: new Dictionary<string, string>
+                {
+                    ["tenant_id"] = "token",
+                }),
+            ],
+        };
+        MongoDBRAGProvider provider = CreateProvider(state, MongoDBRAGFilter.Equal("tenant_id", "acme"));
+        var clock = new FakeTimeProvider();
+        provider.TimeProvider = clock;
+
+        // First call: the mapping is statically verified, so the result is cached.
+        await provider.ValidateHybridSearchCapabilityAsync();
+        Assert.Equal(1, state.RunCommandCallCount);
+        await provider.ValidateHybridSearchCapabilityAsync();
+        Assert.Equal(1, state.RunCommandCallCount);
+
+        // The Search index's mapping later becomes dynamic (unverifiable); a forced refresh discovers this.
+        state.SearchIndexes =
+        [
+            RAGIndexFixtures.ValidVectorIndex(filterFieldPaths: ["tenant_id"]),
+            RAGIndexFixtures.DynamicSearchIndex(),
+        ];
+        await provider.ValidateHybridSearchCapabilityAsync(refresh: true);
+        Assert.Equal(2, state.RunCommandCallCount);
+
+        // The stale cached success from before the mapping became dynamic must have been explicitly cleared: the
+        // very next plain (non-refresh) call must re-validate rather than short-circuiting on it.
+        await provider.ValidateHybridSearchCapabilityAsync();
+        Assert.Equal(3, state.RunCommandCallCount);
+    }
+
+    [Fact]
     public async Task ValidateChecksEveryFieldReferencedAcrossNestedAndOrOperands()
     {
         MongoDBRAGFilter filter = MongoDBRAGFilter.And(

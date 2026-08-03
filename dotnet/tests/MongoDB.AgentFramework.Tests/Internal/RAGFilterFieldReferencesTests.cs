@@ -18,6 +18,7 @@ public sealed class RAGFilterFieldReferencesTests
 
         Assert.Equal("tenant_id", reference.FieldPath);
         Assert.Equal(FilterOperatorCategory.Equality, reference.Category);
+        Assert.Equal(FilterValueCategory.String, reference.ValueCategories);
     }
 
     [Fact]
@@ -37,6 +38,7 @@ public sealed class RAGFilterFieldReferencesTests
 
         Assert.Equal("category", reference.FieldPath);
         Assert.Equal(FilterOperatorCategory.Membership, reference.Category);
+        Assert.Equal(FilterValueCategory.String, reference.ValueCategories);
     }
 
     [Fact]
@@ -56,6 +58,26 @@ public sealed class RAGFilterFieldReferencesTests
 
         Assert.Equal("published_at", reference.FieldPath);
         Assert.Equal(FilterOperatorCategory.Range, reference.Category);
+        Assert.Equal(FilterValueCategory.Number, reference.ValueCategories);
+    }
+
+    [Fact]
+    public void Enumerate_unions_heterogeneous_membership_value_categories()
+    {
+        FilterFieldReference reference = Assert.Single(
+            RAGFilterFieldReferences.Enumerate(MongoDBRAGFilter.In("mixed_id", ["tenant-a", 42])));
+
+        Assert.Equal(FilterValueCategory.String | FilterValueCategory.Number, reference.ValueCategories);
+    }
+
+    [Fact]
+    public void Enumerate_categorizes_date_range_filters()
+    {
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        FilterFieldReference reference = Assert.Single(
+            RAGFilterFieldReferences.Enumerate(MongoDBRAGFilter.Range("created", now.AddDays(-7), now)));
+
+        Assert.Equal(FilterValueCategory.Date, reference.ValueCategories);
     }
 
     [Fact]
@@ -70,9 +92,15 @@ public sealed class RAGFilterFieldReferencesTests
         IReadOnlyList<FilterFieldReference> references = RAGFilterFieldReferences.Enumerate(filter);
 
         Assert.Equal(3, references.Count);
-        Assert.Contains(new FilterFieldReference("tenant_id", FilterOperatorCategory.Equality), references);
-        Assert.Contains(new FilterFieldReference("category", FilterOperatorCategory.Membership), references);
-        Assert.Contains(new FilterFieldReference("published_at", FilterOperatorCategory.Range), references);
+        Assert.Contains(
+            new FilterFieldReference("tenant_id", FilterOperatorCategory.Equality, FilterValueCategory.String),
+            references);
+        Assert.Contains(
+            new FilterFieldReference("category", FilterOperatorCategory.Membership, FilterValueCategory.String),
+            references);
+        Assert.Contains(
+            new FilterFieldReference("published_at", FilterOperatorCategory.Range, FilterValueCategory.Number),
+            references);
     }
 
     [Fact]
@@ -86,5 +114,27 @@ public sealed class RAGFilterFieldReferencesTests
 
         FilterFieldReference reference = Assert.Single(references);
         Assert.Equal("tenant_id", reference.FieldPath);
+    }
+
+    [Fact]
+    public void Enumerate_keeps_distinct_references_for_the_same_field_and_category_with_different_value_categories()
+    {
+        // Not constructible through the public MongoDBRAGFilter API for a single Equal/NotEqual call (a single
+        // value can only have one BSON type), but two separate equality filters on the same field with
+        // differently-typed values still legitimately reference the same field path and operator category, so
+        // they should not collapse to a single reference if their value categories differ.
+        MongoDBRAGFilter filter = MongoDBRAGFilter.Or(
+            MongoDBRAGFilter.Equal("external_id", "abc"),
+            MongoDBRAGFilter.Equal("external_id", 42));
+
+        IReadOnlyList<FilterFieldReference> references = RAGFilterFieldReferences.Enumerate(filter);
+
+        Assert.Equal(2, references.Count);
+        Assert.Contains(
+            new FilterFieldReference("external_id", FilterOperatorCategory.Equality, FilterValueCategory.String),
+            references);
+        Assert.Contains(
+            new FilterFieldReference("external_id", FilterOperatorCategory.Equality, FilterValueCategory.Number),
+            references);
     }
 }

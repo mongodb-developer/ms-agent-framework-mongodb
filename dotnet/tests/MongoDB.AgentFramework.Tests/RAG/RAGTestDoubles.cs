@@ -391,13 +391,16 @@ internal static class RAGIndexFixtures
     /// <summary>
     /// Builds a non-dynamic Search index definition mapping <paramref name="textFieldNames"/> as
     /// <c>"string"</c>, plus any additional <paramref name="filterFieldTypes"/> entries (field path to Atlas
-    /// Search field type), matching the mandatory-filter fields a test configures on
+    /// Search field type) and <paramref name="multiTypeFilterFieldTypes"/> entries (field path to an array of
+    /// Atlas Search field types, matching the multi-type mapping array shape Atlas Search allows for a single
+    /// field path), matching the mandatory-filter fields a test configures on
     /// <see cref="MongoDBRAGProviderOptions.MandatoryFilter"/>.
     /// </summary>
     public static BsonDocument ValidSearchIndex(
         string indexName = "agent_framework_rag_search",
         IEnumerable<string>? textFieldNames = null,
-        IReadOnlyDictionary<string, string>? filterFieldTypes = null)
+        IReadOnlyDictionary<string, string>? filterFieldTypes = null,
+        IReadOnlyDictionary<string, string[]>? multiTypeFilterFieldTypes = null)
     {
         var fields = new BsonDocument();
         foreach (string textField in textFieldNames ?? ["text"])
@@ -408,6 +411,11 @@ internal static class RAGIndexFixtures
         foreach ((string path, string type) in filterFieldTypes ?? new Dictionary<string, string>())
         {
             fields[path] = new BsonDocument("type", type);
+        }
+
+        foreach ((string path, string[] types) in multiTypeFilterFieldTypes ?? new Dictionary<string, string[]>())
+        {
+            fields[path] = new BsonArray(types.Select(static type => new BsonDocument("type", type)));
         }
 
         return new BsonDocument

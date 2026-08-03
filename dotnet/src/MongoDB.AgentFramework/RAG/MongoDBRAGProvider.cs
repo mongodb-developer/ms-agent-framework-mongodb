@@ -562,11 +562,14 @@ public sealed class MongoDBRAGProvider : IAsyncDisposable
 
         // A dynamic Search mapping cannot be statically checked per referenced field (see
         // ValidateSearchFilterFields), so a result covering unverified mandatory-filter fields is never cached:
-        // every call re-validates rather than silently trusting an unverifiable authorization surface.
-        if (searchFilterFieldsVerified)
-        {
-            _hybridCapabilityValidation = (TimeProvider.GetUtcNow(), requireReady);
-        }
+        // every call re-validates rather than silently trusting an unverifiable authorization surface. If a
+        // prior call had cached success (for example before the Search index's mapping became dynamic), that
+        // stale cache entry must be explicitly cleared here rather than left in place, or a later plain
+        // (non-refresh) call could still short-circuit on it and skip re-validating an authorization surface
+        // that is no longer statically verifiable.
+        _hybridCapabilityValidation = searchFilterFieldsVerified
+            ? (TimeProvider.GetUtcNow(), requireReady)
+            : null;
     }
 
     /// <summary>
@@ -1144,13 +1147,21 @@ public sealed class MongoDBRAGProvider : IAsyncDisposable
                     $"'{reference.FieldPath}'.");
             }
 
-            if (!definitions.Any(d => IsFilterCompatible(d, reference.Category)))
+            // Every individual value category referenced (a membership filter may reference more than one, for
+            // example a mixed string/number `in` list) must independently be satisfied by at least one mapping
+            // definition in the field's array -- possibly a different definition per category -- since a single
+            // definition covering one category does not imply it covers another.
+            foreach (FilterValueCategory valueCategory in BsonValueCategories.Flags(reference.ValueCategories))
             {
-                string types = string.Join(", ", definitions.Select(d => d.GetValue("type", "").AsString));
-                throw new MongoDBIndexMismatchException(
-                    $"Search index '{_options.SearchIndexName}' maps mandatory-filter field " +
-                    $"'{reference.FieldPath}' to '{types}', which is not compatible with a {reference.Category} " +
-                    "filter.");
+                if (!definitions.Any(d => IsFilterValueCategoryCompatible(d, reference.Category, valueCategory)))
+                {
+                    string types = string.Join(", ", definitions.Select(d => d.GetValue("type", "").AsString));
+                    throw new MongoDBIndexMismatchException(
+                        $"Search index '{_options.SearchIndexName}' maps mandatory-filter field " +
+                        $"'{reference.FieldPath}' to '{types}', which is not compatible with a " +
+                        $"{reference.Category} filter over a {valueCategory} value (for example a string " +
+                        "equality/membership value requires a 'token' mapping, not 'string').");
+                }
             }
         }
 
@@ -1158,17 +1169,39 @@ public sealed class MongoDBRAGProvider : IAsyncDisposable
     }
 
     /// <summary>
-    /// A best-effort, per-operator-category compatibility mapping for Atlas Search field types used against a
-    /// <see cref="MongoDBRAGProviderOptions.MandatoryFilter"/> field: equality/membership are compatible with any
-    /// scalar identity-comparable type, while range comparisons require an orderable numeric/date type.
+    /// Checks whether <paramref name="fieldMapping"/> is compatible with a single BSON value category used
+    /// against it under <paramref name="operatorCategory"/>. Exact-match (equality/membership) string values
+    /// require a <c>token</c> mapping -- never <c>string</c>, which is full-text analyzed and cannot support
+    /// exact matching -- while range comparisons require an orderable <c>number</c>/<c>date</c> (or their facet
+    /// equivalents) matching the value's own category.
     /// </summary>
-    private static bool IsFilterCompatible(BsonDocument fieldMapping, FilterOperatorCategory category)
+    private static bool IsFilterValueCategoryCompatible(
+        BsonDocument fieldMapping,
+        FilterOperatorCategory operatorCategory,
+        FilterValueCategory valueCategory)
     {
         string type = fieldMapping.GetValue("type", "").AsString;
-        return category switch
+        return operatorCategory switch
         {
-            FilterOperatorCategory.Range => type is "number" or "date" or "numberFacet" or "dateFacet",
-            _ => type is "token" or "string" or "boolean" or "number" or "date" or "objectId" or "uuid",
+            FilterOperatorCategory.Range => valueCategory switch
+            {
+                FilterValueCategory.Number => type is "number" or "numberFacet",
+                FilterValueCategory.Date => type is "date" or "dateFacet",
+                // Range filters can only ever produce Number or Date value categories (see
+                // RAGFilterFieldReferences.Collect), so this branch is structurally unreachable; retained as a
+                // defensive rejection rather than a silent pass.
+                _ => false,
+            },
+            _ => valueCategory switch
+            {
+                FilterValueCategory.String => type is "token",
+                FilterValueCategory.Boolean => type is "boolean",
+                FilterValueCategory.Number => type is "number",
+                FilterValueCategory.Date => type is "date",
+                FilterValueCategory.ObjectId => type is "objectId",
+                FilterValueCategory.Uuid => type is "uuid",
+                _ => false,
+            },
         };
     }
 

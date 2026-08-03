@@ -116,6 +116,23 @@ public sealed class MongoDBRAGFilterTests
     }
 
     [Fact]
+    public void RangeRejectsMismatchedBoundValueCategories()
+    {
+        // Not reachable through either public Range overload (each always produces same-category bounds by
+        // construction); exercised through the internal constructor directly, consistent with this class's
+        // documented "eagerly validated, always fully translatable" invariant.
+        MongoDBConfigurationException exception = Assert.Throws<MongoDBConfigurationException>(
+            () => new MongoDBRAGFilter.RangeFilter(
+                "mixed",
+                new BsonDouble(1.0),
+                new BsonDateTime(DateTime.UtcNow),
+                minimumInclusive: true,
+                maximumInclusive: true));
+
+        Assert.Contains("value category", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void AndRequiresAtLeastTwoOperands()
     {
         Assert.Throws<MongoDBConfigurationException>(
