@@ -289,6 +289,12 @@ public sealed class MongoDBRAGIntegrationTests
         string prefix = $"af_rag_dotnet_test_{Guid.NewGuid():N}_";
         string tenantAId = $"{prefix}a";
         string tenantBId = $"{prefix}b";
+        string vectorMatchId = $"{prefix}vector-match";
+        string textMatchId = $"{prefix}text-match";
+        const string weightQuery = "distinctive weight sensitive query phrase";
+        float[] weightQueryEmbedding = [1f, 0f, 0f];
+        Func<string, float[]> weightEmbeddingFactory = query =>
+            query == weightQuery ? weightQueryEmbedding : [0.1f, 0.1f, 0.1f];
 
         // No MandatoryFilter: used only to independently confirm both tenant documents are searchable through
         // *each* of Hybrid's two input branches (vector and text) before the tenant-A-scoped Hybrid provider's
@@ -324,6 +330,54 @@ public sealed class MongoDBRAGIntegrationTests
         };
         await using MongoDBRAGProvider hybridProvider = new(
             client, databaseName!, collectionName, new RecordingEmbeddingGenerator(), 3, hybridOptions);
+
+        // Explicit, strict (requireReady: true) capability validation ahead of any retrieval: proves both the
+        // Vector Search and Search indexes exist and are READY/queryable up front, rather than only ever
+        // discovering a misconfigured deployment implicitly as a side effect of the first SearchAsync call below
+        // (SearchAsync also validates internally, but this asserts the seam directly per rag.md's capability
+        // matrix).
+        await hybridProvider.ValidateHybridSearchCapabilityAsync(requireReady: true, refresh: true);
+
+        // A dedicated, non-tenant-filtered pair of Hybrid providers with opposite weight configurations, used
+        // below to prove ordering is genuinely weight-sensitive rather than incidental: vectorMatchId's embedding
+        // matches the query embedding exactly but its text shares no terms with the query, while textMatchId's
+        // text contains the exact query phrase but its embedding is orthogonal to the query embedding. Neither
+        // fixture ties with the other on both signals, so a correct implementation must rank each first only
+        // under the weighting that favors its matching branch.
+        var vectorHeavyOptions = new MongoDBRAGProviderOptions
+        {
+            SearchMode = MongoDBSearchMode.HybridRrf,
+            VectorIndexName = vectorIndexName,
+            SearchIndexName = searchIndexName,
+            SearchTextFieldNames = ["text"],
+            TopK = 10,
+            VectorWeight = 10.0,
+            TextWeight = 0.1,
+        };
+        await using MongoDBRAGProvider vectorHeavyProvider = new(
+            client,
+            databaseName!,
+            collectionName,
+            new RecordingEmbeddingGenerator { EmbeddingFactory = weightEmbeddingFactory },
+            3,
+            vectorHeavyOptions);
+        var textHeavyOptions = new MongoDBRAGProviderOptions
+        {
+            SearchMode = MongoDBSearchMode.HybridRrf,
+            VectorIndexName = vectorIndexName,
+            SearchIndexName = searchIndexName,
+            SearchTextFieldNames = ["text"],
+            TopK = 10,
+            VectorWeight = 0.1,
+            TextWeight = 10.0,
+        };
+        await using MongoDBRAGProvider textHeavyProvider = new(
+            client,
+            databaseName!,
+            collectionName,
+            new RecordingEmbeddingGenerator { EmbeddingFactory = weightEmbeddingFactory },
+            3,
+            textHeavyOptions);
         try
         {
             await collection.InsertManyAsync(
@@ -341,6 +395,22 @@ public sealed class MongoDBRAGIntegrationTests
                     { "text", "Widgets also ship in blue for tenant B." },
                     { "embedding", new BsonArray([1.0, 0.0, 0.0]) },
                     { "tenant_id", "tenant-b" },
+                },
+                new BsonDocument
+                {
+                    { "_id", vectorMatchId },
+                    // Embedding matches the query embedding exactly; text shares no terms with the query, so this
+                    // document should only rank first under vector-dominant weighting.
+                    { "text", "Completely unrelated shipping content about crates and pallets." },
+                    { "embedding", new BsonArray([1.0, 0.0, 0.0]) },
+                },
+                new BsonDocument
+                {
+                    { "_id", textMatchId },
+                    // Orthogonal embedding (zero cosine similarity to the query vector); text contains the exact
+                    // query phrase, so this document should only rank first under text-dominant weighting.
+                    { "text", $"This chunk contains the {weightQuery} verbatim for search matching." },
+                    { "embedding", new BsonArray([0.0, 1.0, 0.0]) },
                 },
             ]);
 
@@ -372,12 +442,34 @@ public sealed class MongoDBRAGIntegrationTests
             Assert.Equal("tenant-a", tenantAResult.RawDocument["tenant_id"].AsString);
             Assert.False(tenantAResult.RawDocument.Contains("_ragScore"));
             Assert.False(tenantAResult.RawDocument.Contains("_ragScoreDetails"));
+
+            // Both weight-sensitive fixtures must be independently retrievable via *each* weighted provider (the
+            // fused output is a union of both branches regardless of weight) before their top-ranked ordering is
+            // asserted, so the ordering assertion below cannot pass vacuously because one fixture was never
+            // fused into the results at all.
+            IReadOnlyList<MongoDBRAGResult> vectorHeavyResults = await PollUntilSearchableAsync(
+                vectorHeavyProvider,
+                weightQuery,
+                candidates => candidates.Any(r => r.Id == vectorMatchId) && candidates.Any(r => r.Id == textMatchId),
+                timeout: TimeSpan.FromSeconds(30),
+                pollInterval: TimeSpan.FromSeconds(1));
+            IReadOnlyList<MongoDBRAGResult> textHeavyResults = await PollUntilSearchableAsync(
+                textHeavyProvider,
+                weightQuery,
+                candidates => candidates.Any(r => r.Id == vectorMatchId) && candidates.Any(r => r.Id == textMatchId),
+                timeout: TimeSpan.FromSeconds(30),
+                pollInterval: TimeSpan.FromSeconds(1));
+
+            Assert.Equal(vectorMatchId, vectorHeavyResults[0].Id);
+            Assert.Equal(textMatchId, textHeavyResults[0].Id);
         }
         finally
         {
             Assert.StartsWith("af_rag_dotnet_test_", prefix);
             await collection.DeleteManyAsync(
-                Builders<BsonDocument>.Filter.In("_id", new[] { tenantAId, tenantBId }));
+                Builders<BsonDocument>.Filter.In(
+                    "_id",
+                    new[] { tenantAId, tenantBId, vectorMatchId, textMatchId }));
         }
     }
 }

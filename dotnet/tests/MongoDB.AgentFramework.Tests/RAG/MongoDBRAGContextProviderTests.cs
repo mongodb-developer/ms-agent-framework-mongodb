@@ -451,6 +451,7 @@ public sealed class MongoDBRAGContextProviderTests
                     { "source", new BsonDocument { { "name", "Catalog" }, { "url", "https://example.test/c" } } },
                 },
             ],
+            SearchIndexes = [RAGIndexFixtures.ValidVectorIndex(), RAGIndexFixtures.ValidSearchIndex()],
         };
         var options = new MongoDBRAGProviderOptions { SearchMode = MongoDBSearchMode.HybridRrf };
         MongoDBRAGProvider provider = CreateProvider(state, options: options);

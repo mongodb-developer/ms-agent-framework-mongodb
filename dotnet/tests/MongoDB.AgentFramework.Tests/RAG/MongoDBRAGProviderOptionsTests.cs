@@ -383,6 +383,70 @@ public sealed class MongoDBRAGProviderOptionsTests
     }
 
     [Fact]
+    public void HybridRejectsAnExplicitVectorCandidateLimitAboveTheDefaultNumCandidates()
+    {
+        // NumCandidates is left unset, so its effective value is the default over-fetch heuristic (100 for the
+        // default TopK of 5); $vectorSearch requires numCandidates >= limit, so a VectorCandidateLimit above that
+        // default must be rejected rather than silently sent to MongoDB as an invalid pipeline.
+        var options = new MongoDBRAGProviderOptions
+        {
+            SearchMode = MongoDBSearchMode.HybridRrf,
+            VectorCandidateLimit = 101,
+        };
+
+        Assert.Throws<MongoDBConfigurationException>(options.Validate);
+    }
+
+    [Fact]
+    public void HybridRejectsAnExplicitNumCandidatesBelowTheDefaultVectorCandidateLimit()
+    {
+        // VectorCandidateLimit is left unset (default 100), so an explicit NumCandidates below that default must
+        // be rejected even though NumCandidates alone satisfies the separate NumCandidates >= TopK check.
+        var options = new MongoDBRAGProviderOptions
+        {
+            SearchMode = MongoDBSearchMode.HybridRrf,
+            TopK = 5,
+            NumCandidates = 50,
+        };
+
+        Assert.Throws<MongoDBConfigurationException>(options.Validate);
+    }
+
+    [Fact]
+    public void HybridRejectsAnExplicitNumCandidatesBelowAnExplicitVectorCandidateLimit()
+    {
+        var options = new MongoDBRAGProviderOptions
+        {
+            SearchMode = MongoDBSearchMode.HybridRrf,
+            NumCandidates = 100,
+            VectorCandidateLimit = 150,
+        };
+
+        Assert.Throws<MongoDBConfigurationException>(options.Validate);
+    }
+
+    [Fact]
+    public void HybridAcceptsExplicitNumCandidatesEqualToTheExplicitVectorCandidateLimit()
+    {
+        var options = new MongoDBRAGProviderOptions
+        {
+            SearchMode = MongoDBSearchMode.HybridRrf,
+            NumCandidates = 150,
+            VectorCandidateLimit = 150,
+        };
+
+        options.Validate();
+    }
+
+    [Fact]
+    public void HybridAcceptsDefaultNumCandidatesAndVectorCandidateLimitTogether()
+    {
+        var options = new MongoDBRAGProviderOptions { SearchMode = MongoDBSearchMode.HybridRrf };
+
+        options.Validate();
+    }
+
+    [Fact]
     public void CopyPreservesHybridCandidateLimitsAndScoreDetails()
     {
         var options = new MongoDBRAGProviderOptions

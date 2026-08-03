@@ -155,6 +155,7 @@ public sealed class MongoDBRAGProviderOptions
                 ValidateNumCandidates();
                 ValidateCandidateLimit(VectorCandidateLimit, nameof(VectorCandidateLimit));
                 ValidateCandidateLimit(TextCandidateLimit, nameof(TextCandidateLimit));
+                ValidateVectorCandidateRelationship();
                 if (VectorWeight <= 0 && TextWeight <= 0)
                 {
                     throw new MongoDBConfigurationException(
@@ -272,6 +273,33 @@ public sealed class MongoDBRAGProviderOptions
             throw new MongoDBConfigurationException($"{name} must be between 1 and {MaxNumCandidates}.");
         }
     }
+
+    /// <summary>
+    /// <c>$vectorSearch</c> requires its ANN candidate pool (<c>numCandidates</c>) to be at least its own result
+    /// <c>limit</c>. For Hybrid, that limit is <see cref="VectorCandidateLimit"/> -- the vector input's own
+    /// <c>$vectorSearch.limit</c> fed into <c>$rankFusion</c> -- not the final <see cref="TopK"/>, so this checks
+    /// the effective (explicit-or-default) values of both in addition to (not instead of)
+    /// <see cref="ValidateNumCandidates"/>'s separate <see cref="NumCandidates"/> &gt;= <see cref="TopK"/> check.
+    /// </summary>
+    private void ValidateVectorCandidateRelationship()
+    {
+        int effectiveNumCandidates = NumCandidates ?? DefaultNumCandidates(TopK);
+        int effectiveVectorCandidateLimit = VectorCandidateLimit ?? DefaultNumCandidates(TopK);
+        if (effectiveNumCandidates < effectiveVectorCandidateLimit)
+        {
+            throw new MongoDBConfigurationException(
+                $"NumCandidates ({effectiveNumCandidates}) must be at least VectorCandidateLimit " +
+                $"({effectiveVectorCandidateLimit}).");
+        }
+    }
+
+    /// <summary>
+    /// The same ANN over-fetch heuristic used for <see cref="NumCandidates"/>, <see cref="VectorCandidateLimit"/>,
+    /// and <see cref="TextCandidateLimit"/> defaults; shared with <c>MongoDBRAGProvider</c> so the heuristic is
+    /// defined exactly once.
+    /// </summary>
+    internal static int DefaultNumCandidates(int topK) =>
+        Math.Min(MaxNumCandidates, Math.Max(topK * 10, 100));
 
     private void ValidateSearchTextFieldNames()
     {

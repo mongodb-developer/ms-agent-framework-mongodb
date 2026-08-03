@@ -105,6 +105,16 @@ public sealed class MongoDBRAGContractTests
         var state = new RAGCollectionState
         {
             Results = [new BsonDocument { { "_id", "chunk-1" }, { "text", "chunk" }, { "_ragScore", 1.0 } }],
+            SearchIndexes =
+            [
+                RAGIndexFixtures.ValidVectorIndex(filterFieldPaths: ["tenant_id", "category", "published_at"]),
+                RAGIndexFixtures.ValidSearchIndex(filterFieldTypes: new Dictionary<string, string>
+                {
+                    ["tenant_id"] = "token",
+                    ["category"] = "token",
+                    ["published_at"] = "number",
+                }),
+            ],
         };
         var options = new MongoDBRAGProviderOptions
         {

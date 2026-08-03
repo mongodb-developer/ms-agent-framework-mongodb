@@ -127,14 +127,32 @@ CancellationToken)` seam, mirroring `ValidateSearchIndexAsync`'s ([slice 10](dot
   `ValidateSearchIndexDefinition` unchanged (identical Search-index rules as `FullText`, including the
   dynamic-mapping and multi-type-field-mapping handling already documented in
   [slice 10](dotnet-rag-full-text-search.md#search-index-capability-validation-review-fix)).
+- Validates every field referenced by `MandatoryFilter` (extracted immutably via the internal
+  `RAGFilterFieldReferences.Enumerate`, covering nested AND/OR) against **both** indexes:
+  `ValidateVectorFilterFields` requires each referenced field be declared as a Vector Search `type: "filter"` field
+  (Vector Search has no dynamic-filter equivalent, so this check always definitively throws or passes), and
+  `ValidateSearchFilterFields` requires each referenced field be mapped to an operator-compatible Search type
+  (`Range` needs `number`/`date`/`numberFacet`/`dateFacet`; `Equality`/`Membership` accept
+  `token`/`string`/`boolean`/`number`/`date`/`objectId`/`uuid`) when the Search mapping is non-dynamic. A dynamic
+  Search mapping cannot be statically verified per field, so it is accepted **without** being treated as verified.
 - `requireReady` (default `true`) requires both indexes to report queryable/`READY`.
-- `SearchAsync` never calls this method — an opt-in health-check/startup gate only, consistent with
-  `ValidateSearchIndexAsync` — so a query never pays the extra round trips. A successful result is cached for
-  `HybridCapabilityValidationCacheDuration` (30 seconds); `refresh: true` bypasses the cache; a cached lenient
-  (`requireReady: false`) result never silently satisfies a later strict call.
+- `SearchAsync` now calls this method itself before every `HybridRrf` aggregation (first call validates; a
+  successful, fully-field-verified result is cached for `HybridCapabilityValidationCacheDuration` (30 seconds), so a
+  query does not pay the extra round trips on every call). It remains additionally callable directly as an
+  opt-in health-check/startup gate, consistent with `ValidateSearchIndexAsync`. A cached lenient
+  (`requireReady: false`) result never silently satisfies a later strict call. Critically, a successful validation is
+  **not cached** when the Search-index mapping is dynamic and `MandatoryFilter` references at least one field —
+  since that combination cannot be statically verified, every call re-validates rather than risk caching an
+  unverified authorization filter as "safe".
 - Calling this method against a mode other than `HybridRrf` throws `MongoDBCapabilityException` without any network
   call (`RunCommandCallCount`/`SearchIndexListCallCount` both remain `0`).
 - `OperationCanceledException` always propagates unchanged, never wrapped.
+- If the aggregation itself still fails with a `MongoCommandException` recognizable as "the deployment does not
+  support/allow `$rankFusion`" (an unrecognized-pipeline-stage/command-not-supported server error code, or an error
+  message naming `rankFusion`), `SearchAsync` wraps it as `MongoDBCapabilityException` instead of the generic
+  `MongoDBRetrievalException` every other mode uses — this is a defense-in-depth safety net for deployments where
+  the pre-flight `buildInfo` check reports `8.0+` but `$rankFusion` is still disabled/unavailable; it does not
+  replace the mandatory pre-aggregation validation above.
 
 Tests live in `MongoDBRAGHybridCapabilityValidationTests`, using a new `RAGDatabaseProxy` test double (faking
 `IMongoDatabase.RunCommandAsync<TResult>` for `buildInfo`, added alongside the existing `RAGCollectionProxy`/
@@ -142,8 +160,25 @@ Tests live in `MongoDBRAGHybridCapabilityValidationTests`, using a new `RAGDatab
 unparsable version string, a `buildInfo` failure wrapped as `MongoDBCapabilityException`, cancellation propagation,
 missing vector index, missing search index, wrong vector index type, mismatched vector dimension, vector index
 missing the configured field, not-ready vector/search index rejection (and allowance when `requireReady: false`),
-success with both valid indexes, mode gating (no network calls for a non-`HybridRrf` configuration), and cache
-behavior (TTL reuse, `refresh: true` bypass, TTL expiry, and no stale-serving across a `requireReady` escalation).
+success with both valid indexes, mode gating (no network calls for a non-`HybridRrf` configuration), cache
+behavior (TTL reuse, `refresh: true` bypass, TTL expiry, and no stale-serving across a `requireReady` escalation),
+mandatory-filter field validation against both indexes (missing/wrong-type Vector Search filter field, unmapped/
+incompatible Search field, nested AND/OR coverage, and the no-cache-on-unverified-dynamic-mapping behavior).
+`MongoDBRAGProviderSearchTests` additionally covers `SearchAsync` invoking validation before aggregating (and never
+aggregating when it fails), reusing the cache across calls, and wrapping a recognized `$rankFusion`-unsupported
+command error as `MongoDBCapabilityException` while an unrelated command error still becomes
+`MongoDBRetrievalException`.
+
+## Vector candidate relationship validation
+
+`MongoDBRAGProviderOptions.Validate()` now additionally rejects `HybridRrf` options whose effective `NumCandidates`
+(the configured value, or `DefaultNumCandidates(TopK)` when unset) is less than the effective
+`VectorCandidateLimit` (the configured value, or its own default when unset): `$vectorSearch`'s ANN candidate pool
+must be at least as large as the number of vector candidates fed into `$rankFusion`, or the rank fusion input would
+be silently truncated. `DefaultNumCandidates` moved from a private `MongoDBRAGProvider` method to
+`internal static MongoDBRAGProviderOptions.DefaultNumCandidates(int topK)` so both the provider's pipeline builders
+and this validation share one definition. Covered by new `MongoDBRAGProviderOptionsTests` cases across explicit/
+default/mixed-null combinations.
 
 ## `MongoDBRAGContextProvider`
 
@@ -175,10 +210,11 @@ Tests live under `dotnet/tests/MongoDB.AgentFramework.Tests/RAG/` and were writt
   `UnsupportedModesAreRejectedBeforeAnyEmbeddingOrNetworkCall` theory was removed: `HybridRrf` was its last
   remaining case, and no unsupported mode remains once this slice lands.
 - `MongoDBRAGContextProviderTests` — `HybridSearchWorksTransparentlyThroughTheContextAdapter` (see above). The
-  now-obsolete `CapabilityErrorsPropagateRatherThanFailingOpen` test was removed: it depended on `HybridRrf` being
-  an *unsupported* mode to trigger `MongoDBCapabilityException` from `SearchAsync`, and — by design — capability
-  validation is an explicit opt-in seam that `SearchAsync` never calls implicitly, so no reachable public-surface
-  trigger for that scenario remains once every mode is implemented.
+  `CapabilityErrorsPropagateRatherThanFailingOpen` test that previously covered `HybridRrf` as an *unsupported* mode
+  was removed when this slice first landed; the mandatory-validation review fix (below) reintroduced a directly
+  reachable `MongoDBCapabilityException` trigger through `SearchAsync` itself (missing/misconfigured index, or a
+  recognized `$rankFusion`-unsupported command error), so context-adapter fail-open behavior for Hybrid capability
+  failures is now covered again via `MongoDBRAGProviderSearchTests`' capability-validation tests.
 - `MongoDBRAGContractTests` — a new
   `MandatoryFilterIsCompletelyAndIndependentlyTranslatedIntoBothHybridInputBranches` test asserting a multi-branch
   AND/OR/IN/range `MandatoryFilter` translates completely and independently into both `$vectorSearch.filter` and

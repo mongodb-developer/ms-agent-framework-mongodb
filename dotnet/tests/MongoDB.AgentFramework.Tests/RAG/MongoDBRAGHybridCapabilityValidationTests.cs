@@ -22,7 +22,7 @@ public sealed class MongoDBRAGHybridCapabilityValidationTests
         var state = new RAGCollectionState
         {
             BuildInfoResult = new BsonDocument("version", "7.0.9"),
-            SearchIndexes = [ValidVectorIndex(), ValidSearchIndex()],
+            SearchIndexes = [RAGIndexFixtures.ValidVectorIndex(), RAGIndexFixtures.ValidSearchIndex()],
         };
         MongoDBRAGProvider provider = CreateProvider(state);
 
@@ -37,7 +37,7 @@ public sealed class MongoDBRAGHybridCapabilityValidationTests
         var state = new RAGCollectionState
         {
             BuildInfoResult = new BsonDocument("version", "8.0.0"),
-            SearchIndexes = [ValidVectorIndex(), ValidSearchIndex()],
+            SearchIndexes = [RAGIndexFixtures.ValidVectorIndex(), RAGIndexFixtures.ValidSearchIndex()],
         };
         MongoDBRAGProvider provider = CreateProvider(state);
 
@@ -50,7 +50,7 @@ public sealed class MongoDBRAGHybridCapabilityValidationTests
         var state = new RAGCollectionState
         {
             BuildInfoResult = new BsonDocument("version", "not-a-version"),
-            SearchIndexes = [ValidVectorIndex(), ValidSearchIndex()],
+            SearchIndexes = [RAGIndexFixtures.ValidVectorIndex(), RAGIndexFixtures.ValidSearchIndex()],
         };
         MongoDBRAGProvider provider = CreateProvider(state);
 
@@ -92,7 +92,7 @@ public sealed class MongoDBRAGHybridCapabilityValidationTests
     {
         var state = new RAGCollectionState
         {
-            SearchIndexes = [ValidSearchIndex()],
+            SearchIndexes = [RAGIndexFixtures.ValidSearchIndex()],
         };
         MongoDBRAGProvider provider = CreateProvider(state);
 
@@ -105,7 +105,7 @@ public sealed class MongoDBRAGHybridCapabilityValidationTests
     {
         var state = new RAGCollectionState
         {
-            SearchIndexes = [ValidVectorIndex()],
+            SearchIndexes = [RAGIndexFixtures.ValidVectorIndex()],
         };
         MongoDBRAGProvider provider = CreateProvider(state);
 
@@ -116,11 +116,11 @@ public sealed class MongoDBRAGHybridCapabilityValidationTests
     [Fact]
     public async Task ValidateRejectsAVectorIndexWithTheWrongType()
     {
-        BsonDocument vectorIndex = ValidVectorIndex();
+        BsonDocument vectorIndex = RAGIndexFixtures.ValidVectorIndex();
         vectorIndex["type"] = "search";
         var state = new RAGCollectionState
         {
-            SearchIndexes = [vectorIndex, ValidSearchIndex()],
+            SearchIndexes = [vectorIndex, RAGIndexFixtures.ValidSearchIndex()],
         };
         MongoDBRAGProvider provider = CreateProvider(state);
 
@@ -131,11 +131,11 @@ public sealed class MongoDBRAGHybridCapabilityValidationTests
     [Fact]
     public async Task ValidateRejectsAVectorIndexWithAMismatchedDimension()
     {
-        BsonDocument vectorIndex = ValidVectorIndex();
+        BsonDocument vectorIndex = RAGIndexFixtures.ValidVectorIndex();
         vectorIndex["latestDefinition"]["fields"].AsBsonArray[0]["numDimensions"] = 99;
         var state = new RAGCollectionState
         {
-            SearchIndexes = [vectorIndex, ValidSearchIndex()],
+            SearchIndexes = [vectorIndex, RAGIndexFixtures.ValidSearchIndex()],
         };
         MongoDBRAGProvider provider = CreateProvider(state);
 
@@ -146,11 +146,11 @@ public sealed class MongoDBRAGHybridCapabilityValidationTests
     [Fact]
     public async Task ValidateRejectsAVectorIndexMissingTheConfiguredField()
     {
-        BsonDocument vectorIndex = ValidVectorIndex();
+        BsonDocument vectorIndex = RAGIndexFixtures.ValidVectorIndex();
         vectorIndex["latestDefinition"]["fields"].AsBsonArray[0]["path"] = "other_field";
         var state = new RAGCollectionState
         {
-            SearchIndexes = [vectorIndex, ValidSearchIndex()],
+            SearchIndexes = [vectorIndex, RAGIndexFixtures.ValidSearchIndex()],
         };
         MongoDBRAGProvider provider = CreateProvider(state);
 
@@ -161,12 +161,12 @@ public sealed class MongoDBRAGHybridCapabilityValidationTests
     [Fact]
     public async Task ValidateRejectsANotReadyVectorIndexWhenReadyIsRequired()
     {
-        BsonDocument vectorIndex = ValidVectorIndex();
+        BsonDocument vectorIndex = RAGIndexFixtures.ValidVectorIndex();
         vectorIndex["status"] = "BUILDING";
         vectorIndex["queryable"] = false;
         var state = new RAGCollectionState
         {
-            SearchIndexes = [vectorIndex, ValidSearchIndex()],
+            SearchIndexes = [vectorIndex, RAGIndexFixtures.ValidSearchIndex()],
         };
         MongoDBRAGProvider provider = CreateProvider(state);
 
@@ -177,12 +177,12 @@ public sealed class MongoDBRAGHybridCapabilityValidationTests
     [Fact]
     public async Task ValidateRejectsANotReadySearchIndexWhenReadyIsRequired()
     {
-        BsonDocument searchIndex = ValidSearchIndex();
+        BsonDocument searchIndex = RAGIndexFixtures.ValidSearchIndex();
         searchIndex["status"] = "BUILDING";
         searchIndex["queryable"] = false;
         var state = new RAGCollectionState
         {
-            SearchIndexes = [ValidVectorIndex(), searchIndex],
+            SearchIndexes = [RAGIndexFixtures.ValidVectorIndex(), searchIndex],
         };
         MongoDBRAGProvider provider = CreateProvider(state);
 
@@ -193,10 +193,10 @@ public sealed class MongoDBRAGHybridCapabilityValidationTests
     [Fact]
     public async Task ValidateAllowsNotReadyIndexesWhenReadyIsNotRequired()
     {
-        BsonDocument vectorIndex = ValidVectorIndex();
+        BsonDocument vectorIndex = RAGIndexFixtures.ValidVectorIndex();
         vectorIndex["status"] = "BUILDING";
         vectorIndex["queryable"] = false;
-        BsonDocument searchIndex = ValidSearchIndex();
+        BsonDocument searchIndex = RAGIndexFixtures.ValidSearchIndex();
         searchIndex["status"] = "BUILDING";
         searchIndex["queryable"] = false;
         var state = new RAGCollectionState
@@ -213,7 +213,7 @@ public sealed class MongoDBRAGHybridCapabilityValidationTests
     {
         var state = new RAGCollectionState
         {
-            SearchIndexes = [ValidVectorIndex(), ValidSearchIndex()],
+            SearchIndexes = [RAGIndexFixtures.ValidVectorIndex(), RAGIndexFixtures.ValidSearchIndex()],
         };
         MongoDBRAGProvider provider = CreateProvider(state);
 
@@ -241,7 +241,7 @@ public sealed class MongoDBRAGHybridCapabilityValidationTests
     {
         var state = new RAGCollectionState
         {
-            SearchIndexes = [ValidVectorIndex(), ValidSearchIndex()],
+            SearchIndexes = [RAGIndexFixtures.ValidVectorIndex(), RAGIndexFixtures.ValidSearchIndex()],
         };
         MongoDBRAGProvider provider = CreateProvider(state);
         var clock = new FakeTimeProvider();
@@ -261,7 +261,7 @@ public sealed class MongoDBRAGHybridCapabilityValidationTests
     {
         var state = new RAGCollectionState
         {
-            SearchIndexes = [ValidVectorIndex(), ValidSearchIndex()],
+            SearchIndexes = [RAGIndexFixtures.ValidVectorIndex(), RAGIndexFixtures.ValidSearchIndex()],
         };
         MongoDBRAGProvider provider = CreateProvider(state);
 
@@ -276,7 +276,7 @@ public sealed class MongoDBRAGHybridCapabilityValidationTests
     {
         var state = new RAGCollectionState
         {
-            SearchIndexes = [ValidVectorIndex(), ValidSearchIndex()],
+            SearchIndexes = [RAGIndexFixtures.ValidVectorIndex(), RAGIndexFixtures.ValidSearchIndex()],
         };
         MongoDBRAGProvider provider = CreateProvider(state);
         var clock = new FakeTimeProvider();
@@ -292,12 +292,12 @@ public sealed class MongoDBRAGHybridCapabilityValidationTests
     [Fact]
     public async Task ValidateDoesNotServeAStaleNotReadyCacheWhenReadinessIsLaterRequired()
     {
-        BsonDocument vectorIndex = ValidVectorIndex();
+        BsonDocument vectorIndex = RAGIndexFixtures.ValidVectorIndex();
         vectorIndex["status"] = "BUILDING";
         vectorIndex["queryable"] = false;
         var state = new RAGCollectionState
         {
-            SearchIndexes = [vectorIndex, ValidSearchIndex()],
+            SearchIndexes = [vectorIndex, RAGIndexFixtures.ValidSearchIndex()],
         };
         MongoDBRAGProvider provider = CreateProvider(state);
 
@@ -308,6 +308,218 @@ public sealed class MongoDBRAGHybridCapabilityValidationTests
             () => provider.ValidateHybridSearchCapabilityAsync(requireReady: true));
         Assert.Equal(2, state.RunCommandCallCount);
     }
+
+    [Fact]
+    public async Task ValidateRejectsAMandatoryFilterFieldNotIndexedAsAVectorSearchFilterField()
+    {
+        var state = new RAGCollectionState
+        {
+            SearchIndexes =
+            [
+                RAGIndexFixtures.ValidVectorIndex(),
+                RAGIndexFixtures.ValidSearchIndex(filterFieldTypes: new Dictionary<string, string>
+                {
+                    ["tenant_id"] = "token",
+                }),
+            ],
+        };
+        MongoDBRAGProvider provider = CreateProvider(state, MongoDBRAGFilter.Equal("tenant_id", "acme"));
+
+        MongoDBIndexMismatchException exception = await Assert.ThrowsAsync<MongoDBIndexMismatchException>(
+            () => provider.ValidateHybridSearchCapabilityAsync());
+        Assert.Contains("tenant_id", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("filter", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ValidateRejectsAMandatoryFilterFieldIndexedAsTheWrongVectorSearchFieldType()
+    {
+        BsonDocument vectorIndex = RAGIndexFixtures.ValidVectorIndex();
+        vectorIndex["latestDefinition"].AsBsonDocument["fields"].AsBsonArray.Add(
+            new BsonDocument { { "type", "token" }, { "path", "tenant_id" } });
+        var state = new RAGCollectionState
+        {
+            SearchIndexes =
+            [
+                vectorIndex,
+                RAGIndexFixtures.ValidSearchIndex(filterFieldTypes: new Dictionary<string, string>
+                {
+                    ["tenant_id"] = "token",
+                }),
+            ],
+        };
+        MongoDBRAGProvider provider = CreateProvider(state, MongoDBRAGFilter.Equal("tenant_id", "acme"));
+
+        await Assert.ThrowsAsync<MongoDBIndexMismatchException>(
+            () => provider.ValidateHybridSearchCapabilityAsync());
+    }
+
+    [Fact]
+    public async Task ValidateAcceptsAMandatoryFilterFieldIndexedAsAVectorSearchFilterField()
+    {
+        var state = new RAGCollectionState
+        {
+            SearchIndexes =
+            [
+                RAGIndexFixtures.ValidVectorIndex(filterFieldPaths: ["tenant_id"]),
+                RAGIndexFixtures.ValidSearchIndex(filterFieldTypes: new Dictionary<string, string>
+                {
+                    ["tenant_id"] = "token",
+                }),
+            ],
+        };
+        MongoDBRAGProvider provider = CreateProvider(state, MongoDBRAGFilter.Equal("tenant_id", "acme"));
+
+        await provider.ValidateHybridSearchCapabilityAsync();
+    }
+
+    [Fact]
+    public async Task ValidateRejectsAMandatoryFilterFieldNotMappedInANonDynamicSearchIndex()
+    {
+        var state = new RAGCollectionState
+        {
+            SearchIndexes =
+            [
+                RAGIndexFixtures.ValidVectorIndex(filterFieldPaths: ["tenant_id"]),
+                RAGIndexFixtures.ValidSearchIndex(),
+            ],
+        };
+        MongoDBRAGProvider provider = CreateProvider(state, MongoDBRAGFilter.Equal("tenant_id", "acme"));
+
+        MongoDBIndexMismatchException exception = await Assert.ThrowsAsync<MongoDBIndexMismatchException>(
+            () => provider.ValidateHybridSearchCapabilityAsync());
+        Assert.Contains("tenant_id", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ValidateRejectsAMandatoryRangeFilterFieldMappedToAnIncompatibleSearchType()
+    {
+        var state = new RAGCollectionState
+        {
+            SearchIndexes =
+            [
+                RAGIndexFixtures.ValidVectorIndex(filterFieldPaths: ["published_at"]),
+                RAGIndexFixtures.ValidSearchIndex(filterFieldTypes: new Dictionary<string, string>
+                {
+                    ["published_at"] = "token",
+                }),
+            ],
+        };
+        MongoDBRAGProvider provider = CreateProvider(
+            state, MongoDBRAGFilter.Range("published_at", minimum: 0, maximum: null));
+
+        MongoDBIndexMismatchException exception = await Assert.ThrowsAsync<MongoDBIndexMismatchException>(
+            () => provider.ValidateHybridSearchCapabilityAsync());
+        Assert.Contains("published_at", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ValidateAcceptsAMandatoryRangeFilterFieldMappedToANumberSearchType()
+    {
+        var state = new RAGCollectionState
+        {
+            SearchIndexes =
+            [
+                RAGIndexFixtures.ValidVectorIndex(filterFieldPaths: ["published_at"]),
+                RAGIndexFixtures.ValidSearchIndex(filterFieldTypes: new Dictionary<string, string>
+                {
+                    ["published_at"] = "number",
+                }),
+            ],
+        };
+        MongoDBRAGProvider provider = CreateProvider(
+            state, MongoDBRAGFilter.Range("published_at", minimum: 0, maximum: null));
+
+        await provider.ValidateHybridSearchCapabilityAsync();
+    }
+
+    [Fact]
+    public async Task ValidateChecksEveryFieldReferencedAcrossNestedAndOrOperands()
+    {
+        MongoDBRAGFilter filter = MongoDBRAGFilter.And(
+            MongoDBRAGFilter.Equal("tenant_id", "acme"),
+            MongoDBRAGFilter.Or(
+                MongoDBRAGFilter.In("category", ["docs", "faq"]),
+                MongoDBRAGFilter.Range("published_at", minimum: 0, maximum: null)));
+        var state = new RAGCollectionState
+        {
+            SearchIndexes =
+            [
+                RAGIndexFixtures.ValidVectorIndex(filterFieldPaths: ["tenant_id", "category"]),
+                RAGIndexFixtures.ValidSearchIndex(filterFieldTypes: new Dictionary<string, string>
+                {
+                    ["tenant_id"] = "token",
+                    ["category"] = "token",
+                    ["published_at"] = "number",
+                }),
+            ],
+        };
+        MongoDBRAGProvider provider = CreateProvider(state, filter);
+
+        // "published_at" is not indexed as a Vector Search filter field, so this must still be rejected even
+        // though it is only reachable through the nested Or operand.
+        MongoDBIndexMismatchException exception = await Assert.ThrowsAsync<MongoDBIndexMismatchException>(
+            () => provider.ValidateHybridSearchCapabilityAsync());
+        Assert.Contains("published_at", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ValidateDoesNotCacheSuccessWhenTheSearchMappingIsDynamicAndFilterFieldsAreUnverified()
+    {
+        var state = new RAGCollectionState
+        {
+            SearchIndexes =
+            [
+                RAGIndexFixtures.ValidVectorIndex(filterFieldPaths: ["tenant_id"]),
+                RAGIndexFixtures.DynamicSearchIndex(),
+            ],
+        };
+        MongoDBRAGProvider provider = CreateProvider(state, MongoDBRAGFilter.Equal("tenant_id", "acme"));
+        var clock = new FakeTimeProvider();
+        provider.TimeProvider = clock;
+
+        await provider.ValidateHybridSearchCapabilityAsync();
+        Assert.Equal(1, state.RunCommandCallCount);
+
+        await provider.ValidateHybridSearchCapabilityAsync();
+
+        Assert.Equal(2, state.RunCommandCallCount);
+    }
+
+    [Fact]
+    public async Task ValidateStillCachesWhenTheSearchMappingIsDynamicAndThereIsNoMandatoryFilter()
+    {
+        var state = new RAGCollectionState
+        {
+            SearchIndexes = [RAGIndexFixtures.ValidVectorIndex(), RAGIndexFixtures.DynamicSearchIndex()],
+        };
+        MongoDBRAGProvider provider = CreateProvider(state);
+        var clock = new FakeTimeProvider();
+        provider.TimeProvider = clock;
+
+        await provider.ValidateHybridSearchCapabilityAsync();
+        Assert.Equal(1, state.RunCommandCallCount);
+
+        await provider.ValidateHybridSearchCapabilityAsync();
+
+        Assert.Equal(1, state.RunCommandCallCount);
+    }
+
+    private static MongoDBRAGProvider CreateProvider(
+        RAGCollectionState state, MongoDBRAGFilter mandatoryFilter) =>
+        new(
+            RAGCollectionProxy.Create(state),
+            new RecordingEmbeddingGenerator(),
+            3,
+            new MongoDBRAGProviderOptions
+            {
+                SearchMode = MongoDBSearchMode.HybridRrf,
+                VectorIndexName = "agent_framework_rag_vector",
+                VectorFieldName = "embedding",
+                SearchIndexName = "agent_framework_rag_search",
+                SearchTextFieldNames = ["text"],
+                MandatoryFilter = mandatoryFilter,
+            });
 
     private static MongoDBRAGProvider CreateProvider(RAGCollectionState state) =>
         new(
@@ -322,51 +534,4 @@ public sealed class MongoDBRAGHybridCapabilityValidationTests
                 SearchIndexName = "agent_framework_rag_search",
                 SearchTextFieldNames = ["text"],
             });
-
-    private static BsonDocument ValidVectorIndex() =>
-        new()
-        {
-            { "name", "agent_framework_rag_vector" },
-            { "type", "vectorSearch" },
-            { "status", "READY" },
-            { "queryable", true },
-            {
-                "latestDefinition",
-                new BsonDocument(
-                    "fields",
-                    new BsonArray
-                    {
-                        new BsonDocument
-                        {
-                            { "type", "vector" },
-                            { "path", "embedding" },
-                            { "numDimensions", 3 },
-                            { "similarity", "cosine" },
-                        },
-                    })
-            },
-        };
-
-    private static BsonDocument ValidSearchIndex() =>
-        new()
-        {
-            { "name", "agent_framework_rag_search" },
-            { "type", "search" },
-            { "status", "READY" },
-            { "queryable", true },
-            {
-                "latestDefinition",
-                new BsonDocument(
-                    "mappings",
-                    new BsonDocument
-                    {
-                        { "dynamic", false },
-                        { "fields", new BsonDocument
-                            {
-                                { "text", new BsonDocument("type", "string") },
-                            }
-                        },
-                    })
-            },
-        };
 }

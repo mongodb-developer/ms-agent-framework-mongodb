@@ -427,6 +427,14 @@ public sealed class MongoDBRAGProviderSearchTests
         var state = new RAGCollectionState
         {
             Results = [new BsonDocument { { "_id", "chunk-1" }, { "text", "chunk" }, { "_ragScore", 0.5 } }],
+            SearchIndexes =
+            [
+                RAGIndexFixtures.ValidVectorIndex(filterFieldPaths: ["tenant_id"]),
+                RAGIndexFixtures.ValidSearchIndex(filterFieldTypes: new Dictionary<string, string>
+                {
+                    ["tenant_id"] = "token",
+                }),
+            ],
         };
         var options = new MongoDBRAGProviderOptions
         {
@@ -455,6 +463,7 @@ public sealed class MongoDBRAGProviderSearchTests
         var state = new RAGCollectionState
         {
             Results = [new BsonDocument { { "_id", "chunk-1" }, { "text", "chunk" }, { "_ragScore", 0.5 } }],
+            SearchIndexes = [RAGIndexFixtures.ValidVectorIndex(), RAGIndexFixtures.ValidSearchIndex()],
         };
         var options = new MongoDBRAGProviderOptions
         {
@@ -494,6 +503,7 @@ public sealed class MongoDBRAGProviderSearchTests
                     { "category", "docs" },
                 },
             ],
+            SearchIndexes = [RAGIndexFixtures.ValidVectorIndex(), RAGIndexFixtures.ValidSearchIndex()],
         };
         var options = new MongoDBRAGProviderOptions
         {
@@ -526,6 +536,7 @@ public sealed class MongoDBRAGProviderSearchTests
                     { "_ragScoreDetails", detailsDoc },
                 },
             ],
+            SearchIndexes = [RAGIndexFixtures.ValidVectorIndex(), RAGIndexFixtures.ValidSearchIndex()],
         };
         var options = new MongoDBRAGProviderOptions
         {
@@ -549,6 +560,7 @@ public sealed class MongoDBRAGProviderSearchTests
         var state = new RAGCollectionState
         {
             Results = [new BsonDocument { { "_id", "chunk-1" }, { "text", "chunk" }, { "_ragScore", 0.5 } }],
+            SearchIndexes = [RAGIndexFixtures.ValidVectorIndex(), RAGIndexFixtures.ValidSearchIndex()],
         };
         MongoDBRAGProvider provider = CreateProvider(
             state,
@@ -558,6 +570,78 @@ public sealed class MongoDBRAGProviderSearchTests
 
         Assert.Equal(3, state.AggregateStages.Count);
         Assert.DoesNotContain(state.AggregateStages, stage => stage.Contains("$project"));
+    }
+
+    [Fact]
+    public async Task HybridSearchAsyncValidatesCapabilityBeforeAggregatingAndNeverAggregatesWhenValidationFails()
+    {
+        var state = new RAGCollectionState();
+        MongoDBRAGProvider provider = CreateProvider(
+            state,
+            options: new MongoDBRAGProviderOptions { SearchMode = MongoDBSearchMode.HybridRrf });
+
+        await Assert.ThrowsAsync<MongoDBIndexMissingException>(() => provider.SearchAsync("blue widgets"));
+
+        Assert.Empty(state.AggregateStages);
+    }
+
+    [Fact]
+    public async Task HybridSearchAsyncReusesTheCachedCapabilityValidationAcrossCalls()
+    {
+        var state = new RAGCollectionState
+        {
+            Results = [new BsonDocument { { "_id", "chunk-1" }, { "text", "chunk" }, { "_ragScore", 0.5 } }],
+            SearchIndexes = [RAGIndexFixtures.ValidVectorIndex(), RAGIndexFixtures.ValidSearchIndex()],
+        };
+        MongoDBRAGProvider provider = CreateProvider(
+            state,
+            options: new MongoDBRAGProviderOptions { SearchMode = MongoDBSearchMode.HybridRrf });
+
+        await provider.SearchAsync("blue widgets");
+        Assert.Equal(1, state.RunCommandCallCount);
+        Assert.Equal(2, state.SearchIndexListCallCount);
+
+        // MapResult strips the internal score alias from the returned document in place (a fresh document from a
+        // real cursor each time), so the fake cursor's backing document is replaced before the second call rather
+        // than reusing the now-stripped instance.
+        state.Results = [new BsonDocument { { "_id", "chunk-1" }, { "text", "chunk" }, { "_ragScore", 0.5 } }];
+        await provider.SearchAsync("blue widgets");
+
+        Assert.Equal(1, state.RunCommandCallCount);
+        Assert.Equal(2, state.SearchIndexListCallCount);
+    }
+
+    [Fact]
+    public async Task HybridSearchAsyncWrapsARecognizedRankFusionUnsupportedCommandErrorAsACapabilityException()
+    {
+        var state = new RAGCollectionState
+        {
+            SearchIndexes = [RAGIndexFixtures.ValidVectorIndex(), RAGIndexFixtures.ValidSearchIndex()],
+            AggregateException = RAGIndexFixtures.CommandException(
+                40324, "Unrecognized pipeline stage name: '$rankFusion'"),
+        };
+        MongoDBRAGProvider provider = CreateProvider(
+            state,
+            options: new MongoDBRAGProviderOptions { SearchMode = MongoDBSearchMode.HybridRrf });
+
+        MongoDBCapabilityException exception = await Assert.ThrowsAsync<MongoDBCapabilityException>(
+            () => provider.SearchAsync("blue widgets"));
+        Assert.IsType<MongoCommandException>(exception.InnerException);
+    }
+
+    [Fact]
+    public async Task HybridSearchAsyncTranslatesAnUnrecognizedAggregationErrorAsAGenericRetrievalFailure()
+    {
+        var state = new RAGCollectionState
+        {
+            SearchIndexes = [RAGIndexFixtures.ValidVectorIndex(), RAGIndexFixtures.ValidSearchIndex()],
+            AggregateException = RAGIndexFixtures.CommandException(11600, "InterruptedAtShutdown"),
+        };
+        MongoDBRAGProvider provider = CreateProvider(
+            state,
+            options: new MongoDBRAGProviderOptions { SearchMode = MongoDBSearchMode.HybridRrf });
+
+        await Assert.ThrowsAsync<MongoDBRetrievalException>(() => provider.SearchAsync("blue widgets"));
     }
 
     private static MongoDBRAGProvider CreateProvider(
