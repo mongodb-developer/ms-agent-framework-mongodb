@@ -175,10 +175,18 @@ Atlas Search indexes newly written or re-seeded documents asynchronously, so a q
 `InsertManyAsync`/`ReplaceOneAsync` can race the index and intermittently miss a document that is not yet
 searchable. `MongoDBRAGIntegrationTests.FullTextSearchIsolatesTenantsOnAPreProvisionedIndex` and the FullText section
 of `RAGQuickstart` now call a test/sample-local `PollUntilSearchableAsync` helper that repeatedly invokes
-`SearchAsync` until the expected document ID appears or a bounded timeout (30 seconds, 1-second interval) elapses,
+`SearchAsync` until the expected document ID(s) appear or a bounded timeout (30 seconds, 1-second interval) elapses,
 propagating cancellation as a clear `TimeoutException` rather than a bare `OperationCanceledException`. This keeps
 both deterministic without introducing any polling in the production `MongoDBRAGProvider.SearchAsync` path itself —
 polling exists only in test/sample code, never in the library.
+
+`FullTextSearchIsolatesTenantsOnAPreProvisionedIndex` additionally uses a second, unfiltered `readinessProvider`
+(same index/collection, no `MandatoryFilter`) to independently poll until *both* the tenant-A and tenant-B documents
+are searchable for the query, before asserting that the tenant-A-scoped `provider` excludes tenant B. Without this,
+the exclusion assertion could pass vacuously merely because tenant B was never indexed/searchable at all — for
+example due to residual indexing lag beyond the poll window — rather than because `MandatoryFilter` actually
+excluded it from the `$search` pipeline. Cleanup (`DeleteManyAsync` of both tenant documents) always runs from the
+`finally` block regardless of which poll times out, keeping the bounded-cleanup guarantee intact.
 
 ## Errors, cancellation, and result mapping
 

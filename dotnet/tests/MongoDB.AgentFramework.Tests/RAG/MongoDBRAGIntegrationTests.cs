@@ -125,18 +125,18 @@ public sealed class MongoDBRAGIntegrationTests
 
     /// <summary>
     /// Bounded polling that repeatedly invokes <see cref="MongoDBRAGProvider.SearchAsync(string, CancellationToken)"/>
-    /// until <paramref name="expectedId"/> appears in its results or <paramref name="timeout"/> elapses. Atlas
-    /// Search indexes newly written documents asynchronously, so a single immediate query after
-    /// <c>InsertManyAsync</c> can race the index and flake; this exists only to make the test/sample deterministic
-    /// and is not part of the production <see cref="MongoDBRAGProvider"/> contract, which never polls on a
-    /// caller's behalf. Cancellation always propagates as a clear <see cref="TimeoutException"/> rather than a bare
+    /// until <paramref name="isReady"/> accepts its results or <paramref name="timeout"/> elapses. Atlas Search
+    /// indexes newly written documents asynchronously, so a single immediate query after <c>InsertManyAsync</c>
+    /// can race the index and flake; this exists only to make the test/sample deterministic and is not part of the
+    /// production <see cref="MongoDBRAGProvider"/> contract, which never polls on a caller's behalf. Cancellation
+    /// always propagates as a clear <see cref="TimeoutException"/> rather than a bare
     /// <see cref="OperationCanceledException"/>, so a failure unambiguously reads as "index lag exceeded the
     /// bounded wait", not a product defect.
     /// </summary>
     private static async Task<IReadOnlyList<MongoDBRAGResult>> PollUntilSearchableAsync(
         MongoDBRAGProvider provider,
         string query,
-        string expectedId,
+        Func<IReadOnlyList<MongoDBRAGResult>, bool> isReady,
         TimeSpan timeout,
         TimeSpan pollInterval)
     {
@@ -146,7 +146,7 @@ public sealed class MongoDBRAGIntegrationTests
             while (true)
             {
                 IReadOnlyList<MongoDBRAGResult> results = await provider.SearchAsync(query, cts.Token);
-                if (results.Any(result => result.Id == expectedId))
+                if (isReady(results))
                 {
                     return results;
                 }
@@ -157,11 +157,25 @@ public sealed class MongoDBRAGIntegrationTests
         catch (OperationCanceledException) when (cts.IsCancellationRequested)
         {
             throw new TimeoutException(
-                $"Timed out after {timeout} waiting for document '{expectedId}' to become searchable for " +
+                $"Timed out after {timeout} waiting for the expected document(s) to become searchable for " +
                 $"query '{query}'. This indicates Atlas Search indexing lag exceeded the bounded poll window, " +
                 "not a MongoDBRAGProvider defect.");
         }
     }
+
+    /// <summary>Convenience overload of <see cref="PollUntilSearchableAsync"/> for a single expected document ID.</summary>
+    private static Task<IReadOnlyList<MongoDBRAGResult>> PollUntilSearchableAsync(
+        MongoDBRAGProvider provider,
+        string query,
+        string expectedId,
+        TimeSpan timeout,
+        TimeSpan pollInterval) =>
+        PollUntilSearchableAsync(
+            provider,
+            query,
+            results => results.Any(result => result.Id == expectedId),
+            timeout,
+            pollInterval);
 
     [MongoIntegrationFact]
     [Trait("Category", "integration-rag-search")]
@@ -192,6 +206,19 @@ public sealed class MongoDBRAGIntegrationTests
             MandatoryFilter = MongoDBRAGFilter.Equal("tenant_id", "tenant-a"),
         };
         await using MongoDBRAGProvider provider = new(client, databaseName!, collectionName, options);
+
+        // No MandatoryFilter: used only to independently confirm both tenant documents are searchable at all
+        // before the tenant-A-scoped provider's exclusion of tenant B is asserted below. Without this, that
+        // exclusion assertion could pass vacuously merely because tenant B was never indexed/searchable in the
+        // first place, rather than because the mandatory filter actually excluded it.
+        var readinessOptions = new MongoDBRAGProviderOptions
+        {
+            SearchMode = MongoDBSearchMode.FullText,
+            SearchIndexName = searchIndexName,
+            SearchTextFieldNames = ["text"],
+            TopK = 10,
+        };
+        await using MongoDBRAGProvider readinessProvider = new(client, databaseName!, collectionName, readinessOptions);
         try
         {
             await collection.InsertManyAsync(
@@ -209,6 +236,13 @@ public sealed class MongoDBRAGIntegrationTests
                     { "tenant_id", "tenant-b" },
                 },
             ]);
+
+            await PollUntilSearchableAsync(
+                readinessProvider,
+                "blue widgets",
+                results => results.Any(r => r.Id == tenantAId) && results.Any(r => r.Id == tenantBId),
+                timeout: TimeSpan.FromSeconds(30),
+                pollInterval: TimeSpan.FromSeconds(1));
 
             IReadOnlyList<MongoDBRAGResult> results = await PollUntilSearchableAsync(
                 provider,
