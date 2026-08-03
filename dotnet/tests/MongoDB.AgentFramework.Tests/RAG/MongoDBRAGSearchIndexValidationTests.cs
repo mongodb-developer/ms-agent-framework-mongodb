@@ -176,6 +176,209 @@ public sealed class MongoDBRAGSearchIndexValidationTests
     }
 
     [Fact]
+    public async Task ValidateSkipsFieldEnumerationForADynamicMappingExpressedAsAnObject()
+    {
+        var state = new RAGCollectionState
+        {
+            SearchIndexes =
+            [
+                new BsonDocument
+                {
+                    { "name", "agent_framework_rag_search" },
+                    { "type", "search" },
+                    { "status", "READY" },
+                    { "queryable", true },
+                    { "latestDefinition", new BsonDocument(
+                        "mappings",
+                        new BsonDocument("dynamic", new BsonDocument("typeSet", "custom"))) },
+                },
+            ],
+        };
+        MongoDBRAGProvider provider = CreateProvider(state);
+
+        // Atlas Search accepts an object form of "dynamic" (e.g. selecting a named type set), not only a plain
+        // boolean; ToBoolean() on a BsonDocument throws, so this must be recognized without crashing, and treated
+        // the same as a boolean "true" -- every field is indexed automatically, so there is nothing to enumerate.
+        await provider.ValidateSearchIndexAsync();
+    }
+
+    [Fact]
+    public async Task ValidateRejectsAMalformedDynamicMappingShapeWithAnActionableError()
+    {
+        var state = new RAGCollectionState
+        {
+            SearchIndexes =
+            [
+                new BsonDocument
+                {
+                    { "name", "agent_framework_rag_search" },
+                    { "type", "search" },
+                    { "status", "READY" },
+                    { "queryable", true },
+                    { "latestDefinition", new BsonDocument(
+                        "mappings",
+                        new BsonDocument("dynamic", 1)) },
+                },
+            ],
+        };
+        MongoDBRAGProvider provider = CreateProvider(state);
+
+        // Neither a boolean nor an object -- must fail with an actionable MongoDBIndexMismatchException rather
+        // than an unhandled BsonException from ToBoolean().
+        MongoDBIndexMismatchException exception = await Assert.ThrowsAsync<MongoDBIndexMismatchException>(
+            () => provider.ValidateSearchIndexAsync());
+        Assert.Contains("dynamic", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task ValidateAcceptsAMultiTypeFieldMappingWhenAnyDefinitionIsTextCompatible()
+    {
+        var state = new RAGCollectionState
+        {
+            SearchIndexes =
+            [
+                new BsonDocument
+                {
+                    { "name", "agent_framework_rag_search" },
+                    { "type", "search" },
+                    { "status", "READY" },
+                    { "queryable", true },
+                    { "latestDefinition", new BsonDocument(
+                        "mappings",
+                        new BsonDocument
+                        {
+                            { "dynamic", false },
+                            { "fields", new BsonDocument
+                                {
+                                    {
+                                        "text", new BsonArray
+                                        {
+                                            new BsonDocument("type", "number"),
+                                            new BsonDocument("type", "token"),
+                                        }
+                                    },
+                                }
+                            },
+                        }) },
+                },
+            ],
+        };
+        MongoDBRAGProvider provider = CreateProvider(state);
+
+        // Atlas Search supports mapping a single field to multiple type definitions simultaneously (e.g. both
+        // "number" and "token"); this is text-compatible because at least one applicable definition is.
+        await provider.ValidateSearchIndexAsync();
+    }
+
+    [Fact]
+    public async Task ValidateRejectsAMultiTypeFieldMappingWhenNoDefinitionIsTextCompatible()
+    {
+        var state = new RAGCollectionState
+        {
+            SearchIndexes =
+            [
+                new BsonDocument
+                {
+                    { "name", "agent_framework_rag_search" },
+                    { "type", "search" },
+                    { "status", "READY" },
+                    { "queryable", true },
+                    { "latestDefinition", new BsonDocument(
+                        "mappings",
+                        new BsonDocument
+                        {
+                            { "dynamic", false },
+                            { "fields", new BsonDocument
+                                {
+                                    {
+                                        "text", new BsonArray
+                                        {
+                                            new BsonDocument("type", "number"),
+                                            new BsonDocument("type", "date"),
+                                        }
+                                    },
+                                }
+                            },
+                        }) },
+                },
+            ],
+        };
+        MongoDBRAGProvider provider = CreateProvider(state);
+
+        // Every definition in the multi-type array is confirmed non-text-compatible -- this must be rejected.
+        await Assert.ThrowsAsync<MongoDBIndexMismatchException>(
+            () => provider.ValidateSearchIndexAsync());
+    }
+
+    [Fact]
+    public async Task ValidateRejectsAMalformedMultiTypeFieldMappingEntryWithAnActionableError()
+    {
+        var state = new RAGCollectionState
+        {
+            SearchIndexes =
+            [
+                new BsonDocument
+                {
+                    { "name", "agent_framework_rag_search" },
+                    { "type", "search" },
+                    { "status", "READY" },
+                    { "queryable", true },
+                    { "latestDefinition", new BsonDocument(
+                        "mappings",
+                        new BsonDocument
+                        {
+                            { "dynamic", false },
+                            { "fields", new BsonDocument
+                                {
+                                    { "text", new BsonArray { "not-a-mapping-object" } },
+                                }
+                            },
+                        }) },
+                },
+            ],
+        };
+        MongoDBRAGProvider provider = CreateProvider(state);
+
+        MongoDBIndexMismatchException exception = await Assert.ThrowsAsync<MongoDBIndexMismatchException>(
+            () => provider.ValidateSearchIndexAsync());
+        Assert.Contains("text", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ValidateRejectsAFieldMappingWithAnUnrecognizedShapeWithAnActionableError()
+    {
+        var state = new RAGCollectionState
+        {
+            SearchIndexes =
+            [
+                new BsonDocument
+                {
+                    { "name", "agent_framework_rag_search" },
+                    { "type", "search" },
+                    { "status", "READY" },
+                    { "queryable", true },
+                    { "latestDefinition", new BsonDocument(
+                        "mappings",
+                        new BsonDocument
+                        {
+                            { "dynamic", false },
+                            { "fields", new BsonDocument
+                                {
+                                    { "text", "not-an-object-or-array" },
+                                }
+                            },
+                        }) },
+                },
+            ],
+        };
+        MongoDBRAGProvider provider = CreateProvider(state);
+
+        // Neither a mapping document nor an array of mapping documents -- must fail actionably rather than crash.
+        await Assert.ThrowsAsync<MongoDBIndexMismatchException>(
+            () => provider.ValidateSearchIndexAsync());
+    }
+
+    [Fact]
     public async Task ValidateRejectsANotReadyIndexWhenReadyIsRequired()
     {
         var state = new RAGCollectionState

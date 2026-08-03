@@ -98,10 +98,18 @@ Memory's `EnsureVectorSearchIndexAsync`/`ValidateVectorSearchIndexAsync` pattern
 - Where a static (non-dynamic) mapping definition is available (`{ mappings: { dynamic: false, fields: { ... } } }`
   — structurally different from Vector Search's flat `fields` array), it resolves each configured
   `SearchTextFieldNames` path (including dotted/nested paths through nested `type: "document"` mappings) and
-  requires a text-compatible type (`string`/`autocomplete`/`token`). A dynamic mapping (`mappings.dynamic == true`)
-  indexes every field automatically, so `listSearchIndexes` provides no per-field enumeration to validate in that
-  case; this is a documented driver/Atlas limitation, not a validation gap, and field validation is skipped for a
-  fully dynamic mapping.
+  requires at least one applicable type definition to be text-compatible (`string`/`autocomplete`/`token`). Atlas
+  Search allows mapping a single field to either one definition object or an array of multiple type definitions
+  (for example both `"number"` and `"token"` on the same field simultaneously); a field is accepted if *any*
+  applicable definition is text-compatible, and rejected only once every definition is confirmed incompatible — an
+  unrecognized field-mapping shape (neither an object nor an array of objects, or an array containing a non-object
+  entry) throws an actionable `MongoDBIndexMismatchException` rather than crashing. `mappings.dynamic` is likewise
+  recognized in either of its two documented shapes — a plain boolean, or an object form (for example selecting a
+  named type set) — both meaning "every field is indexed automatically", so `listSearchIndexes` provides no
+  per-field enumeration to validate in either case; this is a documented driver/Atlas limitation, not a validation
+  gap, and field validation is skipped for either dynamic shape. Any other `mappings.dynamic` shape (for example a
+  number) is not a documented form and is rejected with an actionable error rather than being silently coerced by
+  `BsonValue.ToBoolean()`'s truthiness rules.
 - `requireReady` (default `true`) additionally requires the index to report a queryable/`READY` status.
 - `SearchAsync` never calls this method — it is an opt-in health-check/startup gate, not an implicit precondition on
   every query — so normal retrieval never pays for the extra round trip. A successful result is cached in-memory for
@@ -123,10 +131,12 @@ Memory's `EnsureVectorSearchIndexAsync`/`ValidateVectorSearchIndexAsync` pattern
 Tests live in `MongoDBRAGSearchIndexValidationTests`, using a new `RAGSearchIndexManagerProxy` test double (faking
 `SearchIndexes.ListAsync`, mirroring Memory's equivalent proxy) and a settable-clock `FakeTimeProvider`. They cover:
 missing index, wrong index type, missing/wrong-type configured text field, nested dotted field paths, dynamic-
-mapping field-skip, not-ready rejection and allowance, mode gating (rejecting non-`FullText` configurations),
-cancellation propagation, `MongoDBCapabilityException` wrapping of a `$listSearchIndexes` failure, and cache
-behavior (TTL reuse without a second network call, `refresh: true` bypass, TTL expiry, and no stale-serving across a
-`requireReady` escalation).
+mapping field-skip (both the boolean and object `mappings.dynamic` shapes), a malformed `mappings.dynamic` shape, a
+multi-type field mapping accepted because any applicable definition is text-compatible, a multi-type field mapping
+rejected because none are, a malformed multi-type array entry, an unrecognized field-mapping shape, not-ready
+rejection and allowance, mode gating (rejecting non-`FullText` configurations), cancellation propagation,
+`MongoDBCapabilityException` wrapping of a `$listSearchIndexes` failure, and cache behavior (TTL reuse without a
+second network call, `refresh: true` bypass, TTL expiry, and no stale-serving across a `requireReady` escalation).
 
 ## Owned-client options-snapshot fix (review fix)
 

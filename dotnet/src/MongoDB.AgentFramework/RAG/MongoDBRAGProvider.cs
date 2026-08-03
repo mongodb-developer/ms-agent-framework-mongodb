@@ -646,23 +646,26 @@ public sealed class MongoDBRAGProvider : IAsyncDisposable
             "latestDefinition",
             index.GetValue("definition", new BsonDocument())).AsBsonDocument;
         BsonDocument mappings = definition.GetValue("mappings", new BsonDocument()).AsBsonDocument;
-        if (!mappings.GetValue("dynamic", false).ToBoolean())
+        if (!IsDynamicMappingEnabled(mappings))
         {
             BsonDocument fields = mappings.GetValue("fields", new BsonDocument()).AsBsonDocument;
             foreach (string textField in _options.SearchTextFieldNames)
             {
-                if (!TryResolveMappedField(fields, textField, out BsonDocument? fieldMapping))
+                IReadOnlyList<BsonDocument> definitions = ResolveFieldMappingDefinitions(fields, textField);
+                if (definitions.Count == 0)
                 {
                     throw new MongoDBIndexMismatchException(
                         $"Search index '{_options.SearchIndexName}' does not map configured field " +
                         $"'{textField}'.");
                 }
 
-                if (!IsTextCompatible(fieldMapping!))
+                if (!definitions.Any(IsTextCompatible))
                 {
+                    string types = string.Join(
+                        ", ", definitions.Select(d => d.GetValue("type", "").AsString));
                     throw new MongoDBIndexMismatchException(
                         $"Search index '{_options.SearchIndexName}' maps field '{textField}' to " +
-                        $"'{fieldMapping!.GetValue("type", "").AsString}', which is not text-searchable.");
+                        $"'{types}', none of which are text-searchable.");
                 }
             }
         }
@@ -676,41 +679,88 @@ public sealed class MongoDBRAGProvider : IAsyncDisposable
         }
     }
 
-    /// <summary>Resolves a possibly dotted field path through nested <c>type: "document"</c> mappings.</summary>
-    private static bool TryResolveMappedField(BsonDocument fields, string path, out BsonDocument? mapping)
+    /// <summary>
+    /// Determines whether <c>mappings.dynamic</c> enables automatic field indexing. Atlas Search accepts either a
+    /// plain boolean or an object form (for example selecting a named type set); both mean "every field is indexed
+    /// automatically" for the purposes of this validation, so per-field enumeration is skipped for either shape.
+    /// Any other shape is not a documented "dynamic" form and is rejected with an actionable error rather than
+    /// silently coerced by <see cref="BsonValue.ToBoolean"/> truthiness rules.
+    /// </summary>
+    private bool IsDynamicMappingEnabled(BsonDocument mappings)
     {
-        string[] segments = path.Split('.');
-        BsonDocument current = fields;
-        BsonDocument? found = null;
-        for (int i = 0; i < segments.Length; i++)
+        if (!mappings.TryGetValue("dynamic", out BsonValue? dynamicValue))
         {
-            if (!current.TryGetValue(segments[i], out BsonValue? value) || value is not BsonDocument segmentMapping)
-            {
-                mapping = null;
-                return false;
-            }
-
-            found = segmentMapping;
-            bool isLastSegment = i == segments.Length - 1;
-            if (!isLastSegment)
-            {
-                if (!string.Equals(
-                        segmentMapping.GetValue("type", "").AsString,
-                        "document",
-                        StringComparison.OrdinalIgnoreCase))
-                {
-                    mapping = null;
-                    return false;
-                }
-
-                current = segmentMapping.GetValue("fields", new BsonDocument()).AsBsonDocument;
-            }
+            return false;
         }
 
-        mapping = found;
-        return found is not null;
+        return dynamicValue switch
+        {
+            BsonBoolean boolean => boolean.Value,
+            BsonDocument => true,
+            _ => throw new MongoDBIndexMismatchException(
+                $"Search index '{_options.SearchIndexName}' has an unrecognized 'mappings.dynamic' shape " +
+                $"({dynamicValue.BsonType}); expected a boolean or an object."),
+        };
     }
 
+    /// <summary>
+    /// Resolves a possibly dotted field path through nested <c>type: "document"</c> mappings, returning every
+    /// applicable type definition for the terminal field. Atlas Search allows a field to be mapped to a single
+    /// definition object or to an array of multiple type definitions (for example both <c>"token"</c> and
+    /// <c>"number"</c> for the same field); either shape is supported here. Returns an empty list if the path is
+    /// not mapped. Throws <see cref="MongoDBIndexMismatchException"/> for a shape that is neither a mapping object
+    /// nor an array of mapping objects, rather than silently treating it as unmapped.
+    /// </summary>
+    private IReadOnlyList<BsonDocument> ResolveFieldMappingDefinitions(BsonDocument fields, string path)
+    {
+        string[] segments = path.Split('.');
+        BsonDocument currentFields = fields;
+        for (int i = 0; i < segments.Length; i++)
+        {
+            if (!currentFields.TryGetValue(segments[i], out BsonValue? value))
+            {
+                return [];
+            }
+
+            IReadOnlyList<BsonDocument> definitions = ResolveFieldDefinitions(value, segments[i]);
+            bool isLastSegment = i == segments.Length - 1;
+            if (isLastSegment)
+            {
+                return definitions;
+            }
+
+            BsonDocument? nestedDocument = definitions.FirstOrDefault(
+                d => string.Equals(d.GetValue("type", "").AsString, "document", StringComparison.OrdinalIgnoreCase));
+            if (nestedDocument is null)
+            {
+                return [];
+            }
+
+            currentFields = nestedDocument.GetValue("fields", new BsonDocument()).AsBsonDocument;
+        }
+
+        return [];
+    }
+
+    /// <summary>Normalizes a single field-mapping value (a mapping object or an array of mapping objects).</summary>
+    private IReadOnlyList<BsonDocument> ResolveFieldDefinitions(BsonValue value, string fieldName) =>
+        value switch
+        {
+            BsonDocument document => [document],
+            BsonArray array => [.. array.Select(element => element as BsonDocument ??
+                throw new MongoDBIndexMismatchException(
+                    $"Search index '{_options.SearchIndexName}' has a multi-type mapping for field " +
+                    $"'{fieldName}' containing a non-object entry ({element.BsonType}); expected an array of " +
+                    "mapping objects."))],
+            _ => throw new MongoDBIndexMismatchException(
+                $"Search index '{_options.SearchIndexName}' has an unrecognized mapping shape for field " +
+                $"'{fieldName}' ({value.BsonType}); expected a mapping object or an array of mapping objects."),
+        };
+
+    /// <summary>
+    /// A field is text-searchable if any applicable mapping definition is; only reject a field once every
+    /// definition is confirmed non-text-compatible (see <see cref="ResolveFieldMappingDefinitions"/>).
+    /// </summary>
     private static bool IsTextCompatible(BsonDocument fieldMapping) =>
         fieldMapping.GetValue("type", "").AsString is "string" or "autocomplete" or "token";
 
