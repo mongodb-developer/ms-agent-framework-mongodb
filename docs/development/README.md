@@ -31,3 +31,7 @@ This documentation explains the implemented system at the code level. The
 ## Index Management
 
 - [.NET Index Management implementation](index-management/dotnet-index-management.md)
+
+## Ingestion
+
+- [.NET Ingestion samples implementation](ingestion/dotnet-ingestion-samples.md)

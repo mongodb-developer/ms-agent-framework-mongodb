@@ -267,3 +267,55 @@ dotnet run --project samples\IndexManagementQuickstart\IndexManagementQuickstart
 The sample constructs separate provisioner and runtime facade instances side by side over both a Memory Vector
 Search index and a RAG Hybrid (Vector Search + Search) index pair, then drops all three indexes at the end. See the
 [.NET Index Management developer guide](../docs/development/index-management/dotnet-index-management.md).
+
+## Ingestion samples (sample-only, not part of the runtime package)
+
+`dotnet/samples/IngestionSamples` is a **sample-only** class library (`MongoDB.AgentFramework.Samples.Ingestion`,
+`IsPackable=false`) demonstrating deterministic, incremental, tenant-scoped knowledge ingestion and the
+parent-document RAG pattern, per docs/spec/features/ingestion.md's "Knowledge ingestion and bootstrap boundary". It
+adds **no public type to `MongoDB.AgentFramework`**; `dotnet pack` on the runtime project never includes any
+ingestion sample type. It calls the same public `IEmbeddingGenerator<string, Embedding<float>>` abstraction and the
+existing `MongoDBRAGProvider`/`MongoDBRAGIndexManager` for querying and provisioning, rather than duplicating them.
+
+`IncrementalIngestionPipeline` (flat chunk schema) and `ParentDocumentIngestionPipeline` (parent + embedded child
+chunk schema) share the same reconciliation shape: `DocumentChunker` produces bounded, overlap-configurable,
+non-empty/non-duplicate chunks; `DeterministicId`/`ContentHash` derive stable IDs and change-detecting hashes from
+canonical source identity via `CanonicalFraming`'s unambiguous length-prefixed binary encoding (never delimiter
+concatenation, and never a random GUID or timestamp); `BatchEmbedder` embeds only new/changed text in bounded batches
+with dimension/finite-value validation; and `IChunkStore.UpsertAsync`/`DeleteAsync` reconcile unchanged (skipped),
+changed (re-embedded and upserted), and stale (deleted) records. `MongoChunkStore`'s upsert/delete filters always
+match `_id` **and** `tenant_id` **and** `source_id` (upsert additionally matches `record_type`), so even an accidental
+or hash-collided `_id` can never cross a tenant/source/record-type scope. `IChunkStore.DeleteSourceAsync` deletes an
+entire source's records in bounded pages, and `SourceManifestReconciler` compares a caller-supplied "currently known
+sources" manifest against `ListSourceIdsAsync` to tombstone whole sources that have disappeared from the corpus.
+Cancellation propagates through every read/embed/write/cleanup step.
+
+`ParentDocumentRetriever` performs the parent-document RAG pattern's retrieval half: a child-only
+`IChildChunkSearcher.SearchAsync` (backed by `MongoDBRAGChildChunkSearcher` over an existing `MongoDBRAGProvider`
+constrained to child records), then one bounded, de-duplicated, tenant-scoped `IParentLookup.FindParentsAsync` call
+hydrating at most `maxParents` distinct best-scoring parents with source attribution -- never a per-child lookup,
+unbounded fan-out, or caller-suppliable pipeline callback. An optional `ParentContextBoundingOptions`
+(`MaxCharactersPerParent`, `MaxTotalContextCharacters`) truncates each returned parent's content and the total
+returned context deterministically, after ordering/de-duplication/attribution are finalized, without ever splitting
+a UTF-16 surrogate pair.
+
+Run the samples after setting `MONGODB_URI` and `MONGODB_DATABASE`:
+
+```powershell
+dotnet run --project samples\IncrementalIngestionQuickstart\IncrementalIngestionQuickstart.csproj
+dotnet run --project samples\ParentDocumentRAGQuickstart\ParentDocumentRAGQuickstart.csproj
+```
+
+Neither sample accepts a user-supplied Vector Search index name. Each generates its own unique, sample-prefixed
+index name at startup (e.g. `agent_framework_sample_incr_<guid>` / `agent_framework_sample_pd_<guid>`), provisions
+it via `MongoDBRAGIndexManager.EnsureVectorSearchIndexAsync(waitUntilReady: true)` only if it doesn't already exist,
+and tracks whether this run created it so cleanup never drops a pre-existing or externally configured index.
+`IncrementalIngestionQuickstart` runs four steps against the same tenant: three sequential ingestions of one source
+(new, unchanged, changed+stale-deleted) printing upserted/unchanged/deleted counts, then a fourth run that ingests a
+second source and demonstrates `SourceManifestReconciler` tombstoning it once a subsequent manifest omits it; a
+`finally` block always cleans up both sources and drops the index only if this run created it.
+`ParentDocumentRAGQuickstart` ingests a parent+child document, searches and hydrates the parent via
+`ParentDocumentRetriever`, and likewise always cleans up its own data and drops the index only if this run created
+it. Both samples require collection read/write and Search index-management privileges, and use a deterministic
+demonstration embedding generator; replace it for any real embedding model. See the
+[.NET Ingestion samples developer guide](../docs/development/ingestion/dotnet-ingestion-samples.md).
