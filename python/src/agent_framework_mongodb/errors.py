@@ -65,6 +65,10 @@ class MongoDBPersistenceError(MongoDBIntegrationError):
     """Raised when a direct MongoDB write operation fails."""
 
 
+class MongoDBConcurrencyError(MongoDBPersistenceError):
+    """Raised when optimistic session or checkpoint concurrency fails."""
+
+
 class MongoDBTransientPersistenceError(MongoDBPersistenceError):
     """Raised when a MongoDB write fails for a documented transient reason."""
 

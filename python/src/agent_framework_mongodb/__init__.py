@@ -3,6 +3,7 @@
 from .errors import (
     MongoDBAuthorizationError,
     MongoDBCapabilityError,
+    MongoDBConcurrencyError,
     MongoDBConfigurationError,
     MongoDBEmbeddingError,
     MongoDBEmbeddingGenerationError,
@@ -50,6 +51,7 @@ from .rag import (
     NotInFilter,
     OrFilter,
 )
+from .session_store import MongoDBSessionStore, MongoDBSessionStoreOptions, MongoDBVersionedSession
 
 __all__ = [
     "AndFilter",
@@ -62,6 +64,7 @@ __all__ = [
     "MongoDBAuthorizationError",
     "MongoDBCapabilityError",
     "MongoDBConfigurationError",
+    "MongoDBConcurrencyError",
     "MongoDBEmbeddingError",
     "MongoDBEmbeddingGenerationError",
     "MongoDBFilter",
@@ -90,6 +93,9 @@ __all__ = [
     "MongoDBRetrievalError",
     "MongoDBSearchIndexDefinition",
     "MongoDBSearchMode",
+    "MongoDBSessionStore",
+    "MongoDBSessionStoreOptions",
+    "MongoDBVersionedSession",
     "MongoDBTimeoutError",
     "MongoDBTransientPersistenceError",
     "MongoDBTransientRetrievalError",
