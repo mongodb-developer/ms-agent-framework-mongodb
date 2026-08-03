@@ -319,11 +319,16 @@ internal class SearchIndexManagerProxy : DispatchProxy
 /// <summary>
 /// Tracks calls made to a <see cref="FakeMongoClientProxy"/>, used to prove a connection-string constructor
 /// disposes its owned client if a step after client creation (for example resolving the database/collection)
-/// throws.
+/// throws. When <see cref="Database"/> is set instead of <see cref="GetDatabaseException"/>, the fake client is
+/// fully functional (resolves down to a working collection via <see cref="FakeMongoDatabaseProxy"/>), so tests can
+/// prove a validation failure never even invokes the client factory -- a strictly stronger assertion than proving
+/// a later step disposes an already-created client.
 /// </summary>
 internal sealed class FakeMongoClientState
 {
     public Exception? GetDatabaseException { get; set; }
+
+    public IMongoDatabase? Database { get; set; }
 
     public int DisposeCount { get; set; }
 }
@@ -347,7 +352,13 @@ internal class FakeMongoClientProxy : DispatchProxy
                 throw State.GetDatabaseException;
             }
 
-            throw new NotSupportedException("Fake client requires a configured GetDatabaseException.");
+            if (State.Database is not null)
+            {
+                return State.Database;
+            }
+
+            throw new NotSupportedException(
+                "Fake client requires a configured GetDatabaseException or Database.");
         }
 
         if (method == "Dispose")
@@ -364,6 +375,41 @@ internal class FakeMongoClientProxy : DispatchProxy
         var client = DispatchProxy.Create<IMongoClient, FakeMongoClientProxy>();
         ((FakeMongoClientProxy)(object)client).State = state;
         return client;
+    }
+}
+
+/// <summary>Backing state for <see cref="FakeMongoDatabaseProxy"/>: the collection <c>GetCollection</c> returns.</summary>
+internal sealed class FakeMongoDatabaseState
+{
+    public IMongoCollection<BsonDocument>? Collection { get; set; }
+}
+
+/// <summary>
+/// A minimal, fully functional <see cref="IMongoDatabase"/> test double: <c>GetCollection</c> returns a
+/// pre-configured (typically also fully functional, via <see cref="MemoryCollectionProxy"/>) collection, so a
+/// connection-string constructor's <c>GetDatabase().GetCollection(...)</c> resolution step can succeed all the way
+/// through in tests that need to prove a validation failure occurs before the client factory is ever invoked --
+/// not merely before a later step throws.
+/// </summary>
+internal class FakeMongoDatabaseProxy : DispatchProxy
+{
+    public FakeMongoDatabaseState State { get; set; } = null!;
+
+    protected override object? Invoke(MethodInfo? targetMethod, object?[]? args)
+    {
+        if (targetMethod!.Name == "GetCollection" && State.Collection is not null)
+        {
+            return State.Collection;
+        }
+
+        throw new NotSupportedException($"Unexpected database call: {targetMethod}");
+    }
+
+    public static IMongoDatabase Create(FakeMongoDatabaseState state)
+    {
+        var database = DispatchProxy.Create<IMongoDatabase, FakeMongoDatabaseProxy>();
+        ((FakeMongoDatabaseProxy)(object)database).State = state;
+        return database;
     }
 }
 
