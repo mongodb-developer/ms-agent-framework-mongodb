@@ -64,6 +64,11 @@ def test_python_quality_verifies_release_artifacts_and_dependency_endpoints() ->
     assert ".github/workflows/release-python.yml" in push
     assert "scripts/check_api_baseline.py api-baseline.json" in workflow
     assert "scripts/verify_artifacts.py dist/*.whl dist/*.tar.gz" in workflow
+    assert "python -m twine check dist/*.whl dist/*.tar.gz" in workflow
+    assert (
+        "scripts/verify_artifacts.py --supplemental dist/*.sbom.cdx.json dist/SHA256SUMS"
+    ) in workflow
+    assert "python -m twine check dist/*\n" not in workflow
     assert "scripts/smoke_public_api.py" in workflow
     assert "python -m pydoc agent_framework_mongodb" in workflow
     assert "agent-framework-core==1.13.0" in workflow
@@ -89,6 +94,12 @@ def test_python_release_requires_owner_environment_and_oidc() -> None:
     assert "environment: ${{ vars.PYPI_ENVIRONMENT }}" in published
     assert "pip download" in workflow
     assert "sha256sum --check" in workflow
+    assert "python -m twine check dist/packages/*.whl dist/packages/*.tar.gz" in workflow
+    assert (
+        "scripts/verify_artifacts.py --supplemental "
+        "dist/*.sbom.cdx.json dist/PACKAGE_SHA256SUMS dist/SHA256SUMS"
+    ) in workflow
+    assert "python -m twine check dist/packages/*\n" not in workflow
     assert "${{ secrets." not in workflow
     assert "password:" not in workflow
 

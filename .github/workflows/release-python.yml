@@ -58,7 +58,7 @@ jobs:
         working-directory: python
         run: |
           python -m build --outdir dist/packages
-          python -m twine check dist/packages/*
+          python -m twine check dist/packages/*.whl dist/packages/*.tar.gz
           python scripts/verify_artifacts.py dist/packages/*.whl dist/packages/*.tar.gz
           python -m venv .release-smoke-wheel
           .release-smoke-wheel/bin/python -m pip install --no-cache-dir dist/packages/*.whl
@@ -75,6 +75,7 @@ jobs:
             --output dist/agent-framework-mongodb.sbom.cdx.json
           (cd dist/packages && sha256sum *) > dist/PACKAGE_SHA256SUMS
           sha256sum dist/packages/* dist/*.sbom.cdx.json > dist/SHA256SUMS
+          python scripts/verify_artifacts.py --supplemental dist/*.sbom.cdx.json dist/PACKAGE_SHA256SUMS dist/SHA256SUMS
       - uses: actions/upload-artifact@11d5960a326750d5838078e36cf38b85af677262 # actions/upload-artifact v4
         with:
           name: python-release-${{ inputs.tag }}

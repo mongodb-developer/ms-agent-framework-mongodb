@@ -100,7 +100,7 @@ python -m ruff check src tests
 python -m mypy
 python -m pyright
 python -m build
-python -m twine check dist\*
+python -m twine check dist\*.whl dist\*.tar.gz
 ```
 
 The wheel and source distribution were each installed into a new virtual environment, then

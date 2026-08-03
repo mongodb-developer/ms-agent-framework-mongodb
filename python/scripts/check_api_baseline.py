@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import inspect
 import json
+from enum import Enum
 from pathlib import Path
 from types import ModuleType
 from typing import Any, cast
@@ -42,6 +43,21 @@ def _property_surface(value: property) -> dict[str, str]:
     return surface
 
 
+def _stable_serialized_value(value: object) -> str:
+    try:
+        return json.dumps(
+            value,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    except (TypeError, ValueError) as exc:
+        raise TypeError(
+            f"public Enum value {value!r} is not deterministically JSON serializable"
+        ) from exc
+
+
 def _class_surface(value: type[Any], package_prefix: str) -> dict[str, Any]:
     constructor_owner = _defining_class(value, "__init__")
     constructor = (
@@ -71,7 +87,16 @@ def _class_surface(value: type[Any], package_prefix: str) -> dict[str, Any]:
             signature = _signature(descriptor)
             if signature is not None:
                 members[name] = {"kind": "method", "signature": signature}
-    return {"constructor": constructor, "members": members}
+    surface: dict[str, Any] = {"constructor": constructor, "members": members}
+    if issubclass(value, Enum):
+        surface["enum_members"] = {
+            name: {
+                "canonical": member.name,
+                "serialized_value": _stable_serialized_value(member.value),
+            }
+            for name, member in sorted(value.__members__.items())
+        }
+    return surface
 
 
 def snapshot_public_api(package: ModuleType) -> dict[str, Any]:

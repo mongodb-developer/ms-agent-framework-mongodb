@@ -54,7 +54,7 @@ jobs:
         run: |
           rm -rf build dist
           python -m build
-          python -m twine check dist/*
+          python -m twine check dist/*.whl dist/*.tar.gz
           python scripts/verify_artifacts.py dist/*.whl dist/*.tar.gz
           python scripts/check_api_baseline.py api-baseline.json
       - name: Smoke test exact wheel
@@ -94,7 +94,9 @@ jobs:
             --format cyclonedx-json \
             --output dist/agent-framework-mongodb.sbom.cdx.json
       - name: Record artifact checksums
-        run: sha256sum dist/* > dist/SHA256SUMS
+        run: |
+          sha256sum dist/* > dist/SHA256SUMS
+          python scripts/verify_artifacts.py --supplemental dist/*.sbom.cdx.json dist/SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
           name: python-package-${{ github.sha }}

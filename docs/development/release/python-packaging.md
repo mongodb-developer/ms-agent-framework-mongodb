@@ -36,7 +36,9 @@ Hatch's generated source ignore metadata, and that source tree.
 extracting them and fails on tests, samples, caches, bytecode, local settings,
 environment files, credential-key extensions, links, path traversal, or any
 file outside the allowlist. The wheel must include metadata, license, and the
-typing marker.
+typing marker. Its separate `--supplemental` mode validates CycloneDX JSON and
+recomputes SHA-256 manifest entries; supplemental files are never passed to
+Twine as distributions.
 
 `scripts/smoke_public_api.py` runs against clean wheel and sdist installations.
 It imports the installed version and constructs Memory, History, RAG, Session
@@ -49,7 +51,9 @@ MongoDB. The provider clients are then closed.
 every top-level export, package-owned constructor, and every visible public
 method, property accessor, classmethod, and staticmethod defined by a
 package-owned class in the exported class's inheritance chain. Private members
-and members inherited from foreign dependencies are excluded.
+and members inherited from foreign dependencies are excluded. Exported Enum
+classes additionally record every declared `__members__` name, including
+aliases, its canonical member name, and its deterministic JSON value.
 `scripts/check_api_baseline.py` fails on additions, removals, renames,
 signature/default changes, or any mismatch between `baseline_version` and the
 installed package version. Later intentional changes require semantic-version,
@@ -118,8 +122,9 @@ python -m ruff format --check src tests samples scripts ..\scripts\scan_credenti
 python -m mypy
 python -m pyright
 python -m build
-python -m twine check dist\*
+python -m twine check dist\*.whl dist\*.tar.gz
 python scripts\verify_artifacts.py dist\*.whl dist\*.tar.gz
+python scripts\verify_artifacts.py --supplemental dist\*.sbom.cdx.json dist\SHA256SUMS
 python scripts\check_api_baseline.py api-baseline.json
 python ..\scripts\scan_credentials.py
 ```

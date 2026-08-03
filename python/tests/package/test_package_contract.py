@@ -4,6 +4,7 @@ import json
 import subprocess
 import sys
 from copy import deepcopy
+from enum import Enum
 from importlib.metadata import metadata, version
 from pathlib import Path
 from types import ModuleType
@@ -116,6 +117,60 @@ def test_api_check_rejects_public_method_removal(tmp_path: Path) -> None:
     assert "Public API differs from the reviewed baseline." in result.stdout
 
 
+def test_api_baseline_covers_complete_exported_enum_members() -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    baseline = json.loads((project_root / "api-baseline.json").read_text(encoding="utf-8"))
+
+    assert baseline["classes"]["MongoDBSearchMode"]["enum_members"] == {
+        "FULL_TEXT": {"canonical": "FULL_TEXT", "serialized_value": '"full_text"'},
+        "HYBRID_RRF": {"canonical": "HYBRID_RRF", "serialized_value": '"hybrid_rrf"'},
+        "VECTOR_ANN": {"canonical": "VECTOR_ANN", "serialized_value": '"vector_ann"'},
+        "VECTOR_ENN": {"canonical": "VECTOR_ENN", "serialized_value": '"vector_enn"'},
+    }
+    assert baseline["classes"]["MongoDBIndexState"]["enum_members"] == {
+        "BUILDING": {"canonical": "BUILDING", "serialized_value": '"building"'},
+        "FAILED": {"canonical": "FAILED", "serialized_value": '"failed"'},
+        "MISSING": {"canonical": "MISSING", "serialized_value": '"missing"'},
+        "READY": {"canonical": "READY", "serialized_value": '"ready"'},
+        "READY_NOT_QUERYABLE": {
+            "canonical": "READY_NOT_QUERYABLE",
+            "serialized_value": '"ready_not_queryable"',
+        },
+        "TIMEOUT": {"canonical": "TIMEOUT", "serialized_value": '"timeout"'},
+    }
+
+
+def test_api_check_rejects_enum_removal_alias_and_value_changes(tmp_path: Path) -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    baseline = json.loads((project_root / "api-baseline.json").read_text(encoding="utf-8"))
+    variants: list[dict[str, Any]] = []
+    removed = deepcopy(baseline)
+    del removed["classes"]["MongoDBSearchMode"]["enum_members"]["VECTOR_ENN"]
+    variants.append(removed)
+    renamed = deepcopy(baseline)
+    renamed["classes"]["MongoDBSearchMode"]["enum_members"]["VECTOR_EXACT"] = renamed["classes"][
+        "MongoDBSearchMode"
+    ]["enum_members"].pop("VECTOR_ENN")
+    variants.append(renamed)
+    changed_alias = deepcopy(baseline)
+    changed_alias["classes"]["MongoDBSearchMode"]["enum_members"]["VECTOR_ANN"]["canonical"] = (
+        "VECTOR_ENN"
+    )
+    variants.append(changed_alias)
+    changed_value = deepcopy(baseline)
+    changed_value["classes"]["MongoDBIndexState"]["enum_members"]["READY"]["serialized_value"] = (
+        '"available"'
+    )
+    variants.append(changed_value)
+
+    for index, changed_baseline in enumerate(variants):
+        changed = tmp_path / f"api-baseline-{index}.json"
+        changed.write_text(json.dumps(changed_baseline), encoding="utf-8")
+        result = _run_api_check(project_root, changed)
+        assert result.returncode == 1
+        assert "Public API differs from the reviewed baseline." in result.stdout
+
+
 def test_api_snapshot_recurses_package_owned_descriptor_kinds() -> None:
     class PublicBase:
         @property
@@ -158,6 +213,27 @@ def test_api_snapshot_recurses_package_owned_descriptor_kinds() -> None:
             "kind": "staticmethod",
             "signature": "(value: 'str') -> 'str'",
         },
+    }
+
+
+def test_api_snapshot_records_enum_aliases_and_stable_values() -> None:
+    class PublicStatus(Enum):
+        READY = "ready"
+        AVAILABLE = "ready"
+        FAILED = "failed"
+
+    package = ModuleType("fixture_package")
+    PublicStatus.__module__ = package.__name__
+    dynamic_package = cast(Any, package)
+    dynamic_package.__all__ = ["PublicStatus"]
+    dynamic_package.PublicStatus = PublicStatus
+
+    status = snapshot_public_api(package)["classes"]["PublicStatus"]
+
+    assert status["enum_members"] == {
+        "AVAILABLE": {"canonical": "READY", "serialized_value": '"ready"'},
+        "FAILED": {"canonical": "FAILED", "serialized_value": '"failed"'},
+        "READY": {"canonical": "READY", "serialized_value": '"ready"'},
     }
 
 

@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import argparse
 import glob
+import hashlib
+import json
+import re
 import tarfile
 from pathlib import Path, PurePosixPath
 from zipfile import ZipFile
@@ -108,26 +111,106 @@ def verify_artifact(path: Path) -> list[str]:
         return _verify_wheel(path)
     if path.name.endswith(".tar.gz"):
         return _verify_sdist(path)
-    return [f"unsupported artifact type: {path.name}"]
+    return [f"unsupported distribution artifact type: {path.name}"]
+
+
+def _verify_sbom(path: Path) -> list[str]:
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return [f"invalid CycloneDX JSON: {exc}"]
+    issues: list[str] = []
+    if not isinstance(document, dict) or document.get("bomFormat") != "CycloneDX":
+        issues.append("SBOM must be a CycloneDX JSON document")
+        return issues
+    if not isinstance(document.get("specVersion"), str):
+        issues.append("CycloneDX SBOM must declare specVersion")
+    if not isinstance(document.get("version"), int):
+        issues.append("CycloneDX SBOM must declare an integer version")
+    if not isinstance(document.get("components"), list):
+        issues.append("CycloneDX SBOM must contain a components list")
+    return issues
+
+
+def _checksum_target(checksum_file: Path, name: str) -> Path | None:
+    relative = Path(name)
+    if relative.is_absolute() or ".." in relative.parts:
+        return None
+    candidates = (
+        relative,
+        checksum_file.parent / relative,
+        checksum_file.parent / "packages" / relative,
+    )
+    return next((candidate for candidate in candidates if candidate.is_file()), None)
+
+
+def _verify_checksums(path: Path) -> list[str]:
+    issues: list[str] = []
+    seen: set[str] = set()
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as exc:
+        return [f"unable to read checksum manifest: {exc}"]
+    if not lines:
+        return ["checksum manifest must not be empty"]
+    for line_number, line in enumerate(lines, start=1):
+        match = re.fullmatch(r"([0-9a-fA-F]{64}) [ *](.+)", line)
+        if match is None:
+            issues.append(f"invalid checksum entry on line {line_number}")
+            continue
+        expected, name = match.groups()
+        if name in seen:
+            issues.append(f"duplicate checksum entry: {name}")
+            continue
+        seen.add(name)
+        if not (
+            name.endswith(".whl") or name.endswith(".tar.gz") or name.endswith(".sbom.cdx.json")
+        ):
+            issues.append(f"unsupported checksum target: {name}")
+            continue
+        target = _checksum_target(path, name)
+        if target is None:
+            issues.append(f"checksum target does not exist: {name}")
+            continue
+        actual = hashlib.sha256(target.read_bytes()).hexdigest()
+        if actual.lower() != expected.lower():
+            issues.append(f"checksum mismatch: {name}")
+    return issues
+
+
+def verify_supplemental(path: Path) -> list[str]:
+    if path.name.endswith(".sbom.cdx.json"):
+        return _verify_sbom(path)
+    if path.name.endswith("SHA256SUMS"):
+        return _verify_checksums(path)
+    return [f"unsupported supplemental artifact type: {path.name}"]
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("artifacts", nargs="+")
+    parser.add_argument("artifacts", nargs="*")
+    parser.add_argument(
+        "--supplemental",
+        action="store_true",
+        help="validate SBOM and checksum files separately from distributions",
+    )
     args = parser.parse_args()
+    if not args.artifacts:
+        parser.error("at least one artifact is required")
     failed = False
     artifacts = [
         Path(match) for pattern in args.artifacts for match in (glob.glob(pattern) or [pattern])
     ]
     for artifact in artifacts:
-        issues = verify_artifact(artifact)
+        issues = verify_supplemental(artifact) if args.supplemental else verify_artifact(artifact)
         if issues:
             failed = True
             print(f"{artifact}:")
             for issue in issues:
                 print(f"  - {issue}")
         else:
-            print(f"{artifact}: package content policy passed")
+            artifact_kind = "supplemental" if args.supplemental else "package content"
+            print(f"{artifact}: {artifact_kind} policy passed")
     return int(failed)
 
 

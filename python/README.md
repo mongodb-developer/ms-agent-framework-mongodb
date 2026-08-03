@@ -16,7 +16,7 @@ testing, build from this directory and install the exact wheel:
 
 ```powershell
 python -m build
-python -m twine check dist\*
+python -m twine check dist\*.whl dist\*.tar.gz
 python -m pip install dist\agent_framework_mongodb-*.whl
 ```
 

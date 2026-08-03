@@ -250,6 +250,32 @@
     },
     "MongoDBIndexState": {
       "constructor": null,
+      "enum_members": {
+        "BUILDING": {
+          "canonical": "BUILDING",
+          "serialized_value": "\"building\""
+        },
+        "FAILED": {
+          "canonical": "FAILED",
+          "serialized_value": "\"failed\""
+        },
+        "MISSING": {
+          "canonical": "MISSING",
+          "serialized_value": "\"missing\""
+        },
+        "READY": {
+          "canonical": "READY",
+          "serialized_value": "\"ready\""
+        },
+        "READY_NOT_QUERYABLE": {
+          "canonical": "READY_NOT_QUERYABLE",
+          "serialized_value": "\"ready_not_queryable\""
+        },
+        "TIMEOUT": {
+          "canonical": "TIMEOUT",
+          "serialized_value": "\"timeout\""
+        }
+      },
       "members": {}
     },
     "MongoDBIntegrationError": {
@@ -575,6 +601,24 @@
     },
     "MongoDBSearchMode": {
       "constructor": null,
+      "enum_members": {
+        "FULL_TEXT": {
+          "canonical": "FULL_TEXT",
+          "serialized_value": "\"full_text\""
+        },
+        "HYBRID_RRF": {
+          "canonical": "HYBRID_RRF",
+          "serialized_value": "\"hybrid_rrf\""
+        },
+        "VECTOR_ANN": {
+          "canonical": "VECTOR_ANN",
+          "serialized_value": "\"vector_ann\""
+        },
+        "VECTOR_ENN": {
+          "canonical": "VECTOR_ENN",
+          "serialized_value": "\"vector_enn\""
+        }
+      },
       "members": {}
     },
     "MongoDBSerializationError": {
