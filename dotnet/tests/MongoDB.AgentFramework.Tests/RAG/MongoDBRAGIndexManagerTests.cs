@@ -341,6 +341,43 @@ public sealed class MongoDBRAGIndexManagerTests
     }
 
     [Fact]
+    public async Task WaitUntilVectorSearchIndexReadyThrowsFailedExceptionImmediatelyWithoutPolling()
+    {
+        BsonDocument failed = RAGIndexFixtures.ValidVectorIndex("facade_vector");
+        failed["status"] = "FAILED";
+        failed["queryable"] = false;
+        var state = new RAGCollectionState { SearchIndexes = [failed] };
+        MongoDBRAGIndexManager manager = CreateVectorManager(state);
+
+        // A terminal Failed build never becomes ready on its own, so this must never be retried: exactly one
+        // inspection call is made before the actionable, non-transient failure is thrown, regardless of the
+        // configured timeout/pollInterval.
+        await Assert.ThrowsAsync<MongoDBIndexFailedException>(
+            () => manager.WaitUntilVectorSearchIndexReadyAsync(
+                timeout: TimeSpan.FromSeconds(5),
+                pollInterval: TimeSpan.FromMilliseconds(1)));
+
+        Assert.Equal(1, state.SearchIndexListCallCount);
+    }
+
+    [Fact]
+    public async Task EnsureVectorThrowsFailedExceptionWithoutAutomaticallyRepairingIt()
+    {
+        BsonDocument failed = RAGIndexFixtures.ValidVectorIndex("facade_vector");
+        failed["status"] = "FAILED";
+        failed["queryable"] = false;
+        var state = new RAGCollectionState { SearchIndexes = [failed] };
+        MongoDBRAGIndexManager manager = CreateVectorManager(state);
+
+        // The Failed index's definition still matches, so isCompatible is true and Ensure never attempts an
+        // update -- a terminal build failure is never something Ensure silently repairs; that must be explicit.
+        await Assert.ThrowsAsync<MongoDBIndexFailedException>(() => manager.EnsureVectorSearchIndexAsync());
+
+        Assert.Equal(0, state.UpdateCallCount);
+        Assert.Null(state.CreatedSearchIndex);
+    }
+
+    [Fact]
     public async Task WaitUntilReadyPropagatesCancellation()
     {
         BsonDocument building = RAGIndexFixtures.ValidVectorIndex("facade_vector");

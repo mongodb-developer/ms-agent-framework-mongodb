@@ -105,6 +105,8 @@ internal sealed class MemoryCollectionState
 
     public Exception? ListException { get; set; }
 
+    public int ListCallCount { get; set; }
+
     public void CaptureAttempt(BsonDocument[] documents)
     {
         lock (_attemptLock)
@@ -240,6 +242,7 @@ internal class SearchIndexManagerProxy : DispatchProxy
     {
         if (targetMethod!.Name == "ListAsync")
         {
+            State.ListCallCount++;
             if (State.ListException is not null)
             {
                 return Task.FromException<IAsyncCursor<BsonDocument>>(State.ListException);

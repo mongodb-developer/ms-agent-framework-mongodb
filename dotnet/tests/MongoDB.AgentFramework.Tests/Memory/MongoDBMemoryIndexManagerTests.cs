@@ -263,6 +263,46 @@ public sealed class MongoDBMemoryIndexManagerTests
     }
 
     [Fact]
+    public async Task WaitUntilReadyThrowsFailedExceptionImmediatelyWithoutPolling()
+    {
+        var state = new MemoryCollectionState
+        {
+            SearchIndexes = [MemoryIndexFixtures.ValidVectorIndex(
+                "facade_vector", "embedding", 3, status: "FAILED", queryable: false)],
+        };
+        MongoDBMemoryIndexManager manager = CreateManager(state);
+
+        // A terminal Failed build never becomes ready on its own, so this must never be retried: exactly one
+        // inspection call is made before the actionable, non-transient failure is thrown, regardless of the
+        // configured timeout/pollInterval.
+        await Assert.ThrowsAsync<MongoDBIndexFailedException>(
+            () => manager.WaitUntilReadyAsync(
+                timeout: TimeSpan.FromSeconds(5),
+                pollInterval: TimeSpan.FromMilliseconds(1)));
+
+        Assert.Equal(1, state.ListCallCount);
+    }
+
+    [Fact]
+    public async Task EnsureThrowsFailedExceptionWithoutAutomaticallyRepairingIt()
+    {
+        var state = new MemoryCollectionState
+        {
+            SearchIndexes = [MemoryIndexFixtures.ValidVectorIndex(
+                "facade_vector", "embedding", 3, status: "FAILED", queryable: false)],
+        };
+        MongoDBMemoryIndexManager manager = CreateManager(state);
+
+        // The Failed index's definition still matches (dimensions=3), so isCompatible is true and Ensure never
+        // attempts an update -- a terminal build failure is never something Ensure silently repairs; that must
+        // be explicit (recreate/update), matching the state machine.
+        await Assert.ThrowsAsync<MongoDBIndexFailedException>(() => manager.EnsureIndexAsync());
+
+        Assert.Equal(0, state.UpdateCallCount);
+        Assert.Null(state.CreatedSearchIndex);
+    }
+
+    [Fact]
     public async Task WaitUntilReadyPropagatesCancellation()
     {
         var state = new MemoryCollectionState

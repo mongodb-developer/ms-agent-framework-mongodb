@@ -112,6 +112,16 @@ internal static class VectorSearchIndexEquivalence
                 $"'{actualType}').");
         }
 
+        // A terminal build failure is checked before comparing definitions (and regardless of requireReady): a
+        // failed index never becomes ready on its own, so this is always an actionable, non-transient problem --
+        // never something bounded polling should retry until its deadline (see MongoDBIndexFailedException).
+        if (MongoDBSearchIndexes.Classify(index) == MongoDBIndexStatus.Failed)
+        {
+            throw new MongoDBIndexFailedException(
+                $"Vector Search index '{expected.IndexName}' build failed and requires explicit repair (update " +
+                "or recreate); it will never become ready on its own.");
+        }
+
         MongoDBIndexComparison comparison = Compare(MongoDBSearchIndexes.GetDefinition(index), expected);
         if (!comparison.IsCompatible)
         {

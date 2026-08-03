@@ -112,6 +112,16 @@ internal static class SearchIndexEquivalence
                 "FullText/Hybrid requires a Search index, not a Vector Search index.");
         }
 
+        // A terminal build failure is checked before comparing definitions (and regardless of requireReady): a
+        // failed index never becomes ready on its own, so this is always an actionable, non-transient problem --
+        // never something bounded polling should retry until its deadline (see MongoDBIndexFailedException).
+        if (MongoDBSearchIndexes.Classify(index) == MongoDBIndexStatus.Failed)
+        {
+            throw new MongoDBIndexFailedException(
+                $"Search index '{expected.IndexName}' build failed and requires explicit repair (update or " +
+                "recreate); it will never become ready on its own.");
+        }
+
         SearchIndexComparisonResult result = Compare(MongoDBSearchIndexes.GetDefinition(index), expected);
         if (!result.Comparison.IsCompatible)
         {
@@ -129,24 +139,41 @@ internal static class SearchIndexEquivalence
     }
 
     /// <summary>
-    /// Builds a non-dynamic Search index definition document (the <c>mappings</c> object only) mapping every
-    /// <see cref="MongoDBSearchIndexDefinition.TextFieldNames"/> entry to <c>"string"</c> and every
-    /// <see cref="MongoDBSearchIndexDefinition.MandatoryFilter"/>-referenced field to a type compatible with its
-    /// operator/value category (see <see cref="IsFilterValueCategoryCompatible"/>). Used by both create and
-    /// update so the mapping shape is derived from <see cref="MongoDBSearchIndexDefinition"/> exactly once.
+    /// Builds a non-dynamic Search index definition document (the <c>mappings</c> object only) satisfying every
+    /// <see cref="MongoDBSearchIndexDefinition.TextFieldNames"/> and <see cref="MongoDBSearchIndexDefinition.MandatoryFilter"/>-referenced
+    /// field. A dotted field path (for example <c>"metadata.tenant_id"</c>) is expressed through nested
+    /// <c>type: "document"</c>/<c>fields</c> mapping objects rather than a literal dotted key -- Atlas Search has
+    /// no dotted-key mapping shape, only nested <c>document</c> fields, matching exactly what
+    /// <see cref="ResolveFieldMappingDefinitions"/> resolves back on the read side. When the same terminal field
+    /// path is required by both a text field and one or more mandatory-filter value categories (or by multiple
+    /// heterogeneous value categories from a single membership filter), every required type is merged and
+    /// deduplicated at that path, emitting a single mapping document when exactly one type is required or a
+    /// multi-type mapping array (Atlas Search's supported shape for mapping one field to several type
+    /// definitions simultaneously) when more than one is. Used by both create and update so the mapping shape is
+    /// derived from <see cref="MongoDBSearchIndexDefinition"/> exactly once.
     /// </summary>
     public static BsonDocument BuildDefinition(MongoDBSearchIndexDefinition definition)
     {
         ArgumentNullException.ThrowIfNull(definition);
-        var fields = new BsonDocument();
+        var requiredTypesByPath = new Dictionary<string, List<string>>(StringComparer.Ordinal);
         foreach (string textField in definition.TextFieldNames)
         {
-            fields[textField] = new BsonDocument("type", "string");
+            AddRequiredType(requiredTypesByPath, textField, "string");
         }
 
         foreach (FilterFieldReference reference in RAGFilterFieldReferences.Enumerate(definition.MandatoryFilter))
         {
-            fields[reference.FieldPath] = new BsonDocument("type", FilterFieldSearchType(reference));
+            foreach (FilterValueCategory valueCategory in BsonValueCategories.Flags(reference.ValueCategories))
+            {
+                AddRequiredType(
+                    requiredTypesByPath, reference.FieldPath, FilterValueSearchType(reference.Category, valueCategory));
+            }
+        }
+
+        var fields = new BsonDocument();
+        foreach ((string path, List<string> types) in requiredTypesByPath)
+        {
+            SetFieldMapping(fields, path, types);
         }
 
         return new BsonDocument(
@@ -154,21 +181,89 @@ internal static class SearchIndexEquivalence
             new BsonDocument { { "dynamic", false }, { "fields", fields } });
     }
 
-    /// <summary>Maps a mandatory-filter field's BSON value category to the Atlas Search field type that satisfies it.</summary>
-    private static string FilterFieldSearchType(FilterFieldReference reference)
+    /// <summary>Records that <paramref name="path"/> requires <paramref name="type"/>, de-duplicating repeats.</summary>
+    private static void AddRequiredType(Dictionary<string, List<string>> requiredTypesByPath, string path, string type)
     {
-        FilterValueCategory category = BsonValueCategories.Flags(reference.ValueCategories).First();
-        return category switch
+        if (!requiredTypesByPath.TryGetValue(path, out List<string>? types))
         {
-            FilterValueCategory.String => "token",
-            FilterValueCategory.Boolean => "boolean",
-            FilterValueCategory.Number => "number",
-            FilterValueCategory.Date => "date",
-            FilterValueCategory.ObjectId => "objectId",
-            FilterValueCategory.Uuid => "uuid",
-            _ => throw new MongoDBConfigurationException(
-                $"Mandatory-filter field '{reference.FieldPath}' has an unsupported value category."),
+            types = [];
+            requiredTypesByPath[path] = types;
+        }
+
+        if (!types.Contains(type, StringComparer.Ordinal))
+        {
+            types.Add(type);
+        }
+    }
+
+    /// <summary>Maps a mandatory-filter field's operator/BSON value category to the Atlas Search field type that satisfies it.</summary>
+    private static string FilterValueSearchType(FilterOperatorCategory operatorCategory, FilterValueCategory valueCategory) =>
+        operatorCategory switch
+        {
+            FilterOperatorCategory.Range => valueCategory switch
+            {
+                FilterValueCategory.Number => "number",
+                FilterValueCategory.Date => "date",
+                _ => throw new MongoDBConfigurationException(
+                    $"A range filter over a {valueCategory} value has no supported Search field type."),
+            },
+            _ => valueCategory switch
+            {
+                FilterValueCategory.String => "token",
+                FilterValueCategory.Boolean => "boolean",
+                FilterValueCategory.Number => "number",
+                FilterValueCategory.Date => "date",
+                FilterValueCategory.ObjectId => "objectId",
+                FilterValueCategory.Uuid => "uuid",
+                _ => throw new MongoDBConfigurationException(
+                    $"A filter value of category {valueCategory} has no supported Search field type."),
+            },
         };
+
+    /// <summary>
+    /// Sets <paramref name="path"/>'s mapping within <paramref name="root"/>, creating (or reusing) nested
+    /// <c>type: "document"</c> mapping objects for every intermediate dotted segment. Fails actionably rather than
+    /// silently overwriting or corrupting a mapping if <paramref name="path"/> conflicts with another already-set
+    /// field (for example one configured field at <c>"a"</c> and another at <c>"a.b"</c>), since a single field
+    /// cannot simultaneously be a leaf value and a nested document.
+    /// </summary>
+    private static void SetFieldMapping(BsonDocument root, string path, IReadOnlyList<string> types)
+    {
+        string[] segments = path.Split('.');
+        BsonDocument currentFields = root;
+        for (int i = 0; i < segments.Length - 1; i++)
+        {
+            string segment = segments[i];
+            if (currentFields.TryGetValue(segment, out BsonValue? existing))
+            {
+                if (existing is BsonDocument nested && nested.GetValue("type", "").AsString == "document")
+                {
+                    currentFields = nested["fields"].AsBsonDocument;
+                    continue;
+                }
+
+                throw new MongoDBConfigurationException(
+                    $"Field path '{path}' conflicts with another configured field mapped directly at " +
+                    $"'{string.Join('.', segments[..(i + 1)])}'.");
+            }
+
+            var document = new BsonDocument { { "type", "document" }, { "fields", new BsonDocument() } };
+            currentFields[segment] = document;
+            currentFields = document["fields"].AsBsonDocument;
+        }
+
+        string terminal = segments[^1];
+        if (currentFields.TryGetValue(terminal, out BsonValue? terminalExisting) &&
+            terminalExisting is BsonDocument { } terminalDocument &&
+            terminalDocument.GetValue("type", "").AsString == "document")
+        {
+            throw new MongoDBConfigurationException(
+                $"Field path '{path}' conflicts with another configured field mapped as a nested path under it.");
+        }
+
+        currentFields[terminal] = types.Count == 1
+            ? new BsonDocument("type", types[0])
+            : new BsonArray(types.Select(static type => new BsonDocument("type", type)));
     }
 
     /// <summary>
@@ -272,10 +367,14 @@ internal static class SearchIndexEquivalence
 
     /// <summary>
     /// A field is text-searchable if any applicable mapping definition is; only reject a field once every
-    /// definition is confirmed non-text-compatible.
+    /// definition is confirmed non-text-compatible. Only <c>"string"</c> qualifies: <c>"token"</c> is exact-match
+    /// only (never analyzed for relevance-ranked text search), and <c>"autocomplete"</c> is rejected too, because
+    /// <see cref="RAGPipelineBuilder"/>'s <c>$search</c> stage always issues a <c>text</c> operator query and never
+    /// an <c>autocomplete</c> one -- an <c>autocomplete</c>-only mapping would accept a definition the runtime
+    /// query can never actually exercise as text-searchable.
     /// </summary>
     private static bool IsTextCompatible(BsonDocument fieldMapping) =>
-        fieldMapping.GetValue("type", "").AsString is "string" or "autocomplete" or "token";
+        fieldMapping.GetValue("type", "").AsString is "string";
 
     /// <summary>
     /// Checks whether <paramref name="fieldMapping"/> is compatible with a single BSON value category used
