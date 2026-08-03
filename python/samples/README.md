@@ -8,7 +8,8 @@ Runtime RAG remains read-only.
 `workflow_checkpoint_resume.py` runs an Agent Framework workflow until a pending
 deployment approval is checkpointed, creates a new workflow instance, resumes it
 from the latest checkpoint with an approval response, inspects a bounded page,
-and deletes only the authorized run's checkpoint IDs unless `--keep` is passed.
+and clears only the authorized run's checkpoints and sequence counter unless
+`--keep` is passed.
 It preserves pending requests, executor state, and lineage through the public
 Agent Framework 1.13 checkpoint contract.
 
@@ -28,10 +29,11 @@ python samples\workflow_checkpoint_resume.py --keep
 Runtime needs find, insert, atomic update/upsert, and targeted delete privileges.
 The sample explicitly creates regular indexes and therefore also needs
 index-provisioning privileges; production should provision separately.
-MongoDB TTL cleanup is eventual and can leave lineage gaps. The default cleanup
-deletes only IDs first listed under the constructor-bound tenant/workflow/session
-scope and never drops the collection. Expected output reports only status and
-bounded counts, not IDs, scope values, or checkpoint state.
+MongoDB TTL cleanup is eventual, covers checkpoints and their refreshed scoped
+counter, and can leave lineage gaps. The default `clear_run()` cleanup applies
+the complete constructor-bound tenant/workflow/session scope and never drops the
+collection. Expected output reports only status and bounded acknowledged counts,
+not IDs, scope values, or checkpoint state.
 
 ## Session persistence
 

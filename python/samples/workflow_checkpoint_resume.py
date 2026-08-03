@@ -91,20 +91,6 @@ def _build_workflow(storage: MongoDBCheckpointStorage) -> Workflow:
     ).build()
 
 
-async def _checkpoint_ids(storage: MongoDBCheckpointStorage) -> list[str]:
-    checkpoint_ids: list[str] = []
-    cursor: str | None = None
-    while True:
-        page = await storage.list_checkpoint_page(
-            workflow_name=storage.options.workflow_name,
-            cursor=cursor,
-        )
-        checkpoint_ids.extend(item.checkpoint_id for item in page.checkpoints)
-        if page.next_cursor is None:
-            return checkpoint_ids
-        cursor = page.next_cursor
-
-
 async def run(*, keep: bool) -> None:
     """Run the complete pending-approval checkpoint resumption scenario."""
     ttl = timedelta(seconds=_positive_seconds("MONGODB_CHECKPOINT_TTL_SECONDS", "3600"))
@@ -151,11 +137,11 @@ async def run(*, keep: bool) -> None:
         if keep:
             print("Authorized cleanup skipped by --keep; TTL expiration remains eventual.")
         else:
-            checkpoint_ids = await _checkpoint_ids(storage)
-            deleted = 0
-            for checkpoint_id in checkpoint_ids:
-                deleted += int(await storage.delete(checkpoint_id))
-            print(f"Authorized cleanup deleted {deleted} checkpoint(s).")
+            cleared = await storage.clear_run()
+            print(
+                f"Authorized cleanup deleted {cleared.checkpoints_deleted} checkpoint(s) "
+                f"and {cleared.counter_deleted} sequence counter."
+            )
 
 
 def main() -> None:

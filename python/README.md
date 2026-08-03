@@ -128,10 +128,13 @@ workflow = WorkflowBuilder(
 ```
 
 The package exports `MongoDBCheckpointStorage`,
-`MongoDBCheckpointStorageOptions`, `MongoDBCheckpointPage`, and
+`MongoDBCheckpointStorageOptions`, `MongoDBCheckpointPage`,
+`MongoDBCheckpointClearResult`, and
 `MongoDBCheckpointNotFoundError`. The exact `CheckpointStorage` list methods
-return the configured bounded first page; `list_checkpoint_page()` follows
-opaque cursors. Every operation uses the immutable tenant/workflow/session scope.
+traverse bounded pages to enumerate the complete run;
+`list_checkpoint_page()` exposes one bounded cursor page. `clear_run()` removes
+the exact authorized run's checkpoints and sequence counter with acknowledged
+counts. Every operation uses the immutable tenant/workflow/session scope.
 See `samples\workflow_checkpoint_resume.py` and
 [`docs/development/persistence/python-checkpoints.md`](../docs/development/persistence/python-checkpoints.md).
 
