@@ -76,6 +76,23 @@ documented environment variable, with network access restricted to application
 egress. Never put a connection string in source, command history, logs, or exception
 reporting.
 
+## CI security controls
+
+Credential-free pull requests run the Python 3.10 quality workflow without repository
+or deployment secrets. It executes tests and coverage, Ruff, MyPy, Pyright, package
+build and Twine validation, and imports from the exact wheel and source distribution in
+fresh environments. Separate workflows run the local high-confidence
+credential-pattern scanner on every change and GitHub-native CodeQL for Python and
+dependency review. Actions receive only their minimum declared token permissions, and
+checkout does not persist credentials.
+
+Repository administrators must enable GitHub secret scanning and push protection for
+the repository and its supported secret patterns. This platform control is a release
+prerequisite because a workflow cannot prove its own secret was blocked before the
+workflow started. The local scanner is defense in depth for common private-key, GitHub,
+AWS, and credential-bearing MongoDB URI patterns; it is not a replacement for GitHub
+secret scanning. No third-party scanner or code upload is configured.
+
 ## Troubleshooting
 
 - **No telemetry:** configure a standard Python logging handler and, for spans, an
