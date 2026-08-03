@@ -2,6 +2,70 @@
 
 MongoDB integrations for Microsoft Agent Framework.
 
+## Install
+
+The distribution name is `agent-framework-mongodb`; Python imports use
+`agent_framework_mongodb`.
+
+```powershell
+python -m pip install agent-framework-mongodb
+```
+
+This repository has not published the distribution yet. For release-candidate
+testing, build from this directory and install the exact wheel:
+
+```powershell
+python -m build
+python -m twine check dist\*.whl dist\*.tar.gz
+python -m pip install dist\agent_framework_mongodb-*.whl
+```
+
+Do not install an unverified registry project with this name. The package
+requires Python 3.10 or later, Agent Framework Core 1.13 or later (but below
+2.0), PyMongo 4.13 or later (but below 5.0), and OpenTelemetry API 1.39 or later
+(but below 2.0). Only versions recorded in the
+[compatibility evidence](../docs/development/release/python-packaging.md) are
+release-tested.
+
+## Choose a feature
+
+| Feature | Preserves | Does not replace | Sample |
+| --- | --- | --- | --- |
+| Memory | scoped semantic conversation recall | exact replay or authoritative knowledge | [`memory_quickstart.py`](samples/memory_quickstart.py) |
+| Chat History | exact ordered supported messages | semantic recall or complete session state | [`history_quickstart.py`](samples/history_quickstart.py) |
+| RAG | attributed read-only knowledge results | conversation learning or ingestion | [Vector](samples/rag_vector_quickstart.py), [full text](samples/rag_full_text_quickstart.py), [hybrid](samples/rag_hybrid_quickstart.py) |
+| Session Store | complete versioned `AgentSession` snapshots | transcript queries or workflow lineage | [`session_persistence.py`](samples/session_persistence.py) |
+| Workflow Checkpoint Store | resumable workflow state and lineage | complete sessions or exact chat replay | [`workflow_checkpoint_resume.py`](samples/workflow_checkpoint_resume.py) |
+
+Applications may combine providers deliberately; provider lifecycles, scopes,
+collections, and authorization remain separate.
+
+Provider-agnostic scenario fixtures cover
+[parent hydration](samples/rag_parent_document.py),
+[on-demand tools](samples/on_demand_retrieval_tool.py),
+[workflow retrieval](samples/workflow_retrieval.py),
+[Memory with RAG](samples/memory_and_rag.py),
+[structured metadata](samples/structured_metadata_retrieval.py), and the
+[bounded document loader](samples/document_loader.py). They need no external
+model-provider identity; MongoDB-backed execution still requires the documented
+deployment and least-privilege credentials.
+
+## Environment and privileges
+
+All samples require `MONGODB_URI` (except ingestion, which uses
+`MONGODB_INGESTION_URI`), `MONGODB_DATABASE`, and the feature-specific variables
+listed in [`samples/README.md`](samples/README.md). Missing configuration is
+reported before network access. Never commit connection strings.
+
+Use separate identities:
+
+- **runtime:** only the feature's required read or scoped persistence operations;
+- **provisioner:** explicit index create, update, inspect, and drop operations;
+- **sample ingestion:** bounded reads and writes for uniquely prefixed demo data.
+
+Runtime RAG is read-only. Public filters are typed and operator-limited; no
+model controls BSON, MongoDB field names, operators, index names, or pipelines.
+
 ## Index provisioning
 
 Run `samples\index_provisioning.py` under a dedicated provisioner identity to
@@ -298,3 +362,18 @@ The sample requires explicit connection, collection, index, model, dimensions,
 embedding-factory, and unique-prefix environment configuration and refuses to
 write without `--apply`. See [`samples\README.md`](samples/README.md) for the
 collection contract, least-privilege split, limits, commands, and cleanup.
+
+## Limitations and release status
+
+- Search modes require compatible MongoDB Search deployment capabilities and
+  explicitly provisioned indexes; there is no in-memory downgrade.
+- The package does not provide production ingestion, arbitrary MongoDB agent
+  tools, model-generated pipelines, fact extraction, or graph behavior.
+- Python and .NET preserve equivalent observable behavior but do not claim a
+  shared physical stored schema without cross-language fixture evidence.
+- Credentialed Search and persistence integration evidence, named publishing
+  owners, the PyPI trusted-publishing environment, support/security contacts,
+  and the organization signing policy remain external release blockers.
+See the [developer packaging guide](../docs/development/release/python-packaging.md)
+for artifact policy, API compatibility, dependency evidence, and exact
+validation commands.

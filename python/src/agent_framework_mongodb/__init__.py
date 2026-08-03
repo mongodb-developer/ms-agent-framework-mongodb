@@ -1,5 +1,7 @@
 """MongoDB integrations for Microsoft Agent Framework."""
 
+from importlib.metadata import version as _distribution_version
+
 from .checkpointing import (
     MongoDBCheckpointClearResult,
     MongoDBCheckpointNotFoundError,
@@ -61,6 +63,8 @@ from .rag import (
 )
 from .session_store import MongoDBSessionStore, MongoDBSessionStoreOptions, MongoDBVersionedSession
 
+__version__ = _distribution_version("agent-framework-mongodb")
+
 __all__ = [
     "AndFilter",
     "EqualFilter",
@@ -119,4 +123,5 @@ __all__ = [
     "NotEqualFilter",
     "NotInFilter",
     "OrFilter",
+    "__version__",
 ]
