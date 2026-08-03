@@ -169,11 +169,15 @@ public sealed class MongoDBMemoryIndexManager : IAsyncDisposable
     /// <see cref="Definition"/> (docs/spec/features/index-management.md's <c>ensure expected definition</c>
     /// operation: explicit create/update plus optional bounded polling), then optionally waits for it to become
     /// queryable. A concurrent caller's create racing this one to the same end state is a successful no-op. This
-    /// never treats a terminal <c>Failed</c> build as something to automatically repair -- see
-    /// <see cref="MongoDBIndexFailedException"/> -- and, regardless of <paramref name="waitUntilReady"/>, always
-    /// re-inspects and validates the index's final state after any create/update attempt (including a create that
-    /// raced a concurrent caller to an "already exists" no-op), so a rival concurrent caller having created an
-    /// incompatible definition is still caught rather than silently accepted.
+    /// never treats a terminal <c>Failed</c> build, or an index of the wrong type, as something to automatically
+    /// repair -- neither is inspected against <see cref="Definition"/> to decide whether an update is needed, both
+    /// are always left untouched, and both are always surfaced as an actionable, explicit-repair-required error
+    /// (see <see cref="MongoDBIndexFailedException"/>/<see cref="MongoDBIndexMismatchException"/>) rather than a
+    /// silent automatic update attempt. Regardless of <paramref name="waitUntilReady"/>, this always re-inspects
+    /// and validates the index's final state after any create/update attempt (including a create that raced a
+    /// concurrent caller to an "already exists" no-op, and including leaving a Failed/wrong-type index
+    /// untouched), so a rival concurrent caller having created an incompatible definition is still caught rather
+    /// than silently accepted.
     /// </summary>
     /// <param name="waitUntilReady">When <see langword="true"/>, polls with bounded exponential backoff until queryable.</param>
     /// <param name="timeout">The bounded polling deadline. Defaults to 60 seconds.</param>
@@ -194,6 +198,7 @@ public sealed class MongoDBMemoryIndexManager : IAsyncDisposable
             Definition.IndexName,
             SearchIndexType.VectorSearch,
             VectorSearchIndexEquivalence.BuildDefinition(Definition),
+            index => MongoDBSearchIndexes.CanReconcile(index, VectorSearchIndexEquivalence.CheckIndexType),
             index => VectorSearchIndexEquivalence.Compare(MongoDBSearchIndexes.GetDefinition(index), Definition).IsCompatible,
             index => Validate(index, requireReady: false),
             MapCreateException,

@@ -523,6 +523,97 @@ public sealed class MongoDBRAGIndexManagerTests
     }
 
     [Fact]
+    public async Task EnsureVectorThrowsFailedExceptionForMismatchedDefinitionWithoutAttemptingUpdate()
+    {
+        // Unlike EnsureVectorThrowsFailedExceptionWithoutAutomaticallyRepairingIt above (a Failed index whose
+        // definition still happens to match), here the Failed index's definition also does NOT match (different
+        // dimensions). Before the fix, Ensure's reconciliation only inspected isCompatible -- a mismatched
+        // definition -- and would call UpdateAsync attempting to automatically "repair" a terminal Failed build.
+        BsonDocument failed = RAGIndexFixtures.ValidVectorIndex("facade_vector", dimensions: 99);
+        failed["status"] = "FAILED";
+        failed["queryable"] = false;
+        var state = new RAGCollectionState { SearchIndexes = [failed] };
+        MongoDBRAGIndexManager manager = CreateVectorManager(state);
+
+        await Assert.ThrowsAsync<MongoDBIndexFailedException>(() => manager.EnsureVectorSearchIndexAsync());
+
+        Assert.Equal(0, state.UpdateCallCount);
+        Assert.Null(state.CreatedSearchIndex);
+    }
+
+    [Fact]
+    public async Task EnsureVectorThrowsMismatchForWrongIndexTypeWithoutAttemptingUpdate()
+    {
+        // An existing index of the wrong type ("search" instead of the expected "vectorSearch") must never be
+        // treated as something Ensure can automatically reconcile via UpdateAsync.
+        BsonDocument wrongType = RAGIndexFixtures.ValidVectorIndex("facade_vector");
+        wrongType["type"] = "search";
+        var state = new RAGCollectionState { SearchIndexes = [wrongType] };
+        MongoDBRAGIndexManager manager = CreateVectorManager(state);
+
+        MongoDBIndexMismatchException exception = await Assert.ThrowsAsync<MongoDBIndexMismatchException>(
+            () => manager.EnsureVectorSearchIndexAsync());
+
+        Assert.Contains("found type 'search'", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(0, state.UpdateCallCount);
+        Assert.Null(state.CreatedSearchIndex);
+    }
+
+    [Fact]
+    public async Task EnsureSearchThrowsFailedExceptionWithoutAutomaticallyRepairingIt()
+    {
+        BsonDocument failed = RAGIndexFixtures.ValidSearchIndex("facade_search");
+        failed["status"] = "FAILED";
+        failed["queryable"] = false;
+        var state = new RAGCollectionState { SearchIndexes = [failed] };
+        MongoDBRAGIndexManager manager = CreateSearchManager(state);
+
+        // The Failed index's definition still matches, so isCompatible is true and Ensure never attempts an
+        // update -- a terminal build failure is never something Ensure silently repairs; that must be explicit.
+        await Assert.ThrowsAsync<MongoDBIndexFailedException>(() => manager.EnsureSearchIndexAsync());
+
+        Assert.Equal(0, state.UpdateCallCount);
+        Assert.Null(state.CreatedSearchIndex);
+    }
+
+    [Fact]
+    public async Task EnsureSearchThrowsFailedExceptionForMismatchedDefinitionWithoutAttemptingUpdate()
+    {
+        // Unlike EnsureSearchThrowsFailedExceptionWithoutAutomaticallyRepairingIt above (a Failed index whose
+        // definition still happens to match), here the Failed index's definition also does NOT match (a
+        // different mapped text field). Ensure must never attempt an update on a Failed index regardless of
+        // whether its definition happens to be compatible or mismatched.
+        BsonDocument failed = RAGIndexFixtures.ValidSearchIndex("facade_search", textFieldNames: ["other_text"]);
+        failed["status"] = "FAILED";
+        failed["queryable"] = false;
+        var state = new RAGCollectionState { SearchIndexes = [failed] };
+        MongoDBRAGIndexManager manager = CreateSearchManager(state);
+
+        await Assert.ThrowsAsync<MongoDBIndexFailedException>(() => manager.EnsureSearchIndexAsync());
+
+        Assert.Equal(0, state.UpdateCallCount);
+        Assert.Null(state.CreatedSearchIndex);
+    }
+
+    [Fact]
+    public async Task EnsureSearchThrowsMismatchForWrongIndexTypeWithoutAttemptingUpdate()
+    {
+        // An existing index of the wrong type ("vectorSearch" instead of the expected "search") must never be
+        // treated as something Ensure can automatically reconcile via UpdateAsync.
+        BsonDocument wrongType = RAGIndexFixtures.ValidSearchIndex("facade_search");
+        wrongType["type"] = "vectorSearch";
+        var state = new RAGCollectionState { SearchIndexes = [wrongType] };
+        MongoDBRAGIndexManager manager = CreateSearchManager(state);
+
+        MongoDBIndexMismatchException exception = await Assert.ThrowsAsync<MongoDBIndexMismatchException>(
+            () => manager.EnsureSearchIndexAsync());
+
+        Assert.Contains("found type 'vectorsearch'", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(0, state.UpdateCallCount);
+        Assert.Null(state.CreatedSearchIndex);
+    }
+
+    [Fact]
     public async Task WaitUntilReadyPropagatesCancellation()
     {
         BsonDocument building = RAGIndexFixtures.ValidVectorIndex("facade_vector");

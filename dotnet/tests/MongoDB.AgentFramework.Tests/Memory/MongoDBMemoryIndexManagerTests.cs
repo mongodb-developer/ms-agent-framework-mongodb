@@ -393,6 +393,49 @@ public sealed class MongoDBMemoryIndexManagerTests
     }
 
     [Fact]
+    public async Task EnsureThrowsFailedExceptionForMismatchedDefinitionWithoutAttemptingUpdate()
+    {
+        // Unlike EnsureThrowsFailedExceptionWithoutAutomaticallyRepairingIt above (a Failed index whose definition
+        // still happens to match), here the Failed index's definition also does NOT match (dimensions=99, not the
+        // expected 3). Before the fix, Ensure's reconciliation only inspected isCompatible -- a mismatched
+        // definition -- and would call UpdateAsync attempting to automatically "repair" a terminal Failed build.
+        // Ensure must instead inspect the terminal status first and never attempt an update on a Failed index
+        // regardless of whether its definition happens to be compatible or mismatched.
+        var state = new MemoryCollectionState
+        {
+            SearchIndexes = [MemoryIndexFixtures.ValidVectorIndex(
+                "facade_vector", "embedding", 99, status: "FAILED", queryable: false)],
+        };
+        MongoDBMemoryIndexManager manager = CreateManager(state);
+
+        await Assert.ThrowsAsync<MongoDBIndexFailedException>(() => manager.EnsureIndexAsync());
+
+        Assert.Equal(0, state.UpdateCallCount);
+        Assert.Null(state.CreatedSearchIndex);
+    }
+
+    [Fact]
+    public async Task EnsureThrowsMismatchForWrongIndexTypeWithoutAttemptingUpdate()
+    {
+        // An existing index of the wrong type (here "search" instead of the expected "vectorSearch") must never
+        // be treated as something Ensure can automatically reconcile via UpdateAsync -- the driver-level "update"
+        // call is defined against a specific index, and attempting to push a Vector Search definition onto a
+        // wrong-type index is never a safe automatic action, regardless of what Compare() would otherwise report
+        // about the (irrelevant, wrong-type) index's fields.
+        BsonDocument wrongType = MemoryIndexFixtures.ValidVectorIndex("facade_vector", "embedding", 3);
+        wrongType["type"] = "search";
+        var state = new MemoryCollectionState { SearchIndexes = [wrongType] };
+        MongoDBMemoryIndexManager manager = CreateManager(state);
+
+        MongoDBIndexMismatchException exception = await Assert.ThrowsAsync<MongoDBIndexMismatchException>(
+            () => manager.EnsureIndexAsync());
+
+        Assert.Contains("found type 'search'", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(0, state.UpdateCallCount);
+        Assert.Null(state.CreatedSearchIndex);
+    }
+
+    [Fact]
     public async Task WaitUntilReadyPropagatesCancellation()
     {
         var state = new MemoryCollectionState

@@ -171,20 +171,26 @@ internal static class MongoDBSearchIndexes
 
     /// <summary>
     /// The explicit reconciliation operation (docs/spec/features/index-management.md's <c>ensure expected
-    /// definition</c>): creates the index if missing, or updates it if <paramref name="isCompatible"/> reports it
-    /// does not match -- but never for a status this does not special-case (for example a terminal
-    /// <c>Failed</c> build never triggers an automatic repair attempt here; the state machine requires that to be
-    /// explicit, see <see cref="MongoDBIndexFailedException"/>). After any create/update attempt -- including a
-    /// create that raced a concurrent caller to an "already exists" no-op -- this always re-inspects the index
-    /// and calls <paramref name="validateFinal"/> on its final state before returning it, regardless of whether
-    /// the caller will additionally poll for readiness, so a rival concurrent caller having created an
-    /// incompatible definition is still caught rather than silently accepted.
+    /// definition</c>): creates the index if missing, or updates it if <paramref name="canReconcile"/> reports the
+    /// existing index is safe to automatically reconcile and <paramref name="isCompatible"/> reports it does not
+    /// match. An existing index <paramref name="canReconcile"/> reports as <em>not</em> safe to reconcile (a
+    /// terminal <c>Failed</c> build, or an index of the wrong type -- see <see cref="CanReconcile"/>) is never
+    /// touched by an automatic create/update here: the state machine requires repairing either to be an explicit,
+    /// separate operation (<c>Drop*</c> then <c>Create*</c>, or <c>Update*</c>), never something Ensure silently
+    /// attempts on the caller's behalf (see <see cref="MongoDBIndexFailedException"/>). After any create/update
+    /// attempt -- including a create that raced a concurrent caller to an "already exists" no-op, and including
+    /// leaving a blocked index untouched -- this always re-inspects the index and calls
+    /// <paramref name="validateFinal"/> on its final state before returning it, regardless of whether the caller
+    /// will additionally poll for readiness, so a rival concurrent caller having created an incompatible
+    /// definition (or a pre-existing Failed/wrong-type index) is still caught rather than silently accepted or
+    /// auto-repaired.
     /// </summary>
     public static async Task<BsonDocument> EnsureAsync(
         IMongoSearchIndexManager manager,
         string indexName,
         SearchIndexType type,
         BsonDocument definitionDocument,
+        Func<BsonDocument, bool> canReconcile,
         Func<BsonDocument, bool> isCompatible,
         Action<BsonDocument> validateFinal,
         Func<MongoException, Exception> mapCreateException,
@@ -202,7 +208,7 @@ internal static class MongoDBSearchIndexes
                 mapCreateException,
                 cancellationToken).ConfigureAwait(false);
         }
-        else if (!isCompatible(index))
+        else if (canReconcile(index) && !isCompatible(index))
         {
             await UpdateAsync(manager, indexName, definitionDocument, mapUpdateException, cancellationToken)
                 .ConfigureAwait(false);
@@ -213,6 +219,18 @@ internal static class MongoDBSearchIndexes
         validateFinal(finalIndex);
         return finalIndex;
     }
+
+    /// <summary>
+    /// Whether an existing, already-inspected index is in a state <see cref="EnsureAsync"/> may safely reconcile
+    /// automatically: it must report the expected index type (<paramref name="checkIndexType"/> returning
+    /// <see langword="null"/>) and must not be in a terminal <see cref="MongoDBIndexStatus.Failed"/> build state.
+    /// Both a wrong-type index and a Failed index are always left untouched by Ensure's automatic create/update --
+    /// inspecting whether the *definition* happens to still match is irrelevant for either, since neither will
+    /// ever become ready on its own and both require an explicit, separate repair (drop and recreate, or an
+    /// explicit update) rather than an automatic one performed on the caller's behalf.
+    /// </summary>
+    public static bool CanReconcile(BsonDocument index, Func<BsonDocument, string?> checkIndexType) =>
+        checkIndexType(index) is null && Classify(index) != MongoDBIndexStatus.Failed;
 
     /// <summary>Re-finds an index that a create/update attempt was just made against, failing actionably if it vanished.</summary>
     private static async Task<BsonDocument> RequireReinspectedAsync(
