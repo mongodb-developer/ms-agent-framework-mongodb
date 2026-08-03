@@ -10,7 +10,6 @@ import json
 import logging
 import pickle  # nosec B403 -- restricted unpickling of authorized checkpoint storage
 import time
-from collections import OrderedDict
 from collections.abc import Callable, Mapping, Set
 from dataclasses import dataclass, fields, is_dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -861,45 +860,12 @@ def _canonical_checkpoint_value(
             ]
             pairs.sort(key=lambda pair: _canonical_sort_key(pair[0]))
             return {"type": "mapping", "items": pairs}
-        if type(value) is OrderedDict:
-            _reject_mapping_instance_state(cast(object, value))
-            ordered_mapping = cast(Mapping[object, object], value)
-            return {
-                "type": "ordered_mapping",
-                "class": "collections:OrderedDict",
-                "items": [
-                    [
-                        _canonical_checkpoint_value(
-                            key,
-                            allowed_types=allowed_types,
-                            active_ids=active_ids,
-                        ),
-                        _canonical_checkpoint_value(
-                            item,
-                            allowed_types=allowed_types,
-                            active_ids=active_ids,
-                        ),
-                    ]
-                    for key, item in ordered_mapping.items()
-                ],
-            }
         if isinstance(value, Mapping):
             mapping_object = cast(object, value)
-            mapping_type = type(mapping_object)
-            type_key = _type_key(mapping_type)
-            if (
-                not mapping_type.__module__.startswith("agent_framework.")
-                and type_key not in allowed_types
-            ):
-                raise MongoDBMappingError(
-                    "Checkpoint public state contains unsupported noncanonical "
-                    f"mapping type '{type_key}'; migrate it to dict/OrderedDict "
-                    "before persistence."
-                )
             raise MongoDBSerializationError(
-                "Checkpoint mapping subclass serialization cannot be proven equivalent "
-                f"to canonical entries for '{type_key}'; migrate it to a plain dict "
-                "or exact OrderedDict."
+                "Checkpoint mapping values must be exact built-in dict instances; "
+                f"'{_type_key(type(mapping_object))}' cannot be serialized canonically. "
+                "Migrate it to plain dict/list structures before persistence."
             )
         if isinstance(value, list):
             list_value = cast(list[object], value)
@@ -1082,56 +1048,6 @@ def _counter_update_pipeline(
             }
         },
     ]
-
-
-def _reject_mapping_instance_state(value: object) -> None:
-    try:
-        reduction = value.__reduce_ex__(pickle.HIGHEST_PROTOCOL)
-    except (AttributeError, TypeError, pickle.PickleError) as exc:
-        raise MongoDBSerializationError(
-            "Checkpoint mapping instance state cannot be verified losslessly; "
-            "migrate it to a plain dict or stateless OrderedDict."
-        ) from exc
-    if not isinstance(reduction, tuple) or len(reduction) != 5:
-        raise MongoDBSerializationError(
-            "Checkpoint mapping instance state uses unsupported serialization; "
-            "migrate it to a plain dict or stateless OrderedDict."
-        )
-
-    reducer, arguments, state, list_iterator, dict_iterator = reduction
-    try:
-        serialized_entries = cast(list[object], list(dict_iterator))
-    except (TypeError, ValueError) as exc:
-        raise MongoDBSerializationError(
-            "Checkpoint mapping dict iterator cannot be verified losslessly; "
-            "migrate it to a plain dict or stateless OrderedDict."
-        ) from exc
-    expected_entries = list(cast(Mapping[object, object], value).items())
-    entries_match = len(serialized_entries) == len(expected_entries) and all(
-        _same_mapping_reduction_entry(serialized, expected)
-        for serialized, expected in zip(serialized_entries, expected_entries, strict=True)
-    )
-    if (
-        reducer is not OrderedDict
-        or arguments != ()
-        or state is not None
-        or list_iterator is not None
-        or not entries_match
-    ):
-        raise MongoDBSerializationError(
-            "Checkpoint mapping instance state beyond entries is not canonical; "
-            "migrate it to a plain dict or stateless OrderedDict."
-        )
-
-
-def _same_mapping_reduction_entry(
-    serialized: object,
-    expected: tuple[object, object],
-) -> bool:
-    if not isinstance(serialized, tuple):
-        return False
-    values = cast(tuple[object, ...], serialized)
-    return len(values) == 2 and values[0] is expected[0] and values[1] is expected[1]
 
 
 def _encode_cursor(sequence: int, checkpoint_id: str) -> str:

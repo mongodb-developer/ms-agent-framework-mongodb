@@ -1,5 +1,6 @@
 import asyncio
 import copy
+import copyreg
 import json
 import os
 import pickle
@@ -534,7 +535,7 @@ async def test_save_is_idempotent_and_rejects_same_id_with_conflicting_payload()
 
 
 @pytest.mark.asyncio
-async def test_plain_dict_order_is_logically_insensitive_but_ordered_dict_conflicts() -> None:
+async def test_only_exact_plain_dict_mapping_values_are_supported() -> None:
     collection = FakeCollection()
     storage = MongoDBCheckpointStorage(cast(Any, collection), options=options())
     plain = checkpoint("plain")
@@ -547,19 +548,53 @@ async def test_plain_dict_order_is_logically_insensitive_but_ordered_dict_confli
     assert await storage.save(reordered_plain) == "plain"
     ordered_instead_of_plain = copy.deepcopy(plain)
     ordered_instead_of_plain.state["mapping"] = OrderedDict([("alpha", 1), ("beta", 2)])
-    with pytest.raises(MongoDBConcurrencyError, match="different payload"):
+    with pytest.raises(MongoDBSerializationError, match="plain dict/list"):
         await storage.save(ordered_instead_of_plain)
 
     ordered = checkpoint("ordered")
     ordered.state["mapping"] = OrderedDict([("alpha", 1), ("beta", 2)])
-    assert await storage.save(ordered) == "ordered"
-    assert await storage.save(copy.deepcopy(ordered)) == "ordered"
-    reversed_order = copy.deepcopy(ordered)
-    reversed_order.state["mapping"] = OrderedDict([("beta", 2), ("alpha", 1)])
+    with pytest.raises(MongoDBSerializationError, match="plain dict/list"):
+        await storage.save(ordered)
+    assert {item["checkpoint_id"] for item in checkpoint_documents(collection)} == {"plain"}
+    counter = next(
+        item for item in collection.documents if item["_kind"] == "workflow_checkpoint_counter"
+    )
+    assert counter["sequence"] == 1
 
-    assert ordered.state["mapping"] != reversed_order.state["mapping"]
-    with pytest.raises(MongoDBConcurrencyError, match="different payload"):
-        await storage.save(reversed_order)
+
+@pytest.mark.asyncio
+async def test_exact_dict_serialization_ignores_copyreg_registration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    baseline_collection = FakeCollection()
+    registered_collection = FakeCollection()
+    original = checkpoint("copyreg")
+    original.state["mapping"] = {"alpha": 1, "beta": [2, 3]}
+    baseline = MongoDBCheckpointStorage(
+        cast(Any, baseline_collection),
+        options=options(),
+    )
+    registered = MongoDBCheckpointStorage(
+        cast(Any, registered_collection),
+        options=options(),
+    )
+    assert await baseline.save(original) == "copyreg"
+    baseline_document = checkpoint_documents(baseline_collection)[0]
+    reducer_calls: list[dict[Any, Any]] = []
+
+    def divergent_reducer(value: dict[Any, Any]) -> tuple[Any, ...]:
+        reducer_calls.append(value)
+        return dict, ()
+
+    monkeypatch.setitem(copyreg.dispatch_table, dict, divergent_reducer)
+    assert await registered.save(copy.deepcopy(original)) == "copyreg"
+    registered_document = checkpoint_documents(registered_collection)[0]
+
+    assert reducer_calls == []
+    assert registered_document["payload_hash"] == baseline_document["payload_hash"]
+    assert bytes(registered_document["checkpoint"]) == bytes(baseline_document["checkpoint"])
+    restored = await registered.load("copyreg")
+    assert restored.state["mapping"] == {"alpha": 1, "beta": [2, 3]}
 
 
 @pytest.mark.asyncio
@@ -569,7 +604,7 @@ async def test_unsupported_mapping_subclass_has_stable_migration_guidance() -> N
     invalid = checkpoint("unsupported-mapping")
     invalid.state["mapping"] = UnsupportedMapping(alpha=1)
 
-    with pytest.raises(MongoDBMappingError, match="noncanonical.*migrate"):
+    with pytest.raises(MongoDBSerializationError, match="plain dict/list"):
         await storage.save(invalid)
     assert collection.documents == []
 
@@ -597,12 +632,12 @@ async def test_mapping_instance_state_is_rejected_before_persistence(
 
     with pytest.raises(
         MongoDBSerializationError,
-        match="mapping (instance state|subclass).*migrate",
+        match="plain dict/list",
     ):
         await storage.save(first)
     with pytest.raises(
         MongoDBSerializationError,
-        match="mapping (instance state|subclass).*migrate",
+        match="plain dict/list",
     ):
         await storage.save(second)
     assert collection.documents == []
@@ -619,7 +654,7 @@ async def test_stateless_allowlisted_mapping_subclass_is_conservatively_rejected
     valid = checkpoint("stateless-mapping")
     valid.state["mapping"] = StatefulMapping(alpha=1)
 
-    with pytest.raises(MongoDBSerializationError, match="mapping subclass.*migrate"):
+    with pytest.raises(MongoDBSerializationError, match="plain dict/list"):
         await storage.save(valid)
     assert collection.documents == []
 
@@ -641,9 +676,9 @@ async def test_mapping_dict_iterator_cannot_hide_instance_state() -> None:
 
     assert first_mapping.items() == second.state["mapping"].items()
     assert pickle.loads(pickle.dumps(first_mapping)).label == "first"
-    with pytest.raises(MongoDBSerializationError, match="mapping subclass.*migrate"):
+    with pytest.raises(MongoDBSerializationError, match="plain dict/list"):
         await storage.save(first)
-    with pytest.raises(MongoDBSerializationError, match="mapping subclass.*migrate"):
+    with pytest.raises(MongoDBSerializationError, match="plain dict/list"):
         await storage.save(second)
     assert collection.documents == []
 

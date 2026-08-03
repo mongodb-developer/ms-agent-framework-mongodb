@@ -86,19 +86,19 @@ Each immutable checkpoint document is:
 The framework checkpoint ID is preserved exactly, while `_id` is deterministic
 for the complete scope and ID. Idempotency hashes use a versioned canonical
 logical representation of the public checkpoint dictionary rather than pickle
-bytes. Exact `dict` values are explicitly order-insensitive because their public
-checkpoint meaning is key/value state. `OrderedDict` carries its fully qualified
-type and entry sequence, so a reversed order conflicts; allowlisted/framework
-mapping subclasses are conservatively rejected even when allowlisted because
-arbitrary reductions cannot be proven equivalent to `.items()`. Exact
-`OrderedDict` is accepted only when its complete lossless pickle reduction has
-the standard constructor and arguments, no object or list state, exactly one
-dict iterator equal to the canonical entries, and no extra state-setter field.
-Attributes, assigned slots, constructor state such as a `defaultdict` factory,
-extra dict-iterator values, or a custom state setter raise
-`MongoDBSerializationError` before sequence allocation, with migration guidance
-to a plain `dict` or exact stateless `OrderedDict`. Sets are stably ordered,
-scalar and collection types carry explicit
+bytes. Exact built-in `dict` is the only supported mapping type, and its values
+are explicitly order-insensitive because their public checkpoint meaning is
+key/value state. `OrderedDict` and every mapping subclass are rejected before
+sequence allocation with `MongoDBSerializationError`, even when allowlisted.
+Callers must migrate them to plain `dict`/`list` structures. This intentionally
+eliminates instance reducer, iterator-state, `copyreg`, and concrete mapping
+semantics from the canonical contract. CPython's exact-dict pickle path ignores
+attempted `copyreg.dispatch_table` registrations; unit coverage installs a
+divergent reducer and proves the stored pickle bytes and canonical hash remain
+unchanged. The same test is an environment gate: an interpreter where the
+registration changes exact-dict serialization fails validation rather than
+silently persisting divergent state. Sets are stably ordered, scalar and
+collection types carry explicit
 tags, and framework/application dataclasses or public `to_dict` values carry
 stable type identities. The same logical checkpoint therefore hashes
 identically across processes and `PYTHONHASHSEED` values without discarding

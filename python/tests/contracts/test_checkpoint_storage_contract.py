@@ -45,12 +45,13 @@ def test_checkpoint_storage_contract_matches_public_surface() -> None:
     assert not contract["retention"]["ttl_deletion_order_dependency"]
     assert contract["retention"]["authorized_clear_run_deletes_counter"]
     assert contract["canonical_mappings"] == {
+        "supported_type": "exact_builtin_dict_only",
         "dict_order": "insensitive",
-        "ordered_dict_order": "sensitive_with_type_tag",
-        "ordered_dict_reduction": "exact_entries_without_additional_fields",
+        "dict_copyreg_registration": "ignored_and_verified",
+        "ordered_dict": "reject_with_serialization_error",
         "allowlisted_mapping_subclass": "reject_with_serialization_error",
         "instance_state_beyond_entries": "reject_with_serialization_error",
-        "unsupported_subclass": "reject_with_migration_guidance",
+        "unsupported_subclass": "reject_with_serialization_error",
     }
     assert [item["name"] for item in contract["indexes"]] == [
         "checkpoint_scope_identity",
