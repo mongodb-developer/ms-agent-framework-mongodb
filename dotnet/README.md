@@ -237,13 +237,19 @@ await using var runtime = new MongoDBMemoryIndexManager(client, "my_database", "
 MongoDBIndexComparison comparison = await runtime.ValidateIndexAsync();
 ```
 
-Every `Get*`/`List*`/`Validate*` method never mutates MongoDB; only `Ensure*`/`Update*`/`Drop*` do, and only when
-explicitly called -- never from a constructor or a framework lifecycle hook. Comparison is semantic and
+Every `Get*`/`List*`/`Validate*` method never mutates MongoDB; only `Create*`/`Ensure*`/`Update*`/`Drop*` do, and only
+when explicitly called -- never from a constructor or a framework lifecycle hook. `Create*` is a strict, non-idempotent
+create-only operation (throws `MongoDBIndexAlreadyExistsException` if the index already exists); `Ensure*` is the
+idempotent reconciliation operation shown above (creates if missing, updates if mismatched) and is what a deployment
+retry loop should call. Both always re-inspect and validate the index's final state after any create/update attempt,
+so a rival concurrent creator winning with an incompatible definition is still caught. Comparison is semantic and
 order-insensitive, and distinguishes an actionable mismatch (`MongoDBIndexComparison.Mismatches`) from a merely
-informational compatible difference (`CompatibleDifferences`). `Ensure*`/`Drop*` are idempotent under concurrent
-callers; `WaitUntilReadyAsync`/`Ensure*(waitUntilReady: true)` poll with a bounded, cancellable exponential backoff.
-A connected identity lacking index-management privileges raises `MongoDBIndexPrivilegeException` distinctly from a
-generic deployment error.
+informational compatible difference (`CompatibleDifferences`). A terminal `Failed` build is never automatically
+retried or repaired -- it surfaces immediately as `MongoDBIndexFailedException`, never enters the polling loop, and
+`Ensure*` never treats it as something to auto-update. `WaitUntilReadyAsync`/`Ensure*(waitUntilReady: true)` poll
+with a bounded, cancellable exponential backoff whose per-attempt deadline bounds even a hung underlying call,
+distinguishing the caller's own cancellation from the bounded timeout. A connected identity lacking
+index-management privileges raises `MongoDBIndexPrivilegeException` distinctly from a generic deployment error.
 
 **Least privilege:** runtime identities (what `MongoDBMemoryProvider`/`MongoDBRAGProvider` connect with) should only
 ever need collection read/write/aggregate plus Search query permissions -- never `createSearchIndexes`/
