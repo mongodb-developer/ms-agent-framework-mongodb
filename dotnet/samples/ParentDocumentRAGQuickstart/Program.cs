@@ -39,23 +39,22 @@ var vectorDefinition = new MongoDBVectorSearchIndexDefinition(
     filterFieldPaths: [ChunkRecord.TenantIdFieldName, ChunkRecord.RecordTypeFieldName]);
 await using var indexManager = new MongoDBRAGIndexManager(collection, vectorDefinition);
 
-// Because the index name above is always freshly generated, it should never already exist -- but this run still
-// checks rather than assumes, and only tracks (and later drops) the index if this run is the one that created it.
-// A pre-existing index of the same generated name (astronomically unlikely) is validated instead of re-created,
-// and is deliberately left alone by cleanup.
-bool indexCreatedByThisRun;
-if (await indexManager.GetVectorSearchIndexAsync() is null)
-{
-    Console.WriteLine("Creating this run's own Vector Search index (this can take a while on a fresh cluster)...");
-    await indexManager.EnsureVectorSearchIndexAsync(waitUntilReady: true, timeout: TimeSpan.FromMinutes(3));
-    indexCreatedByThisRun = true;
-}
-else
-{
-    Console.WriteLine("This run's generated index name already exists; validating rather than re-creating it.");
-    await indexManager.ValidateVectorSearchIndexAsync();
-    indexCreatedByThisRun = false;
-}
+// GeneratedIndexProvisioner records ownership *before* attempting to create the index (not only after success),
+// so a failure partway through provisioning (e.g. the index is created but the bounded wait for READY times out)
+// still leaves ownership correctly recorded, and the SampleCleanupOrchestration.RunAsync call below still
+// attempts to drop it rather than leaking it.
+var provisioner = new GeneratedIndexProvisioner(
+    existsAsync: async ct => await indexManager.GetVectorSearchIndexAsync(ct) is not null,
+    ensureAsync: async ct =>
+    {
+        Console.WriteLine("Creating this run's own Vector Search index (this can take a while on a fresh cluster)...");
+        await indexManager.EnsureVectorSearchIndexAsync(waitUntilReady: true, timeout: TimeSpan.FromMinutes(3), cancellationToken: ct);
+    },
+    validateAsync: async ct =>
+    {
+        Console.WriteLine("This run's generated index name already exists; validating rather than re-creating it.");
+        await indexManager.ValidateVectorSearchIndexAsync(cancellationToken: ct);
+    });
 
 var store = new MongoChunkStore(collection);
 var pipeline = new ParentDocumentIngestionPipeline(
@@ -63,61 +62,73 @@ var pipeline = new ParentDocumentIngestionPipeline(
     new BatchEmbedder(embeddingGenerator, dimensions: 3),
     new ChunkingOptions { WindowSize = 80, OverlapSize = 15 });
 
-try
-{
-    Console.WriteLine("Ingesting one parent document plus its embedded child chunks.");
-    var document = new SourceDocument(
-        TenantId,
-        SourceId,
-        "Widgets ship in blue by default. Gadgets ship in red by default. This parent document links both facts " +
-            "together, along with the shipping policy details a retrieved child chunk alone would not carry.",
-        Title: "Shipping colors reference",
-        Url: "https://example.test/shipping-colors");
-    IngestionResult result = await pipeline.IngestAsync(document);
-    Console.WriteLine($"  upserted={result.ChunksUpserted} unchanged={result.ChunksUnchanged} deleted={result.ChunksDeleted}");
-
-    var searchOptions = new MongoDBRAGProviderOptions
+// The outer try/finally boundary starts *before* provisioning (via SampleCleanupOrchestration.RunAsync wrapping
+// the body below), not only around ingestion/search: if provisioning itself throws after having created the
+// index (see GeneratedIndexProvisioner above), cleanup still runs and still attempts to drop it. Cleanup steps
+// are each attempted independently -- an index-drop failure never prevents the document-delete attempt, and vice
+// versa -- and a primary body failure is never silently hidden by a later cleanup failure.
+await SampleCleanupOrchestration.RunAsync(
+    body: async () =>
     {
-        SearchMode = MongoDBSearchMode.VectorAnn,
-        VectorIndexName = vectorIndexName,
-        TopK = 5,
-        MetadataFieldNames = [ChunkRecord.ParentIdFieldName],
-        // The mandatory filter is the sole authorization boundary here: it constrains Vector Search to this
-        // tenant's child records only, applied inside $vectorSearch itself, not as an application-side post-filter.
-        MandatoryFilter = MongoDBRAGFilter.And(
-            MongoDBRAGFilter.Equal(ChunkRecord.TenantIdFieldName, TenantId),
-            MongoDBRAGFilter.Equal(ChunkRecord.RecordTypeFieldName, ChunkRecord.ChildRecordType)),
-    };
-    await using var ragProvider = new MongoDBRAGProvider(
-        client, databaseName, collectionName, embeddingGenerator, vectorDimensions: 3, searchOptions);
-    await using var childSearcher = new MongoDBRAGChildChunkSearcher(ragProvider);
-    var parentLookup = new MongoParentLookup(collection);
-    var retriever = new ParentDocumentRetriever(childSearcher, parentLookup, TenantId, maxParents: 5);
+        await provisioner.ProvisionAsync();
 
-    Console.WriteLine();
-    Console.WriteLine("Searching child chunks and hydrating bounded, de-duplicated parents:");
-    IReadOnlyList<ParentSearchResult> results = await PollUntilNonEmptyAsync(
-        retriever, "What color do widgets ship in?", TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(1));
-    foreach (ParentSearchResult parent in results)
-    {
-        Console.WriteLine($"  [{parent.BestChildScore:F3}] {parent.Content} (source: {parent.SourceName ?? "n/a"})");
-    }
-}
-finally
-{
-    Console.WriteLine();
-    Console.WriteLine("Cleaning up this quickstart's own chunks.");
-    IReadOnlyDictionary<string, string> remainingHashes = await store.GetExistingHashesAsync(TenantId, SourceId);
-    int deletedCount = await store.DeleteAsync(TenantId, SourceId, [.. remainingHashes.Keys]);
-    Console.WriteLine($"  deleted={deletedCount}");
+        Console.WriteLine("Ingesting one parent document plus its embedded child chunks.");
+        var document = new SourceDocument(
+            TenantId,
+            SourceId,
+            "Widgets ship in blue by default. Gadgets ship in red by default. This parent document links both facts " +
+                "together, along with the shipping policy details a retrieved child chunk alone would not carry.",
+            Title: "Shipping colors reference",
+            Url: "https://example.test/shipping-colors");
+        IngestionResult result = await pipeline.IngestAsync(document);
+        Console.WriteLine($"  upserted={result.ChunksUpserted} unchanged={result.ChunksUnchanged} deleted={result.ChunksDeleted}");
 
-    // The index is dropped only if this run created it -- never an arbitrary configured or pre-existing index.
-    if (indexCreatedByThisRun)
+        var searchOptions = new MongoDBRAGProviderOptions
+        {
+            SearchMode = MongoDBSearchMode.VectorAnn,
+            VectorIndexName = vectorIndexName,
+            TopK = 5,
+            MetadataFieldNames = [ChunkRecord.ParentIdFieldName],
+            // The mandatory filter is the sole authorization boundary here: it constrains Vector Search to this
+            // tenant's child records only, applied inside $vectorSearch itself, not as an application-side post-filter.
+            MandatoryFilter = MongoDBRAGFilter.And(
+                MongoDBRAGFilter.Equal(ChunkRecord.TenantIdFieldName, TenantId),
+                MongoDBRAGFilter.Equal(ChunkRecord.RecordTypeFieldName, ChunkRecord.ChildRecordType)),
+        };
+        await using var ragProvider = new MongoDBRAGProvider(
+            client, databaseName, collectionName, embeddingGenerator, vectorDimensions: 3, searchOptions);
+        await using var childSearcher = new MongoDBRAGChildChunkSearcher(ragProvider);
+        var parentLookup = new MongoParentLookup(collection);
+        var retriever = new ParentDocumentRetriever(childSearcher, parentLookup, TenantId, maxParents: 5);
+
+        Console.WriteLine();
+        Console.WriteLine("Searching child chunks and hydrating bounded, de-duplicated parents:");
+        IReadOnlyList<ParentSearchResult> results = await PollUntilNonEmptyAsync(
+            retriever, "What color do widgets ship in?", TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(1));
+        foreach (ParentSearchResult parent in results)
+        {
+            Console.WriteLine($"  [{parent.BestChildScore:F3}] {parent.Content} (source: {parent.SourceName ?? "n/a"})");
+        }
+    },
+    async () =>
     {
-        Console.WriteLine("Cleaning up this run's own Vector Search index.");
-        await indexManager.DropVectorSearchIndexAsync();
-    }
-}
+        Console.WriteLine();
+        Console.WriteLine("Cleaning up this quickstart's own chunks.");
+        IReadOnlyDictionary<string, string> remainingHashes = await store.GetExistingHashesAsync(TenantId, SourceId);
+        int deletedCount = await store.DeleteAsync(TenantId, SourceId, [.. remainingHashes.Keys]);
+        Console.WriteLine($"  deleted={deletedCount}");
+    },
+    async () =>
+    {
+        // The index is dropped only if this run created it -- never an arbitrary configured or pre-existing
+        // index. DropVectorSearchIndexAsync is itself a safe no-op if the index turns out to be absent (for
+        // example if creation never actually got far enough to succeed).
+        if (provisioner.CreatedByThisRun)
+        {
+            Console.WriteLine("Cleaning up this run's own Vector Search index.");
+            await indexManager.DropVectorSearchIndexAsync();
+        }
+    });
 
 /// <summary>
 /// Bounded polling that repeatedly invokes <see cref="ParentDocumentRetriever.SearchAsync"/> until it returns a

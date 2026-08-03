@@ -10,8 +10,10 @@ namespace MongoDB.AgentFramework.Samples.Ingestion.Tests;
 /// <see cref="MongoDBRAGChildChunkSearcher"/> wrapping a real <see cref="MongoDBRAGProvider"/>, and hydrates the
 /// bounded, de-duplicated, tenant-scoped parent through <see cref="MongoParentLookup"/> and
 /// <see cref="ParentDocumentRetriever"/>. Index provisioning uses the existing public
-/// <see cref="MongoDBRAGIndexManager"/> and is explicitly torn down in a <c>finally</c> block, and every document
-/// written carries a unique, test-owned source ID prefix so concurrent runs never collide.
+/// <see cref="MongoDBRAGIndexManager"/> via <see cref="GeneratedIndexProvisioner"/> (ownership recorded before the
+/// create attempt) and cleanup runs through <see cref="SampleCleanupOrchestration"/> (exception-safe from before
+/// provisioning, every cleanup step always attempted), and every document written carries a unique, test-owned
+/// source ID prefix so concurrent runs never collide.
 /// </summary>
 public sealed class ParentDocumentSmokeIntegrationTests
 {
@@ -45,55 +47,79 @@ public sealed class ParentDocumentSmokeIntegrationTests
             new BatchEmbedder(new FixedVectorEmbeddingGenerator(), dimensions: 3),
             new ChunkingOptions { WindowSize = 60, OverlapSize = 10 });
 
-        try
-        {
-            await indexManager.EnsureVectorSearchIndexAsync(waitUntilReady: true, timeout: TimeSpan.FromMinutes(3));
+        // GeneratedIndexProvisioner records ownership *before* attempting to create the index (not only after
+        // success), so a failure partway through provisioning (e.g. the index is created but the bounded wait
+        // for READY times out) still leaves ownership correctly recorded, and the
+        // SampleCleanupOrchestration.RunAsync call below still attempts to drop it rather than leaking it.
+        var provisioner = new GeneratedIndexProvisioner(
+            existsAsync: async ct => await indexManager.GetVectorSearchIndexAsync(ct) is not null,
+            ensureAsync: ct => indexManager.EnsureVectorSearchIndexAsync(waitUntilReady: true, timeout: TimeSpan.FromMinutes(3), cancellationToken: ct),
+            validateAsync: ct => indexManager.ValidateVectorSearchIndexAsync(cancellationToken: ct));
 
-            var document = new SourceDocument(
-                tenantId,
-                sourceId,
-                "Widgets ship in blue by default. Gadgets ship in a different color entirely. " +
-                    "This parent document links both facts together for attribution.",
-                Title: "Shipping colors reference");
-            await pipeline.IngestAsync(document);
-
-            var searchOptions = new MongoDBRAGProviderOptions
+        // The outer try/finally boundary starts *before* provisioning (via SampleCleanupOrchestration.RunAsync
+        // wrapping the body below), not only around ingestion/search: if provisioning itself throws after having
+        // created the index, cleanup still runs and still attempts to drop it. Cleanup steps are each attempted
+        // independently -- an index-drop failure never prevents the document-delete attempt, and vice versa --
+        // and a primary body failure is never silently hidden by a later cleanup failure.
+        await SampleCleanupOrchestration.RunAsync(
+            body: async () =>
             {
-                SearchMode = MongoDBSearchMode.VectorAnn,
-                VectorIndexName = vectorIndexName,
-                TopK = 5,
-                MetadataFieldNames = [ChunkRecord.ParentIdFieldName],
-                MandatoryFilter = MongoDBRAGFilter.And(
-                    MongoDBRAGFilter.Equal(ChunkRecord.TenantIdFieldName, tenantId),
-                    MongoDBRAGFilter.Equal(ChunkRecord.RecordTypeFieldName, ChunkRecord.ChildRecordType)),
-            };
-            await using var ragProvider = new MongoDBRAGProvider(
-                client,
-                databaseName,
-                collectionName,
-                new FixedVectorEmbeddingGenerator(),
-                vectorDimensions: 3,
-                searchOptions);
-            await using var childSearcher = new MongoDBRAGChildChunkSearcher(ragProvider);
-            var parentLookup = new MongoParentLookup(collection);
-            var retriever = new ParentDocumentRetriever(childSearcher, parentLookup, tenantId);
+                await provisioner.ProvisionAsync();
 
-            IReadOnlyList<ParentSearchResult> results = await PollUntilNonEmptyAsync(
-                retriever, "What color do widgets ship in?", TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(1));
+                var document = new SourceDocument(
+                    tenantId,
+                    sourceId,
+                    "Widgets ship in blue by default. Gadgets ship in a different color entirely. " +
+                        "This parent document links both facts together for attribution.",
+                    Title: "Shipping colors reference");
+                await pipeline.IngestAsync(document);
 
-            Assert.NotEmpty(results);
-            ParentSearchResult hydratedParent = Assert.Single(results);
-            Assert.Contains("Widgets ship in blue", hydratedParent.Content, StringComparison.Ordinal);
-            Assert.Equal("Shipping colors reference", hydratedParent.SourceName);
-        }
-        finally
-        {
-            await store.DeleteAsync(
-                tenantId,
-                sourceId,
-                (await store.GetExistingHashesAsync(tenantId, sourceId)).Keys.ToArray());
-            await indexManager.DropVectorSearchIndexAsync();
-        }
+                var searchOptions = new MongoDBRAGProviderOptions
+                {
+                    SearchMode = MongoDBSearchMode.VectorAnn,
+                    VectorIndexName = vectorIndexName,
+                    TopK = 5,
+                    MetadataFieldNames = [ChunkRecord.ParentIdFieldName],
+                    MandatoryFilter = MongoDBRAGFilter.And(
+                        MongoDBRAGFilter.Equal(ChunkRecord.TenantIdFieldName, tenantId),
+                        MongoDBRAGFilter.Equal(ChunkRecord.RecordTypeFieldName, ChunkRecord.ChildRecordType)),
+                };
+                await using var ragProvider = new MongoDBRAGProvider(
+                    client,
+                    databaseName,
+                    collectionName,
+                    new FixedVectorEmbeddingGenerator(),
+                    vectorDimensions: 3,
+                    searchOptions);
+                await using var childSearcher = new MongoDBRAGChildChunkSearcher(ragProvider);
+                var parentLookup = new MongoParentLookup(collection);
+                var retriever = new ParentDocumentRetriever(childSearcher, parentLookup, tenantId);
+
+                IReadOnlyList<ParentSearchResult> results = await PollUntilNonEmptyAsync(
+                    retriever, "What color do widgets ship in?", TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(1));
+
+                Assert.NotEmpty(results);
+                ParentSearchResult hydratedParent = Assert.Single(results);
+                Assert.Contains("Widgets ship in blue", hydratedParent.Content, StringComparison.Ordinal);
+                Assert.Equal("Shipping colors reference", hydratedParent.SourceName);
+            },
+            async () =>
+            {
+                await store.DeleteAsync(
+                    tenantId,
+                    sourceId,
+                    (await store.GetExistingHashesAsync(tenantId, sourceId)).Keys.ToArray());
+            },
+            async () =>
+            {
+                // The index is dropped only if this run created it. DropVectorSearchIndexAsync is itself a safe
+                // no-op if the index turns out to be absent (for example if creation never actually got far
+                // enough to succeed).
+                if (provisioner.CreatedByThisRun)
+                {
+                    await indexManager.DropVectorSearchIndexAsync();
+                }
+            });
     }
 
     /// <summary>
