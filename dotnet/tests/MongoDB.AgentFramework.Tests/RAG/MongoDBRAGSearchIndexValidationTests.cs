@@ -254,7 +254,7 @@ public sealed class MongoDBRAGSearchIndexValidationTests
                                         "text", new BsonArray
                                         {
                                             new BsonDocument("type", "number"),
-                                            new BsonDocument("type", "token"),
+                                            new BsonDocument("type", "string"),
                                         }
                                     },
                                 }
@@ -266,7 +266,7 @@ public sealed class MongoDBRAGSearchIndexValidationTests
         MongoDBRAGProvider provider = CreateProvider(state);
 
         // Atlas Search supports mapping a single field to multiple type definitions simultaneously (e.g. both
-        // "number" and "token"); this is text-compatible because at least one applicable definition is.
+        // "number" and "string"); this is text-compatible because at least one applicable definition is.
         await provider.ValidateSearchIndexAsync();
     }
 

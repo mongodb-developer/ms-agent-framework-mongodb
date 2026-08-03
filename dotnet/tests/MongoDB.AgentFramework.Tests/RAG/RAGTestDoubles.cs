@@ -65,6 +65,9 @@ internal sealed class RecordingEmbeddingGenerator :
 
 internal sealed class RAGCollectionState
 {
+    /// <summary>Guards <see cref="SearchIndexes"/> mutation so concurrent Ensure calls race deterministically.</summary>
+    public object SearchIndexLock { get; } = new();
+
     public List<BsonDocument> AggregateStages { get; } = [];
 
     public List<BsonDocument> Results { get; set; } = [];
@@ -78,6 +81,31 @@ internal sealed class RAGCollectionState
     public Exception? SearchIndexListException { get; set; }
 
     public int SearchIndexListCallCount { get; set; }
+
+    /// <summary>Records the <see cref="CancellationToken"/> passed to every ListAsync call, in call order, so a
+    /// test can prove the per-attempt bounded-polling token (rather than the caller's original token) actually
+    /// reaches this inspection.</summary>
+    public List<CancellationToken> SearchIndexListTokens { get; } = [];
+
+    public MongoDB.Driver.CreateSearchIndexModel? CreatedSearchIndex { get; set; }
+
+    public int CreateOneCallCount { get; set; }
+
+    public Exception? CreateException { get; set; }
+
+    public string? DroppedIndexName { get; set; }
+
+    public int DropOneCallCount { get; set; }
+
+    public Exception? DropException { get; set; }
+
+    public string? UpdatedIndexName { get; set; }
+
+    public BsonDocument? UpdatedDefinition { get; set; }
+
+    public int UpdateCallCount { get; set; }
+
+    public Exception? UpdateException { get; set; }
 
     /// <summary>The fake <c>buildInfo</c> command result used by the Hybrid server-version capability check.</summary>
     public BsonDocument BuildInfoResult { get; set; } = new("version", "8.0.0");
@@ -210,6 +238,8 @@ internal class RAGSearchIndexManagerProxy : DispatchProxy
         if (targetMethod!.Name == "ListAsync")
         {
             State.SearchIndexListCallCount++;
+            CancellationToken token = args?.OfType<CancellationToken>().FirstOrDefault() ?? default;
+            State.SearchIndexListTokens.Add(token);
             if (State.SearchIndexListException is not null)
             {
                 return Task.FromException<IAsyncCursor<BsonDocument>>(State.SearchIndexListException);
@@ -222,6 +252,61 @@ internal class RAGSearchIndexManagerProxy : DispatchProxy
 
             return Task.FromResult<IAsyncCursor<BsonDocument>>(
                 new ListCursor<BsonDocument>(State.SearchIndexes));
+        }
+
+        if (targetMethod.Name == "CreateOneAsync" &&
+            args![0] is MongoDB.Driver.CreateSearchIndexModel model)
+        {
+            lock (State.SearchIndexLock)
+            {
+                State.CreateOneCallCount++;
+                if (State.CreateException is not null)
+                {
+                    return Task.FromException<string>(State.CreateException);
+                }
+
+                if (State.SearchIndexes.Any(index => index.GetValue("name", "").AsString == model.Name))
+                {
+                    // A concurrent caller already won the race to create this index; the real server would
+                    // reject this second attempt as "already exists".
+                    return Task.FromException<string>(RAGIndexFixtures.CommandException(68, "Index already exists"));
+                }
+
+                bool isVector = model.Type == MongoDB.Driver.SearchIndexType.VectorSearch;
+                State.CreatedSearchIndex = model;
+                State.SearchIndexes =
+                [
+                    .. State.SearchIndexes,
+                    new BsonDocument
+                    {
+                        { "name", model.Name },
+                        { "type", isVector ? "vectorSearch" : "search" },
+                        { "status", "READY" },
+                        { "queryable", true },
+                        { "latestDefinition", model.Definition },
+                    },
+                ];
+                return Task.FromResult(model.Name);
+            }
+        }
+
+        if (targetMethod.Name == "DropOneAsync")
+        {
+            State.DropOneCallCount++;
+            State.DroppedIndexName = (string)args![0]!;
+            return State.DropException is not null
+                ? Task.FromException(State.DropException)
+                : Task.CompletedTask;
+        }
+
+        if (targetMethod.Name == "UpdateAsync")
+        {
+            State.UpdateCallCount++;
+            State.UpdatedIndexName = (string)args![0]!;
+            State.UpdatedDefinition = (BsonDocument)args[1]!;
+            return State.UpdateException is not null
+                ? Task.FromException(State.UpdateException)
+                : Task.CompletedTask;
         }
 
         throw new NotSupportedException($"Unexpected search-index call: {targetMethod}");

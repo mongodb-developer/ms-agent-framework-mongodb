@@ -1,5 +1,4 @@
 using System.Globalization;
-using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -8,6 +7,7 @@ using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using MongoDB.AgentFramework.Internal;
+using MongoDB.AgentFramework.Internal.IndexManagement;
 using MongoDB.Bson;
 using MongoDB.Driver;
 
@@ -30,6 +30,7 @@ public sealed class MongoDBMemoryProvider : AIContextProvider, IAsyncDisposable
     private readonly Func<AgentSession?, State> _stateFactory;
     private readonly MongoDBMemoryProviderOptions _options;
     private readonly int _vectorDimensions;
+    private readonly MongoDBVectorSearchIndexDefinition _indexDefinition;
     private readonly OwnedResource<IMongoClient>? _client;
     private readonly ILogger<MongoDBMemoryProvider> _logger;
     private readonly object _retryLock = new();
@@ -101,6 +102,12 @@ public sealed class MongoDBMemoryProvider : AIContextProvider, IAsyncDisposable
         _stateFactory = stateFactory ?? throw new ArgumentNullException(nameof(stateFactory));
         _vectorDimensions = vectorDimensions;
         _logger = logger ?? NullLogger<MongoDBMemoryProvider>.Instance;
+        _indexDefinition = new MongoDBVectorSearchIndexDefinition(
+            _options.IndexName,
+            _options.VectorFieldName,
+            _vectorDimensions,
+            _options.Similarity,
+            ["application_id", "agent_id", "user_id", "session_id"]);
     }
 
     /// <summary>Creates a provider over an injected client, which remains caller-owned.</summary>
@@ -466,38 +473,14 @@ public sealed class MongoDBMemoryProvider : AIContextProvider, IAsyncDisposable
         bool created = index is null;
         if (index is null)
         {
-            var definition = new BsonDocument("fields", new BsonArray
-            {
-                new BsonDocument
-                {
-                    { "type", "vector" }, { "path", _options.VectorFieldName },
-                    { "numDimensions", _vectorDimensions },
-                    { "similarity", _options.Similarity },
-                },
-                new BsonDocument { { "type", "filter" }, { "path", "application_id" } },
-                new BsonDocument { { "type", "filter" }, { "path", "agent_id" } },
-                new BsonDocument { { "type", "filter" }, { "path", "user_id" } },
-                new BsonDocument { { "type", "filter" }, { "path", "session_id" } },
-            });
-            try
-            {
-                await _collection.SearchIndexes.CreateOneAsync(
-                    new CreateSearchIndexModel(
-                        _options.IndexName,
-                        SearchIndexType.VectorSearch,
-                        definition),
-                    cancellationToken).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-                throw;
-            }
-            catch (MongoException exception)
-            {
-                throw new MongoDBPersistenceException(
-                    "MongoDB Memory index creation failed.",
-                    exception);
-            }
+            await MongoDBSearchIndexes.CreateAsync(
+                _collection.SearchIndexes,
+                new CreateSearchIndexModel(
+                    _options.IndexName,
+                    SearchIndexType.VectorSearch,
+                    VectorSearchIndexEquivalence.BuildDefinition(_indexDefinition)),
+                MapCreateException,
+                cancellationToken).ConfigureAwait(false);
         }
 
         if (!waitUntilReady)
@@ -513,36 +496,28 @@ public sealed class MongoDBMemoryProvider : AIContextProvider, IAsyncDisposable
 
         TimeSpan deadline = timeout ?? TimeSpan.FromSeconds(60);
         TimeSpan delay = pollInterval ?? TimeSpan.FromSeconds(1);
-        if (deadline <= TimeSpan.Zero || delay <= TimeSpan.Zero)
-        {
-            throw new MongoDBConfigurationException(
-                "timeout and pollInterval must be positive.");
-        }
 
-        var elapsed = Stopwatch.StartNew();
-        while (true)
-        {
-            try
+        // Delegates to the shared BoundedExponentialPolling primitive (rather than this method's own previous
+        // hand-rolled loop) so this legacy path gets the same per-attempt cancellation-linked deadline as every
+        // other index-readiness wait in this package: a hung MongoDB call inside ValidateVectorSearchIndexAsync
+        // can no longer keep this loop alive past the deadline, even if that call never itself observes
+        // cancellation promptly. initialInterval and maxInterval are both set to the caller's single
+        // pollInterval, preserving this method's original fixed (non-doubling) polling cadence exactly.
+        return await BoundedExponentialPolling.RunAsync(
+            async token =>
             {
-                await ValidateVectorSearchIndexAsync(true, cancellationToken).ConfigureAwait(false);
+                await ValidateVectorSearchIndexAsync(true, token).ConfigureAwait(false);
                 return _options.IndexName;
-            }
-            catch (MongoDBIndexException exception) when (
-                exception is MongoDBIndexNotReadyException ||
-                created && exception is MongoDBIndexMissingException)
-            {
-                TimeSpan remaining = deadline - elapsed.Elapsed;
-                if (remaining <= TimeSpan.Zero)
-                {
-                    throw new MongoDBTimeoutException(
-                        $"Vector Search index '{_options.IndexName}' was not ready before timeout.",
-                        exception);
-                }
-
-                await Task.Delay(remaining < delay ? remaining : delay, cancellationToken)
-                    .ConfigureAwait(false);
-            }
-        }
+            },
+            exception => exception is MongoDBIndexNotReadyException ||
+                (created && exception is MongoDBIndexMissingException),
+            exception => new MongoDBTimeoutException(
+                $"Vector Search index '{_options.IndexName}' was not ready before timeout.",
+                exception),
+            deadline,
+            delay,
+            delay,
+            cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Validates the Vector Search index without mutating MongoDB.</summary>
@@ -550,13 +525,7 @@ public sealed class MongoDBMemoryProvider : AIContextProvider, IAsyncDisposable
         bool requireReady = true,
         CancellationToken cancellationToken = default)
     {
-        BsonDocument? index = await FindIndexAsync(cancellationToken).ConfigureAwait(false);
-        if (index is null)
-        {
-            throw new MongoDBIndexMissingException(
-                $"Vector Search index '{_options.IndexName}' does not exist; create it explicitly.");
-        }
-
+        BsonDocument index = await RequireIndexAsync(cancellationToken).ConfigureAwait(false);
         ValidateIndex(index, requireReady);
     }
 
@@ -741,81 +710,34 @@ public sealed class MongoDBMemoryProvider : AIContextProvider, IAsyncDisposable
         }
     }
 
-    private async Task<BsonDocument?> FindIndexAsync(CancellationToken cancellationToken)
+    private async Task<BsonDocument> RequireIndexAsync(CancellationToken cancellationToken)
     {
-        try
-        {
-            using IAsyncCursor<BsonDocument> cursor =
-                await _collection.SearchIndexes.ListAsync(
-                    _options.IndexName,
-                    cancellationToken: cancellationToken).ConfigureAwait(false);
-            while (await cursor.MoveNextAsync(cancellationToken).ConfigureAwait(false))
-            {
-                BsonDocument? match = cursor.Current.FirstOrDefault(
-                    index => index.GetValue("name", "").AsString == _options.IndexName);
-                if (match is not null)
-                {
-                    return match;
-                }
-            }
-
-            return null;
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
-        catch (MongoException exception)
-        {
-            throw new MongoDBRetrievalException(
-                "MongoDB Memory index inspection failed.",
-                exception);
-        }
+        BsonDocument? index = await FindIndexAsync(cancellationToken).ConfigureAwait(false);
+        return index ?? throw new MongoDBIndexMissingException(
+            $"Vector Search index '{_options.IndexName}' does not exist; create it explicitly.");
     }
 
-    private void ValidateIndex(BsonDocument index, bool requireReady)
-    {
-        if (!string.Equals(
-                index.GetValue("type", "").AsString,
-                "vectorSearch",
-                StringComparison.OrdinalIgnoreCase))
-        {
-            throw new MongoDBIndexMismatchException(
-                $"Search index '{_options.IndexName}' is not a Vector Search index.");
-        }
+    private Task<BsonDocument?> FindIndexAsync(CancellationToken cancellationToken) =>
+        MongoDBSearchIndexes.FindAsync(
+            _collection.SearchIndexes,
+            _options.IndexName,
+            MapInspectionException,
+            cancellationToken);
 
-        BsonDocument definition = index.GetValue(
-            "latestDefinition",
-            index.GetValue("definition", new BsonDocument())).AsBsonDocument;
-        BsonDocument[] fields = definition.GetValue("fields", new BsonArray())
-            .AsBsonArray.Where(static value => value.IsBsonDocument)
-            .Select(static value => value.AsBsonDocument).ToArray();
-        BsonDocument? vector = fields.FirstOrDefault(
-            static field => field.GetValue("type", "") == "vector");
-        string[] filters = fields
-            .Where(static field => field.GetValue("type", "") == "filter")
-            .Select(static field => field.GetValue("path", "").AsString)
-            .ToArray();
-        string[] required = ["application_id", "agent_id", "user_id", "session_id"];
-        if (vector is null ||
-            vector.GetValue("path", "") != _options.VectorFieldName ||
-            vector.GetValue("numDimensions", 0).ToInt32() != _vectorDimensions ||
-            vector.GetValue("similarity", "") != _options.Similarity ||
-            required.Except(filters, StringComparer.Ordinal).Any())
-        {
-            throw new MongoDBIndexMismatchException(
-                $"Vector Search index '{_options.IndexName}' does not match the required Memory definition.");
-        }
+    private void ValidateIndex(BsonDocument index, bool requireReady) =>
+        VectorSearchIndexEquivalence.Validate(index, _indexDefinition, requireReady);
 
-        if (requireReady &&
-            (!string.Equals(index.GetValue("status", "").AsString, "READY",
-                StringComparison.OrdinalIgnoreCase) ||
-             !index.GetValue("queryable", false).ToBoolean()))
-        {
-            throw new MongoDBIndexNotReadyException(
-                $"Vector Search index '{_options.IndexName}' is not queryable.");
-        }
-    }
+    private Exception MapInspectionException(MongoException exception) =>
+        MongoDBSearchIndexes.IsUnauthorized(exception)
+            ? new MongoDBIndexPrivilegeException(
+                $"Not authorized to inspect Vector Search index '{_options.IndexName}'.", exception)
+            : new MongoDBRetrievalException("MongoDB Memory index inspection failed.", exception);
+
+    private Exception MapCreateException(MongoException exception) =>
+        MongoDBSearchIndexes.IsUnauthorized(exception)
+            ? new MongoDBIndexPrivilegeException(
+                $"Not authorized to create Vector Search index '{_options.IndexName}'.", exception)
+            : new MongoDBPersistenceException("MongoDB Memory index creation failed.", exception);
 
     private static bool IsEligible(ChatMessage message) =>
         message is not null &&

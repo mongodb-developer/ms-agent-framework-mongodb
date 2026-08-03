@@ -3,6 +3,7 @@ using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using MongoDB.AgentFramework.Internal;
+using MongoDB.AgentFramework.Internal.IndexManagement;
 using MongoDB.Bson;
 using MongoDB.Driver;
 
@@ -432,6 +433,30 @@ public sealed class MongoDBRAGProvider : IAsyncDisposable
     public bool OwnsClient => _client?.OwnsValue is true;
 
     /// <summary>
+    /// The Vector Search index definition Hybrid's vector branch and <see cref="ValidateHybridSearchCapabilityAsync"/>
+    /// validate against -- similarity is intentionally not compared (see <see cref="MongoDBVectorSearchIndexDefinition.Similarity"/>'s
+    /// remarks) because <c>$rankFusion</c> combines rank order across branches rather than raw similarity scores.
+    /// Not valid to evaluate for a <see cref="MongoDBSearchMode.FullText"/>-only constructed provider (<see cref="_vectorDimensions"/>
+    /// is <c>0</c> in that case); every caller must call <see cref="RequireHybridCapabilityMode"/> first, which
+    /// rejects that construction mode before this is ever evaluated.
+    /// </summary>
+    private MongoDBVectorSearchIndexDefinition VectorIndexDefinition =>
+        new(
+            _options.VectorIndexName,
+            _options.VectorFieldName,
+            _vectorDimensions,
+            similarity: null,
+            filterFieldPaths: [.. RAGFilterFieldReferences.Enumerate(_options.MandatoryFilter)
+                .Select(static reference => reference.FieldPath)]);
+
+    /// <summary>
+    /// The Search index definition <see cref="ValidateSearchIndexAsync"/> and Hybrid's text branch/
+    /// <see cref="ValidateHybridSearchCapabilityAsync"/> validate against.
+    /// </summary>
+    private MongoDBSearchIndexDefinition SearchIndexDefinition =>
+        new(_options.SearchIndexName, _options.SearchTextFieldNames, _options.MandatoryFilter);
+
+    /// <summary>
     /// Validates the <see cref="MongoDBSearchMode.FullText"/> Search index (rag.md's capability matrix, 291-314)
     /// without ever mutating MongoDB: existence, index type, configured field mappings where the definition is
     /// available, and (when <paramref name="requireReady"/>) readiness/queryability. <see cref="SearchAsync"/>
@@ -474,14 +499,15 @@ public sealed class MongoDBRAGProvider : IAsyncDisposable
             return;
         }
 
-        BsonDocument? index = await FindSearchIndexAsync(cancellationToken).ConfigureAwait(false);
-        if (index is null)
-        {
+        BsonDocument index = await MongoDBSearchIndexes.FindAsync(
+            _collection.SearchIndexes,
+            _options.SearchIndexName,
+            MapSearchInspectionException,
+            cancellationToken).ConfigureAwait(false) ??
             throw new MongoDBIndexMissingException(
                 $"Search index '{_options.SearchIndexName}' does not exist; create it explicitly.");
-        }
 
-        ValidateSearchIndexDefinition(index, requireReady);
+        SearchIndexEquivalence.Validate(index, SearchIndexDefinition, requireReady);
         _searchIndexValidation = (TimeProvider.GetUtcNow(), requireReady);
     }
 
@@ -497,9 +523,9 @@ public sealed class MongoDBRAGProvider : IAsyncDisposable
     /// <see cref="HybridCapabilityValidationCacheDuration"/>) so a query does not pay for the extra round trips on
     /// every call; pass <paramref name="refresh"/><c>: true</c> to force a fresh check regardless of the cache.
     /// A result is only cached when every mandatory-filter field could be statically verified -- a dynamic Search
-    /// mapping (see <see cref="IsDynamicMappingEnabled"/>) cannot be checked per field, so in that case (only when
-    /// the filter actually references fields) this method re-validates on every call rather than caching an
-    /// unverifiable authorization surface.
+    /// mapping (see <see cref="SearchIndexComparisonResult.DynamicMappingFieldsUnverified"/>) cannot be checked per
+    /// field, so in that case (only when the filter actually references fields) this method re-validates on every
+    /// call rather than caching an unverifiable authorization surface.
     /// </summary>
     /// <param name="requireReady">
     /// When <c>true</c> (the default), also requires both indexes to report <c>READY</c>/queryable status. A
@@ -538,38 +564,35 @@ public sealed class MongoDBRAGProvider : IAsyncDisposable
 
         await RequireServerVersionAsync(cancellationToken).ConfigureAwait(false);
 
-        BsonDocument? vectorIndex = await FindVectorSearchIndexAsync(cancellationToken).ConfigureAwait(false);
-        if (vectorIndex is null)
-        {
+        BsonDocument vectorIndex = await MongoDBSearchIndexes.FindAsync(
+            _collection.SearchIndexes,
+            _options.VectorIndexName,
+            MapVectorInspectionException,
+            cancellationToken).ConfigureAwait(false) ??
             throw new MongoDBIndexMissingException(
                 $"Vector Search index '{_options.VectorIndexName}' does not exist; create it explicitly.");
-        }
+        VectorSearchIndexEquivalence.Validate(vectorIndex, VectorIndexDefinition, requireReady);
 
-        ValidateVectorSearchIndexDefinition(vectorIndex, requireReady);
-
-        BsonDocument? searchIndex = await FindSearchIndexAsync(cancellationToken).ConfigureAwait(false);
-        if (searchIndex is null)
-        {
+        BsonDocument searchIndex = await MongoDBSearchIndexes.FindAsync(
+            _collection.SearchIndexes,
+            _options.SearchIndexName,
+            MapSearchInspectionException,
+            cancellationToken).ConfigureAwait(false) ??
             throw new MongoDBIndexMissingException(
                 $"Search index '{_options.SearchIndexName}' does not exist; create it explicitly.");
-        }
-
-        ValidateSearchIndexDefinition(searchIndex, requireReady);
-
-        IReadOnlyList<FilterFieldReference> filterFields = RAGFilterFieldReferences.Enumerate(_options.MandatoryFilter);
-        ValidateVectorFilterFields(vectorIndex, filterFields);
-        bool searchFilterFieldsVerified = ValidateSearchFilterFields(searchIndex, filterFields);
+        SearchIndexComparisonResult searchResult = SearchIndexEquivalence.Validate(
+            searchIndex, SearchIndexDefinition, requireReady);
 
         // A dynamic Search mapping cannot be statically checked per referenced field (see
-        // ValidateSearchFilterFields), so a result covering unverified mandatory-filter fields is never cached:
-        // every call re-validates rather than silently trusting an unverifiable authorization surface. If a
-        // prior call had cached success (for example before the Search index's mapping became dynamic), that
+        // SearchIndexEquivalence.Compare), so a result covering unverified mandatory-filter fields is never
+        // cached: every call re-validates rather than silently trusting an unverifiable authorization surface. If
+        // a prior call had cached success (for example before the Search index's mapping became dynamic), that
         // stale cache entry must be explicitly cleared here rather than left in place, or a later plain
         // (non-refresh) call could still short-circuit on it and skip re-validating an authorization surface
         // that is no longer statically verifiable.
-        _hybridCapabilityValidation = searchFilterFieldsVerified
-            ? (TimeProvider.GetUtcNow(), requireReady)
-            : null;
+        _hybridCapabilityValidation = searchResult.DynamicMappingFieldsUnverified
+            ? null
+            : (TimeProvider.GetUtcNow(), requireReady);
     }
 
     /// <summary>
@@ -820,390 +843,23 @@ public sealed class MongoDBRAGProvider : IAsyncDisposable
             : null;
     }
 
-    private async Task<BsonDocument?> FindVectorSearchIndexAsync(CancellationToken cancellationToken)
-    {
-        try
-        {
-            using IAsyncCursor<BsonDocument> cursor = await _collection.SearchIndexes.ListAsync(
-                _options.VectorIndexName,
-                cancellationToken: cancellationToken).ConfigureAwait(false);
-            while (await cursor.MoveNextAsync(cancellationToken).ConfigureAwait(false))
-            {
-                BsonDocument? match = cursor.Current.FirstOrDefault(
-                    index => index.GetValue("name", "").AsString == _options.VectorIndexName);
-                if (match is not null)
-                {
-                    return match;
-                }
-            }
-
-            return null;
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
-        catch (MongoException exception)
-        {
-            throw new MongoDBCapabilityException(
+    private Exception MapVectorInspectionException(MongoException exception) =>
+        MongoDBSearchIndexes.IsUnauthorized(exception)
+            ? new MongoDBIndexPrivilegeException(
+                $"Not authorized to inspect Vector Search index '{_options.VectorIndexName}'.", exception)
+            : new MongoDBCapabilityException(
                 $"Unable to inspect Vector Search index '{_options.VectorIndexName}'; the deployment type or " +
                 "driver/server version may not support $listSearchIndexes.",
                 exception);
-        }
-    }
 
-    /// <summary>
-    /// Validates the Vector Search index used by Hybrid's vector input branch: index type, the configured vector
-    /// field's path and dimension, and (when <paramref name="requireReady"/>) readiness/queryability. Unlike
-    /// Memory's analogous check, similarity metric is not validated here because Hybrid's $rankFusion combines
-    /// rank order across branches rather than raw similarity scores, so a mismatched similarity metric does not
-    /// break correctness the way it would for a raw-score-based caller.
-    /// </summary>
-    private void ValidateVectorSearchIndexDefinition(BsonDocument index, bool requireReady)
-    {
-        if (!string.Equals(index.GetValue("type", "").AsString, "vectorSearch", StringComparison.OrdinalIgnoreCase))
-        {
-            throw new MongoDBIndexMismatchException(
-                $"Vector Search index '{_options.VectorIndexName}' is not a Vector Search index (found type " +
-                $"'{index.GetValue("type", "").AsString}').");
-        }
-
-        BsonDocument definition = index.GetValue(
-            "latestDefinition",
-            index.GetValue("definition", new BsonDocument())).AsBsonDocument;
-        BsonDocument[] fields = definition.GetValue("fields", new BsonArray())
-            .AsBsonArray.Where(static value => value.IsBsonDocument)
-            .Select(static value => value.AsBsonDocument).ToArray();
-        BsonDocument? vectorField = fields.FirstOrDefault(
-            field => field.GetValue("type", "") == "vector" &&
-                     field.GetValue("path", "").AsString == _options.VectorFieldName);
-        if (vectorField is null)
-        {
-            throw new MongoDBIndexMismatchException(
-                $"Vector Search index '{_options.VectorIndexName}' does not map configured field " +
-                $"'{_options.VectorFieldName}' as type 'vector'.");
-        }
-
-        if (vectorField.GetValue("numDimensions", 0).ToInt32() != _vectorDimensions)
-        {
-            throw new MongoDBIndexMismatchException(
-                $"Vector Search index '{_options.VectorIndexName}' field '{_options.VectorFieldName}' has " +
-                $"{vectorField.GetValue("numDimensions", 0).ToInt32()} dimensions; expected {_vectorDimensions}.");
-        }
-
-        if (requireReady &&
-            (!string.Equals(index.GetValue("status", "").AsString, "READY", StringComparison.OrdinalIgnoreCase) ||
-             !index.GetValue("queryable", false).ToBoolean()))
-        {
-            throw new MongoDBIndexNotReadyException(
-                $"Vector Search index '{_options.VectorIndexName}' is not queryable.");
-        }
-    }
-
-    /// <summary>
-    /// Validates that every field referenced by <see cref="MongoDBRAGProviderOptions.MandatoryFilter"/> is
-    /// explicitly indexed as a Vector Search <c>type: "filter"</c> field (rag.md's field-path validation
-    /// requirement). Vector Search index field declarations have no "dynamic" equivalent -- every filterable
-    /// field must be declared -- so this is always fully and definitively checkable; there is no unverified case
-    /// on the vector side, unlike <see cref="ValidateSearchFilterFields"/>.
-    /// </summary>
-    private void ValidateVectorFilterFields(BsonDocument index, IReadOnlyList<FilterFieldReference> references)
-    {
-        if (references.Count == 0)
-        {
-            return;
-        }
-
-        BsonDocument definition = index.GetValue(
-            "latestDefinition",
-            index.GetValue("definition", new BsonDocument())).AsBsonDocument;
-        BsonDocument[] fields = definition.GetValue("fields", new BsonArray())
-            .AsBsonArray.Where(static value => value.IsBsonDocument)
-            .Select(static value => value.AsBsonDocument).ToArray();
-        foreach (FilterFieldReference reference in references)
-        {
-            bool isFilterField = fields.Any(
-                field => string.Equals(field.GetValue("type", "").AsString, "filter", StringComparison.OrdinalIgnoreCase) &&
-                          field.GetValue("path", "").AsString == reference.FieldPath);
-            if (!isFilterField)
-            {
-                throw new MongoDBIndexMismatchException(
-                    $"Vector Search index '{_options.VectorIndexName}' does not map mandatory-filter field " +
-                    $"'{reference.FieldPath}' as type 'filter'; every field referenced by MandatoryFilter must " +
-                    "be explicitly indexed as a Vector Search filter field.");
-            }
-        }
-    }
-
-    private async Task<BsonDocument?> FindSearchIndexAsync(CancellationToken cancellationToken)
-    {
-        try
-        {
-            using IAsyncCursor<BsonDocument> cursor = await _collection.SearchIndexes.ListAsync(
-                _options.SearchIndexName,
-                cancellationToken: cancellationToken).ConfigureAwait(false);
-            while (await cursor.MoveNextAsync(cancellationToken).ConfigureAwait(false))
-            {
-                BsonDocument? match = cursor.Current.FirstOrDefault(
-                    index => index.GetValue("name", "").AsString == _options.SearchIndexName);
-                if (match is not null)
-                {
-                    return match;
-                }
-            }
-
-            return null;
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
-        catch (MongoException exception)
-        {
-            // Unlike Memory's analogous Vector Search inspection, a failure here is treated as a capability gap
-            // rather than a generic retrieval failure: $listSearchIndexes itself can be unsupported by the
-            // deployment type or driver/server version, which is exactly the condition rag.md's capability matrix
-            // asks callers to detect explicitly.
-            throw new MongoDBCapabilityException(
+    private Exception MapSearchInspectionException(MongoException exception) =>
+        MongoDBSearchIndexes.IsUnauthorized(exception)
+            ? new MongoDBIndexPrivilegeException(
+                $"Not authorized to inspect Search index '{_options.SearchIndexName}'.", exception)
+            : new MongoDBCapabilityException(
                 $"Unable to inspect Search index '{_options.SearchIndexName}'; the deployment type or driver/" +
                 "server version may not support $listSearchIndexes.",
                 exception);
-        }
-    }
-
-    /// <summary>
-    /// Validates an Atlas Search index definition. Static (non-dynamic) mappings have shape
-    /// <c>{ mappings: { dynamic: false, fields: { name: { type, ... } } } }</c> -- structurally different from
-    /// Vector Search's flat <c>fields</c> array -- and a dynamic mapping (<c>mappings.dynamic == true</c>) indexes
-    /// every field automatically, so <c>listSearchIndexes</c> provides no per-field enumeration to validate
-    /// against in that case; this is a documented limitation, not a validation gap (see
-    /// docs/development/rag/dotnet-rag-full-text-search.md).
-    /// </summary>
-    private void ValidateSearchIndexDefinition(BsonDocument index, bool requireReady)
-    {
-        if (!string.Equals(index.GetValue("type", "").AsString, "search", StringComparison.OrdinalIgnoreCase))
-        {
-            throw new MongoDBIndexMismatchException(
-                $"Search index '{_options.SearchIndexName}' is not a Search index (found type " +
-                $"'{index.GetValue("type", "").AsString}'); FullText requires a Search index, not a Vector " +
-                "Search index.");
-        }
-
-        BsonDocument definition = index.GetValue(
-            "latestDefinition",
-            index.GetValue("definition", new BsonDocument())).AsBsonDocument;
-        BsonDocument mappings = definition.GetValue("mappings", new BsonDocument()).AsBsonDocument;
-        if (!IsDynamicMappingEnabled(mappings))
-        {
-            BsonDocument fields = mappings.GetValue("fields", new BsonDocument()).AsBsonDocument;
-            foreach (string textField in _options.SearchTextFieldNames)
-            {
-                IReadOnlyList<BsonDocument> definitions = ResolveFieldMappingDefinitions(fields, textField);
-                if (definitions.Count == 0)
-                {
-                    throw new MongoDBIndexMismatchException(
-                        $"Search index '{_options.SearchIndexName}' does not map configured field " +
-                        $"'{textField}'.");
-                }
-
-                if (!definitions.Any(IsTextCompatible))
-                {
-                    string types = string.Join(
-                        ", ", definitions.Select(d => d.GetValue("type", "").AsString));
-                    throw new MongoDBIndexMismatchException(
-                        $"Search index '{_options.SearchIndexName}' maps field '{textField}' to " +
-                        $"'{types}', none of which are text-searchable.");
-                }
-            }
-        }
-
-        if (requireReady &&
-            (!string.Equals(index.GetValue("status", "").AsString, "READY", StringComparison.OrdinalIgnoreCase) ||
-             !index.GetValue("queryable", false).ToBoolean()))
-        {
-            throw new MongoDBIndexNotReadyException(
-                $"Search index '{_options.SearchIndexName}' is not queryable.");
-        }
-    }
-
-    /// <summary>
-    /// Determines whether <c>mappings.dynamic</c> enables automatic field indexing. Atlas Search accepts either a
-    /// plain boolean or an object form (for example selecting a named type set); both mean "every field is indexed
-    /// automatically" for the purposes of this validation, so per-field enumeration is skipped for either shape.
-    /// Any other shape is not a documented "dynamic" form and is rejected with an actionable error rather than
-    /// silently coerced by <see cref="BsonValue.ToBoolean"/> truthiness rules.
-    /// </summary>
-    private bool IsDynamicMappingEnabled(BsonDocument mappings)
-    {
-        if (!mappings.TryGetValue("dynamic", out BsonValue? dynamicValue))
-        {
-            return false;
-        }
-
-        return dynamicValue switch
-        {
-            BsonBoolean boolean => boolean.Value,
-            BsonDocument => true,
-            _ => throw new MongoDBIndexMismatchException(
-                $"Search index '{_options.SearchIndexName}' has an unrecognized 'mappings.dynamic' shape " +
-                $"({dynamicValue.BsonType}); expected a boolean or an object."),
-        };
-    }
-
-    /// <summary>
-    /// Resolves a possibly dotted field path through nested <c>type: "document"</c> mappings, returning every
-    /// applicable type definition for the terminal field. Atlas Search allows a field to be mapped to a single
-    /// definition object or to an array of multiple type definitions (for example both <c>"token"</c> and
-    /// <c>"number"</c> for the same field); either shape is supported here. Returns an empty list if the path is
-    /// not mapped. Throws <see cref="MongoDBIndexMismatchException"/> for a shape that is neither a mapping object
-    /// nor an array of mapping objects, rather than silently treating it as unmapped.
-    /// </summary>
-    private IReadOnlyList<BsonDocument> ResolveFieldMappingDefinitions(BsonDocument fields, string path)
-    {
-        string[] segments = path.Split('.');
-        BsonDocument currentFields = fields;
-        for (int i = 0; i < segments.Length; i++)
-        {
-            if (!currentFields.TryGetValue(segments[i], out BsonValue? value))
-            {
-                return [];
-            }
-
-            IReadOnlyList<BsonDocument> definitions = ResolveFieldDefinitions(value, segments[i]);
-            bool isLastSegment = i == segments.Length - 1;
-            if (isLastSegment)
-            {
-                return definitions;
-            }
-
-            BsonDocument? nestedDocument = definitions.FirstOrDefault(
-                d => string.Equals(d.GetValue("type", "").AsString, "document", StringComparison.OrdinalIgnoreCase));
-            if (nestedDocument is null)
-            {
-                return [];
-            }
-
-            currentFields = nestedDocument.GetValue("fields", new BsonDocument()).AsBsonDocument;
-        }
-
-        return [];
-    }
-
-    /// <summary>Normalizes a single field-mapping value (a mapping object or an array of mapping objects).</summary>
-    private IReadOnlyList<BsonDocument> ResolveFieldDefinitions(BsonValue value, string fieldName) =>
-        value switch
-        {
-            BsonDocument document => [document],
-            BsonArray array => [.. array.Select(element => element as BsonDocument ??
-                throw new MongoDBIndexMismatchException(
-                    $"Search index '{_options.SearchIndexName}' has a multi-type mapping for field " +
-                    $"'{fieldName}' containing a non-object entry ({element.BsonType}); expected an array of " +
-                    "mapping objects."))],
-            _ => throw new MongoDBIndexMismatchException(
-                $"Search index '{_options.SearchIndexName}' has an unrecognized mapping shape for field " +
-                $"'{fieldName}' ({value.BsonType}); expected a mapping object or an array of mapping objects."),
-        };
-
-    /// <summary>
-    /// A field is text-searchable if any applicable mapping definition is; only reject a field once every
-    /// definition is confirmed non-text-compatible (see <see cref="ResolveFieldMappingDefinitions"/>).
-    /// </summary>
-    private static bool IsTextCompatible(BsonDocument fieldMapping) =>
-        fieldMapping.GetValue("type", "").AsString is "string" or "autocomplete" or "token";
-
-    /// <summary>
-    /// Validates that every field referenced by <see cref="MongoDBRAGProviderOptions.MandatoryFilter"/> is mapped
-    /// in the Search index compatibly with the operator category it is used with. Returns <c>true</c> when this
-    /// was fully and statically verified (including trivially, when <paramref name="references"/> is empty), and
-    /// <c>false</c> only when the mapping is dynamic (see <see cref="IsDynamicMappingEnabled"/>) and there are
-    /// references to check -- <c>listSearchIndexes</c> provides no per-field enumeration for a dynamic mapping, so
-    /// per-field compatibility cannot be statically confirmed in that case (a documented limitation, not a
-    /// validation gap). The caller must not cache a <c>false</c> result as success.
-    /// </summary>
-    private bool ValidateSearchFilterFields(BsonDocument index, IReadOnlyList<FilterFieldReference> references)
-    {
-        if (references.Count == 0)
-        {
-            return true;
-        }
-
-        BsonDocument definition = index.GetValue(
-            "latestDefinition",
-            index.GetValue("definition", new BsonDocument())).AsBsonDocument;
-        BsonDocument mappings = definition.GetValue("mappings", new BsonDocument()).AsBsonDocument;
-        if (IsDynamicMappingEnabled(mappings))
-        {
-            return false;
-        }
-
-        BsonDocument fields = mappings.GetValue("fields", new BsonDocument()).AsBsonDocument;
-        foreach (FilterFieldReference reference in references)
-        {
-            IReadOnlyList<BsonDocument> definitions = ResolveFieldMappingDefinitions(fields, reference.FieldPath);
-            if (definitions.Count == 0)
-            {
-                throw new MongoDBIndexMismatchException(
-                    $"Search index '{_options.SearchIndexName}' does not map mandatory-filter field " +
-                    $"'{reference.FieldPath}'.");
-            }
-
-            // Every individual value category referenced (a membership filter may reference more than one, for
-            // example a mixed string/number `in` list) must independently be satisfied by at least one mapping
-            // definition in the field's array -- possibly a different definition per category -- since a single
-            // definition covering one category does not imply it covers another.
-            foreach (FilterValueCategory valueCategory in BsonValueCategories.Flags(reference.ValueCategories))
-            {
-                if (!definitions.Any(d => IsFilterValueCategoryCompatible(d, reference.Category, valueCategory)))
-                {
-                    string types = string.Join(", ", definitions.Select(d => d.GetValue("type", "").AsString));
-                    throw new MongoDBIndexMismatchException(
-                        $"Search index '{_options.SearchIndexName}' maps mandatory-filter field " +
-                        $"'{reference.FieldPath}' to '{types}', which is not compatible with a " +
-                        $"{reference.Category} filter over a {valueCategory} value (for example a string " +
-                        "equality/membership value requires a 'token' mapping, not 'string').");
-                }
-            }
-        }
-
-        return true;
-    }
-
-    /// <summary>
-    /// Checks whether <paramref name="fieldMapping"/> is compatible with a single BSON value category used
-    /// against it under <paramref name="operatorCategory"/>. Exact-match (equality/membership) string values
-    /// require a <c>token</c> mapping -- never <c>string</c>, which is full-text analyzed and cannot support
-    /// exact matching -- while range comparisons require an orderable <c>number</c>/<c>date</c> (or their facet
-    /// equivalents) matching the value's own category.
-    /// </summary>
-    private static bool IsFilterValueCategoryCompatible(
-        BsonDocument fieldMapping,
-        FilterOperatorCategory operatorCategory,
-        FilterValueCategory valueCategory)
-    {
-        string type = fieldMapping.GetValue("type", "").AsString;
-        return operatorCategory switch
-        {
-            FilterOperatorCategory.Range => valueCategory switch
-            {
-                FilterValueCategory.Number => type is "number" or "numberFacet",
-                FilterValueCategory.Date => type is "date" or "dateFacet",
-                // Range filters can only ever produce Number or Date value categories (see
-                // RAGFilterFieldReferences.Collect), so this branch is structurally unreachable; retained as a
-                // defensive rejection rather than a silent pass.
-                _ => false,
-            },
-            _ => valueCategory switch
-            {
-                FilterValueCategory.String => type is "token",
-                FilterValueCategory.Boolean => type is "boolean",
-                FilterValueCategory.Number => type is "number",
-                FilterValueCategory.Date => type is "date",
-                FilterValueCategory.ObjectId => type is "objectId",
-                FilterValueCategory.Uuid => type is "uuid",
-                _ => false,
-            },
-        };
-    }
 
     private async Task<float[][]> EmbedAsync(
         IEnumerable<string> values,
