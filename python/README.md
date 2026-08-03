@@ -58,6 +58,44 @@ Run `samples\history_quickstart.py` after setting `MONGODB_URI`,
 `MONGODB_HISTORY_APPLICATION_ID`, `MONGODB_HISTORY_AGENT_ID`, and
 `MONGODB_HISTORY_SESSION_ID`. Index creation and session clearing are explicit.
 
+## Session Store quickstart
+
+Session Store persists a complete `AgentSession`, including registered
+provider-owned state, for stateless hosting. It is not exact Chat History or a
+workflow checkpoint ledger.
+
+```python
+from datetime import timedelta
+
+from agent_framework_mongodb import MongoDBSessionStore, MongoDBSessionStoreOptions
+
+store = MongoDBSessionStore(
+    connection_string=os.environ["MONGODB_URI"],
+    database_name=os.environ["MONGODB_DATABASE"],
+    collection_name=os.environ["MONGODB_SESSION_COLLECTION"],
+    options=MongoDBSessionStoreOptions(
+        tenant_id=os.environ["MONGODB_SESSION_TENANT_ID"],
+        application_id=os.environ["MONGODB_SESSION_APPLICATION_ID"],
+        agent_id=os.environ["MONGODB_SESSION_AGENT_ID"],
+        ttl=timedelta(days=7),
+    ),
+)
+await store.ensure_indexes()
+version = await store.create("session-123", session)
+version = await store.compare_and_set(
+    "session-123",
+    continued_session,
+    expected_version=version,
+)
+```
+
+The package publicly exports `MongoDBSessionStore`,
+`MongoDBSessionStoreOptions`, `MongoDBVersionedSession`, and
+`MongoDBConcurrencyError`. Every operation uses the immutable authorization
+scope in its MongoDB filter. Index provisioning and authorized deletion are
+explicit. See `samples\session_persistence.py` and
+[`docs/development/persistence/python-session-store.md`](../docs/development/persistence/python-session-store.md).
+
 ## Vector RAG quickstart
 
 Vector RAG performs read-only retrieval from a pre-ingested knowledge collection.

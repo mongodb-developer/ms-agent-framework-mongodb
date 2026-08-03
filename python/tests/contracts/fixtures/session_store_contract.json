@@ -1,0 +1,116 @@
+{
+  "schema_version": 1,
+  "framework_serialization": "agent-framework-core/1:AgentSession.to_dict/v1",
+  "expiration_precision": "utc_bson_milliseconds",
+  "scope_dimensions": [
+    "tenant_id",
+    "application_id",
+    "agent_id",
+    "session_id"
+  ],
+  "authorization_dimensions": [
+    "tenant_id",
+    "application_id",
+    "agent_id"
+  ],
+  "collection_default": "agent_sessions",
+  "indexes": [
+    {
+      "name": "session_store_scope_identity",
+      "keys": [
+        ["scope_discriminator", 1],
+        ["session_id", 1]
+      ],
+      "unique": true,
+      "collation": "simple"
+    },
+    {
+      "name": "session_store_scope_version",
+      "keys": [
+        ["scope_discriminator", 1],
+        ["session_id", 1],
+        ["version", 1]
+      ],
+      "unique": false,
+      "collation": "simple"
+    },
+    {
+      "name": "session_store_expiration",
+      "keys": [["expires_at", 1]],
+      "expire_after_seconds": 0,
+      "required": true
+    }
+  ],
+  "concurrency_cases": [
+    {
+      "operation": "create",
+      "existing_version": null,
+      "expected_version": null,
+      "outcome": "stored",
+      "new_version": 1
+    },
+    {
+      "operation": "create",
+      "existing_version": 1,
+      "expected_version": null,
+      "payload_matches": true,
+      "outcome": "idempotent",
+      "new_version": 1
+    },
+    {
+      "operation": "create",
+      "existing_version": 2,
+      "expected_version": null,
+      "payload_matches": true,
+      "outcome": "conflict",
+      "new_version": null
+    },
+    {
+      "operation": "create",
+      "existing_version": 1,
+      "expected_version": null,
+      "payload_matches": false,
+      "outcome": "conflict",
+      "new_version": null
+    },
+    {
+      "operation": "compare_and_set",
+      "existing_version": 1,
+      "expected_version": 1,
+      "payload_matches": false,
+      "outcome": "stored",
+      "new_version": 2
+    },
+    {
+      "operation": "compare_and_set",
+      "existing_version": 2,
+      "expected_version": 1,
+      "payload_matches": true,
+      "outcome": "idempotent",
+      "new_version": 2
+    },
+    {
+      "operation": "compare_and_set",
+      "existing_version": 3,
+      "expected_version": 1,
+      "payload_matches": true,
+      "outcome": "conflict",
+      "new_version": null
+    },
+    {
+      "operation": "compare_and_set",
+      "existing_version": 2,
+      "expected_version": 1,
+      "payload_matches": false,
+      "outcome": "conflict",
+      "new_version": null
+    },
+    {
+      "operation": "compare_and_delete",
+      "existing_version": 2,
+      "expected_version": 2,
+      "outcome": "deleted",
+      "new_version": null
+    }
+  ]
+}

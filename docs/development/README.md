@@ -28,6 +28,11 @@ This documentation explains the implemented system at the code level. The
 - [Python full-text Search implementation](rag/python-full-text.md)
 - [Python native hybrid RRF implementation](rag/python-hybrid.md)
 
+## Persistence
+
+- [Persistence implementation index](persistence/README.md)
+- [Python Session Store implementation](persistence/python-session-store.md)
+
 ## Ingestion samples
 
 - [Python sample ingestion](ingestion/python-sample-ingestion.md)
