@@ -41,3 +41,7 @@ This documentation explains the implemented system at the code level. The
 ## Operations and security
 
 - [Python observability and security](operations/python-observability-security.md)
+
+## Packaging and release
+
+- [Python packaging, compatibility, and release evidence](release/python-packaging.md)
