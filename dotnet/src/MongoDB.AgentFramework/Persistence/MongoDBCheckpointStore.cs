@@ -116,10 +116,28 @@ public sealed class MongoDBCheckpointStore : JsonCheckpointStore, IAsyncDisposab
     private readonly byte[] _continuationTokenSigningKey;
 
     /// <summary>Creates a store over an injected collection, which remains caller-owned.</summary>
+    /// <remarks>
+    /// This overload's exact parameter signature (no <see cref="ILogger{TCategoryName}"/> parameter) is a binary
+    /// compatibility surface: it must never gain a new parameter, including an optional one, because a caller
+    /// already compiled against it resolves default argument values at its own compile time, not this callee's.
+    /// Use the sibling overload accepting an explicit <see cref="ILogger{TCategoryName}"/> for structured operation
+    /// telemetry. See docs/development/observability-security/dotnet-telemetry.md.
+    /// </remarks>
+    public MongoDBCheckpointStore(
+        IMongoCollection<BsonDocument> collection,
+        MongoDBCheckpointStoreOptions options)
+        : this(collection, options, logger: null)
+    {
+    }
+
+    /// <summary>
+    /// Creates a store over an injected collection, which remains caller-owned, with an explicit logger for
+    /// structured operation telemetry. See docs/development/observability-security/dotnet-telemetry.md.
+    /// </summary>
     public MongoDBCheckpointStore(
         IMongoCollection<BsonDocument> collection,
         MongoDBCheckpointStoreOptions options,
-        ILogger<MongoDBCheckpointStore>? logger = null)
+        ILogger<MongoDBCheckpointStore>? logger)
         : this(collection, options, DefaultResolvedFrameworkAssemblyVersionProvider, DefaultClock, logger)
     {
     }
@@ -173,11 +191,24 @@ public sealed class MongoDBCheckpointStore : JsonCheckpointStore, IAsyncDisposab
     }
 
     /// <summary>Creates a store over an injected database, which remains caller-owned.</summary>
+    /// <remarks>See the collection constructor's remarks on why this overload's signature must stay exact.</remarks>
+    public MongoDBCheckpointStore(
+        IMongoDatabase database,
+        string collectionName,
+        MongoDBCheckpointStoreOptions options)
+        : this(database, collectionName, options, logger: null)
+    {
+    }
+
+    /// <summary>
+    /// Creates a store over an injected database, which remains caller-owned, with an explicit logger for
+    /// structured operation telemetry.
+    /// </summary>
     public MongoDBCheckpointStore(
         IMongoDatabase database,
         string collectionName,
         MongoDBCheckpointStoreOptions options,
-        ILogger<MongoDBCheckpointStore>? logger = null)
+        ILogger<MongoDBCheckpointStore>? logger)
         : this(
             (database ?? throw new ArgumentNullException(nameof(database))).GetCollection<BsonDocument>(
                 MongoDBCheckpointStoreOptions.RequireText(collectionName, nameof(collectionName))),
@@ -187,12 +218,26 @@ public sealed class MongoDBCheckpointStore : JsonCheckpointStore, IAsyncDisposab
     }
 
     /// <summary>Creates a store over an injected client, which remains caller-owned.</summary>
+    /// <remarks>See the collection constructor's remarks on why this overload's signature must stay exact.</remarks>
+    public MongoDBCheckpointStore(
+        IMongoClient client,
+        string databaseName,
+        string collectionName,
+        MongoDBCheckpointStoreOptions options)
+        : this(client, databaseName, collectionName, options, logger: null)
+    {
+    }
+
+    /// <summary>
+    /// Creates a store over an injected client, which remains caller-owned, with an explicit logger for
+    /// structured operation telemetry.
+    /// </summary>
     public MongoDBCheckpointStore(
         IMongoClient client,
         string databaseName,
         string collectionName,
         MongoDBCheckpointStoreOptions options,
-        ILogger<MongoDBCheckpointStore>? logger = null)
+        ILogger<MongoDBCheckpointStore>? logger)
         : this(
             (client ?? throw new ArgumentNullException(nameof(client))).GetDatabase(
                 MongoDBCheckpointStoreOptions.RequireText(databaseName, nameof(databaseName))),
@@ -203,12 +248,26 @@ public sealed class MongoDBCheckpointStore : JsonCheckpointStore, IAsyncDisposab
     }
 
     /// <summary>Creates a provider-owned client from a connection string.</summary>
+    /// <remarks>See the collection constructor's remarks on why this overload's signature must stay exact.</remarks>
+    public MongoDBCheckpointStore(
+        string connectionString,
+        string databaseName,
+        string collectionName,
+        MongoDBCheckpointStoreOptions options)
+        : this(connectionString, databaseName, collectionName, options, logger: null)
+    {
+    }
+
+    /// <summary>
+    /// Creates a provider-owned client from a connection string, with an explicit logger for structured operation
+    /// telemetry.
+    /// </summary>
     public MongoDBCheckpointStore(
         string connectionString,
         string databaseName,
         string collectionName,
         MongoDBCheckpointStoreOptions options,
-        ILogger<MongoDBCheckpointStore>? logger = null)
+        ILogger<MongoDBCheckpointStore>? logger)
         : this(connectionString, databaseName, collectionName, options, clientFactory: null, logger)
     {
     }

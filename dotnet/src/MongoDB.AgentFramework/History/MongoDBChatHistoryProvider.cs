@@ -35,10 +35,28 @@ public sealed class MongoDBChatHistoryProvider : ChatHistoryProvider, IAsyncDisp
     private readonly HashSet<string> _activeRetryAttempts = [];
 
     /// <summary>Creates a provider over an injected collection, which remains caller-owned.</summary>
+    /// <remarks>
+    /// This overload's exact parameter signature (no <see cref="ILogger{TCategoryName}"/> parameter) is a binary
+    /// compatibility surface: it must never gain a new parameter, including an optional one, because a caller
+    /// already compiled against it resolves default argument values at its own compile time, not this callee's.
+    /// Use the sibling overload accepting an explicit <see cref="ILogger{TCategoryName}"/> for structured operation
+    /// telemetry. See docs/development/observability-security/dotnet-telemetry.md.
+    /// </remarks>
+    public MongoDBChatHistoryProvider(
+        IMongoCollection<BsonDocument> collection,
+        MongoDBChatHistoryProviderOptions options)
+        : this(collection, options, logger: null)
+    {
+    }
+
+    /// <summary>
+    /// Creates a provider over an injected collection, which remains caller-owned, with an explicit logger for
+    /// structured operation telemetry. See docs/development/observability-security/dotnet-telemetry.md.
+    /// </summary>
     public MongoDBChatHistoryProvider(
         IMongoCollection<BsonDocument> collection,
         MongoDBChatHistoryProviderOptions options,
-        ILogger<MongoDBChatHistoryProvider>? logger = null)
+        ILogger<MongoDBChatHistoryProvider>? logger)
         : this(collection, new ValidatedOptions<MongoDBChatHistoryProviderOptions>(PrepareOptions(options)), logger)
     {
     }
@@ -65,11 +83,24 @@ public sealed class MongoDBChatHistoryProvider : ChatHistoryProvider, IAsyncDisp
     }
 
     /// <summary>Creates a provider over an injected database, which remains caller-owned.</summary>
+    /// <remarks>See the collection constructor's remarks on why this overload's signature must stay exact.</remarks>
+    public MongoDBChatHistoryProvider(
+        IMongoDatabase database,
+        string collectionName,
+        MongoDBChatHistoryProviderOptions options)
+        : this(database, collectionName, options, logger: null)
+    {
+    }
+
+    /// <summary>
+    /// Creates a provider over an injected database, which remains caller-owned, with an explicit logger for
+    /// structured operation telemetry.
+    /// </summary>
     public MongoDBChatHistoryProvider(
         IMongoDatabase database,
         string collectionName,
         MongoDBChatHistoryProviderOptions options,
-        ILogger<MongoDBChatHistoryProvider>? logger = null)
+        ILogger<MongoDBChatHistoryProvider>? logger)
         : this(
             (database ?? throw new ArgumentNullException(nameof(database))).GetCollection<BsonDocument>(
                 MongoDBChatHistoryProviderOptions.RequireText(collectionName, nameof(collectionName))),
@@ -79,12 +110,26 @@ public sealed class MongoDBChatHistoryProvider : ChatHistoryProvider, IAsyncDisp
     }
 
     /// <summary>Creates a provider over an injected client, which remains caller-owned.</summary>
+    /// <remarks>See the collection constructor's remarks on why this overload's signature must stay exact.</remarks>
+    public MongoDBChatHistoryProvider(
+        IMongoClient client,
+        string databaseName,
+        string collectionName,
+        MongoDBChatHistoryProviderOptions options)
+        : this(client, databaseName, collectionName, options, logger: null)
+    {
+    }
+
+    /// <summary>
+    /// Creates a provider over an injected client, which remains caller-owned, with an explicit logger for
+    /// structured operation telemetry.
+    /// </summary>
     public MongoDBChatHistoryProvider(
         IMongoClient client,
         string databaseName,
         string collectionName,
         MongoDBChatHistoryProviderOptions options,
-        ILogger<MongoDBChatHistoryProvider>? logger = null)
+        ILogger<MongoDBChatHistoryProvider>? logger)
         : this(
             (client ?? throw new ArgumentNullException(nameof(client))).GetDatabase(
                 MongoDBChatHistoryProviderOptions.RequireText(databaseName, nameof(databaseName))),
@@ -95,12 +140,26 @@ public sealed class MongoDBChatHistoryProvider : ChatHistoryProvider, IAsyncDisp
     }
 
     /// <summary>Creates a provider-owned client from a connection string.</summary>
+    /// <remarks>See the collection constructor's remarks on why this overload's signature must stay exact.</remarks>
+    public MongoDBChatHistoryProvider(
+        string connectionString,
+        string databaseName,
+        string collectionName,
+        MongoDBChatHistoryProviderOptions options)
+        : this(connectionString, databaseName, collectionName, options, logger: null)
+    {
+    }
+
+    /// <summary>
+    /// Creates a provider-owned client from a connection string, with an explicit logger for structured operation
+    /// telemetry.
+    /// </summary>
     public MongoDBChatHistoryProvider(
         string connectionString,
         string databaseName,
         string collectionName,
         MongoDBChatHistoryProviderOptions options,
-        ILogger<MongoDBChatHistoryProvider>? logger = null)
+        ILogger<MongoDBChatHistoryProvider>? logger)
         : this(connectionString, databaseName, collectionName, options, clientFactory: null, logger)
     {
     }
