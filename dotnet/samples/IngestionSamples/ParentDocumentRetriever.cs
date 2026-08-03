@@ -18,6 +18,7 @@ public sealed class ParentDocumentRetriever
     private readonly string _tenantId;
     private readonly int _maxParents;
     private readonly string _parentIdMetadataFieldName;
+    private readonly ParentContextBoundingOptions _contextBounding;
 
     /// <summary>Initializes a retriever over injected, caller-owned search and lookup seams.</summary>
     /// <param name="childSearcher">
@@ -34,12 +35,17 @@ public sealed class ParentDocumentRetriever
     /// own <c>MongoDBRAGProviderOptions.MetadataFieldNames</c> must include the underlying field path (typically
     /// <c>"parent_id"</c>) for this value to be populated.
     /// </param>
+    /// <param name="contextBounding">
+    /// Deterministic character bounds applied to returned parent content. Defaults to
+    /// <see cref="ParentContextBoundingOptions"/>'s defaults when omitted. Validated eagerly at construction.
+    /// </param>
     public ParentDocumentRetriever(
         IChildChunkSearcher childSearcher,
         IParentLookup parentLookup,
         string tenantId,
         int maxParents = 10,
-        string parentIdMetadataFieldName = "parent_id")
+        string parentIdMetadataFieldName = "parent_id",
+        ParentContextBoundingOptions? contextBounding = null)
     {
         _childSearcher = childSearcher ?? throw new ArgumentNullException(nameof(childSearcher));
         _parentLookup = parentLookup ?? throw new ArgumentNullException(nameof(parentLookup));
@@ -57,6 +63,9 @@ public sealed class ParentDocumentRetriever
         {
             throw new IngestionValidationException($"{nameof(parentIdMetadataFieldName)} must not be empty.");
         }
+
+        _contextBounding = contextBounding ?? new ParentContextBoundingOptions();
+        _contextBounding.Validate();
 
         _tenantId = tenantId;
         _maxParents = maxParents;
@@ -135,6 +144,32 @@ public sealed class ParentDocumentRetriever
                 parent.SourceUrl ?? bestChild.SourceUrl));
         }
 
-        return results;
+        return BoundContext(results);
+    }
+
+    /// <summary>
+    /// Applies <see cref="_contextBounding"/>'s deterministic character bounds to the already fully ordered,
+    /// de-duplicated, source-attributed <paramref name="results"/>. Only each result's <c>Content</c> is ever
+    /// replaced (via truncation) -- order, de-duplication, and source attribution are untouched. Once the running
+    /// total budget is exhausted, remaining lower-ranked parents are omitted entirely rather than included empty.
+    /// </summary>
+    private List<ParentSearchResult> BoundContext(List<ParentSearchResult> results)
+    {
+        var bounded = new List<ParentSearchResult>(results.Count);
+        int remainingBudget = _contextBounding.MaxTotalContextCharacters;
+        foreach (ParentSearchResult result in results)
+        {
+            if (remainingBudget <= 0)
+            {
+                break;
+            }
+
+            int allowed = Math.Min(_contextBounding.MaxCharactersPerParent, remainingBudget);
+            string truncatedContent = BoundedTextTruncation.Truncate(result.Content, allowed);
+            remainingBudget -= truncatedContent.Length;
+            bounded.Add(result with { Content = truncatedContent });
+        }
+
+        return bounded;
     }
 }

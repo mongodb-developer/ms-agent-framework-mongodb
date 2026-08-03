@@ -158,4 +158,83 @@ public sealed class ParentDocumentRetrieverTests
         Assert.Throws<IngestionValidationException>(
             () => new ParentDocumentRetriever(searcher, lookup, "tenant-a", maxParents: 0));
     }
+
+    [Fact]
+    public void ConstructorRejectsInvalidContextBoundingOptions()
+    {
+        var searcher = new FakeChildChunkSearcher([]);
+        var lookup = new FakeParentLookup([]);
+        var invalidBounds = new ParentContextBoundingOptions { MaxCharactersPerParent = 0 };
+
+        Assert.Throws<IngestionValidationException>(
+            () => new ParentDocumentRetriever(searcher, lookup, "tenant-a", contextBounding: invalidBounds));
+    }
+
+    [Fact]
+    public async Task SearchAsyncTruncatesAnOversizedSingleParentToThePerParentBound()
+    {
+        var searcher = new FakeChildChunkSearcher(
+        [
+            FakeChildChunkSearcher.ChildResult("child-1", score: 0.9, parentId: "parent-a"),
+        ]);
+        var lookup = new FakeParentLookup(
+            [("tenant-a", new ParentDocument("parent-a", new string('x', 100), null, null))]);
+        var bounds = new ParentContextBoundingOptions { MaxCharactersPerParent = 10, MaxTotalContextCharacters = 1000 };
+        var retriever = new ParentDocumentRetriever(searcher, lookup, "tenant-a", contextBounding: bounds);
+
+        IReadOnlyList<ParentSearchResult> results = await retriever.SearchAsync("query");
+
+        Assert.Single(results);
+        Assert.Equal(10, results[0].Content.Length);
+        Assert.Equal(new string('x', 10), results[0].Content);
+    }
+
+    [Fact]
+    public async Task SearchAsyncTruncatesLaterParentsOnceTheTotalContextBudgetIsExhaustedPreservingOrder()
+    {
+        var searcher = new FakeChildChunkSearcher(
+        [
+            FakeChildChunkSearcher.ChildResult("child-1", score: 0.9, parentId: "parent-a"),
+            FakeChildChunkSearcher.ChildResult("child-2", score: 0.8, parentId: "parent-b"),
+            FakeChildChunkSearcher.ChildResult("child-3", score: 0.7, parentId: "parent-c"),
+        ]);
+        var lookup = new FakeParentLookup(
+        [
+            ("tenant-a", new ParentDocument("parent-a", new string('a', 10), null, null)),
+            ("tenant-a", new ParentDocument("parent-b", new string('b', 10), null, null)),
+            ("tenant-a", new ParentDocument("parent-c", new string('c', 10), null, null)),
+        ]);
+        // Per-parent bound (10) never truncates individually, but the total budget (15) only fits the first parent
+        // in full (10 chars) plus 5 more characters of the second parent; the third parent's budget is exhausted.
+        var bounds = new ParentContextBoundingOptions { MaxCharactersPerParent = 10, MaxTotalContextCharacters = 15 };
+        var retriever = new ParentDocumentRetriever(searcher, lookup, "tenant-a", maxParents: 3, contextBounding: bounds);
+
+        IReadOnlyList<ParentSearchResult> results = await retriever.SearchAsync("query");
+
+        Assert.Equal(2, results.Count);
+        Assert.Equal("parent-a", results[0].ParentId);
+        Assert.Equal(new string('a', 10), results[0].Content);
+        Assert.Equal("parent-b", results[1].ParentId);
+        Assert.Equal(new string('b', 5), results[1].Content);
+    }
+
+    [Fact]
+    public async Task SearchAsyncNeverSplitsASurrogatePairWhenTruncatingParentContent()
+    {
+        string emoji = char.ConvertFromUtf32(0x1F600);
+        var searcher = new FakeChildChunkSearcher(
+        [
+            FakeChildChunkSearcher.ChildResult("child-1", score: 0.9, parentId: "parent-a"),
+        ]);
+        var lookup = new FakeParentLookup(
+            [("tenant-a", new ParentDocument("parent-a", "hello" + emoji + "!", null, null))]);
+        var bounds = new ParentContextBoundingOptions { MaxCharactersPerParent = 6, MaxTotalContextCharacters = 1000 };
+        var retriever = new ParentDocumentRetriever(searcher, lookup, "tenant-a", contextBounding: bounds);
+
+        IReadOnlyList<ParentSearchResult> results = await retriever.SearchAsync("query");
+
+        Assert.Single(results);
+        Assert.Equal("hello", results[0].Content);
+        Assert.False(char.IsHighSurrogate(results[0].Content[^1]));
+    }
 }
