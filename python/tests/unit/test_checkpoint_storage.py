@@ -2,13 +2,14 @@ import asyncio
 import copy
 import json
 import os
+import pickle
 import subprocess
 import sys
 from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, SupportsIndex, cast
 from unittest.mock import patch
 
 import pytest
@@ -314,6 +315,28 @@ class SlottedStatefulMapping(dict[str, int]):
     label: str
 
 
+class DictIteratorStateMapping(dict[str, Any]):
+    __slots__ = ("label",)
+
+    label: str
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        if key == "__serialized_label__":
+            self.label = cast(str, value)
+            return
+        super().__setitem__(key, value)
+
+    def __reduce_ex__(self, protocol: SupportsIndex) -> tuple[Any, ...]:
+        reduction = super().__reduce_ex__(protocol)
+        return (
+            reduction[0],
+            reduction[1],
+            None,
+            None,
+            iter([*self.items(), ("__serialized_label__", self.label)]),
+        )
+
+
 class ApprovalExecutor(Executor):
     def __init__(self) -> None:
         super().__init__(id="approver")
@@ -572,15 +595,21 @@ async def test_mapping_instance_state_is_rejected_before_persistence(
     second = copy.deepcopy(first)
     second.state["mapping"].label = "second"
 
-    with pytest.raises(MongoDBSerializationError, match="mapping instance state.*migrate"):
+    with pytest.raises(
+        MongoDBSerializationError,
+        match="mapping (instance state|subclass).*migrate",
+    ):
         await storage.save(first)
-    with pytest.raises(MongoDBSerializationError, match="mapping instance state.*migrate"):
+    with pytest.raises(
+        MongoDBSerializationError,
+        match="mapping (instance state|subclass).*migrate",
+    ):
         await storage.save(second)
     assert collection.documents == []
 
 
 @pytest.mark.asyncio
-async def test_stateless_allowlisted_mapping_subclass_remains_supported() -> None:
+async def test_stateless_allowlisted_mapping_subclass_is_conservatively_rejected() -> None:
     collection = FakeCollection()
     type_key = f"{StatefulMapping.__module__}:{StatefulMapping.__qualname__}"
     storage = MongoDBCheckpointStorage(
@@ -590,7 +619,33 @@ async def test_stateless_allowlisted_mapping_subclass_remains_supported() -> Non
     valid = checkpoint("stateless-mapping")
     valid.state["mapping"] = StatefulMapping(alpha=1)
 
-    assert await storage.save(valid) == "stateless-mapping"
+    with pytest.raises(MongoDBSerializationError, match="mapping subclass.*migrate"):
+        await storage.save(valid)
+    assert collection.documents == []
+
+
+@pytest.mark.asyncio
+async def test_mapping_dict_iterator_cannot_hide_instance_state() -> None:
+    collection = FakeCollection()
+    type_key = f"{DictIteratorStateMapping.__module__}:{DictIteratorStateMapping.__qualname__}"
+    storage = MongoDBCheckpointStorage(
+        cast(Any, collection),
+        options=options(allowed_checkpoint_types=(type_key,)),
+    )
+    first = checkpoint("dict-iterator-state")
+    first_mapping = DictIteratorStateMapping(alpha=1)
+    first_mapping.label = "first"
+    first.state["mapping"] = first_mapping
+    second = copy.deepcopy(first)
+    second.state["mapping"].label = "second"
+
+    assert first_mapping.items() == second.state["mapping"].items()
+    assert pickle.loads(pickle.dumps(first_mapping)).label == "first"
+    with pytest.raises(MongoDBSerializationError, match="mapping subclass.*migrate"):
+        await storage.save(first)
+    with pytest.raises(MongoDBSerializationError, match="mapping subclass.*migrate"):
+        await storage.save(second)
+    assert collection.documents == []
 
 
 @pytest.mark.asyncio

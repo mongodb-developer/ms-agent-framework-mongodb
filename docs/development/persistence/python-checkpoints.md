@@ -89,14 +89,16 @@ logical representation of the public checkpoint dictionary rather than pickle
 bytes. Exact `dict` values are explicitly order-insensitive because their public
 checkpoint meaning is key/value state. `OrderedDict` carries its fully qualified
 type and entry sequence, so a reversed order conflicts; allowlisted/framework
-mapping subclasses also carry concrete type and sequence. `OrderedDict` and
-allowlisted mapping instances are accepted only when their lossless pickle
-reduction contains no instance state beyond entries. Attributes, assigned slots,
-constructor state such as a `defaultdict` factory, list state, or a custom state
-setter raise `MongoDBSerializationError` before sequence allocation, with
-migration guidance to a plain `dict` or stateless `OrderedDict`. Other mapping
-subclasses fail with stable guidance rather than being silently flattened. Sets
-are stably ordered, scalar and collection types carry explicit
+mapping subclasses are conservatively rejected even when allowlisted because
+arbitrary reductions cannot be proven equivalent to `.items()`. Exact
+`OrderedDict` is accepted only when its complete lossless pickle reduction has
+the standard constructor and arguments, no object or list state, exactly one
+dict iterator equal to the canonical entries, and no extra state-setter field.
+Attributes, assigned slots, constructor state such as a `defaultdict` factory,
+extra dict-iterator values, or a custom state setter raise
+`MongoDBSerializationError` before sequence allocation, with migration guidance
+to a plain `dict` or exact stateless `OrderedDict`. Sets are stably ordered,
+scalar and collection types carry explicit
 tags, and framework/application dataclasses or public `to_dict` values carry
 stable type identities. The same logical checkpoint therefore hashes
 identically across processes and `PYTHONHASHSEED` values without discarding
