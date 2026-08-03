@@ -159,6 +159,17 @@ in every mode) for both families:
   call, one from its collection-expression rebuild) and asserts full construction success, proving no further
   enumeration occurs.
 
+## Deterministic FullText sample/integration tests (review fix)
+
+Atlas Search indexes newly written or re-seeded documents asynchronously, so a query issued immediately after
+`InsertManyAsync`/`ReplaceOneAsync` can race the index and intermittently miss a document that is not yet
+searchable. `MongoDBRAGIntegrationTests.FullTextSearchIsolatesTenantsOnAPreProvisionedIndex` and the FullText section
+of `RAGQuickstart` now call a test/sample-local `PollUntilSearchableAsync` helper that repeatedly invokes
+`SearchAsync` until the expected document ID appears or a bounded timeout (30 seconds, 1-second interval) elapses,
+propagating cancellation as a clear `TimeoutException` rather than a bare `OperationCanceledException`. This keeps
+both deterministic without introducing any polling in the production `MongoDBRAGProvider.SearchAsync` path itself —
+polling exists only in test/sample code, never in the library.
+
 ## Errors, cancellation, and result mapping
 
 Unchanged from [slice 8](dotnet-rag-vector-search.md#errors-and-cancellation): `MongoException` translation to
@@ -204,7 +215,9 @@ Tests live under `dotnet/tests/MongoDB.AgentFramework.Tests/RAG/` and were writt
   `agent_framework_rag_search`) over the shared `MONGODB_RAG_COLLECTION` collection, rather than creating its own
   index per run, and only ever inserts/deletes documents whose IDs carry a unique, test-owned prefix. It also
   asserts, against a real MongoDB deployment, that `RawDocument` preserves a field the mapping configuration never
-  names (`tenant_id`) and never contains the reserved `_ragScore` alias.
+  names (`tenant_id`) and never contains the reserved `_ragScore` alias. It polls via `PollUntilSearchableAsync`
+  (see [review fix](#deterministic-fulltext-sampleintegration-tests-review-fix) above) before asserting, so it is
+  not flaky against real Atlas Search indexing lag.
 - `MongoDBRAGSearchIndexValidationTests` — see the
   [Search-index capability validation review fix](#search-index-capability-validation-review-fix) above for full
   coverage.
@@ -219,7 +232,8 @@ dotnet test dotnet\MongoDB.AgentFramework.slnx
 The sample at `dotnet/samples/RAGQuickstart/` now includes a FullText demonstration section, gated on the optional
 `MONGODB_RAG_SEARCH_INDEX` environment variable (skipped with an explanatory console message when unset, since this
 sample cannot provision a Search index itself), using the new FullText-only `MongoDBRAGProvider` constructor over
-the same seeded documents.
+the same seeded documents, and polls via its own `PollUntilSearchableAsync` helper before printing results (see
+[review fix](#deterministic-fulltext-sampleintegration-tests-review-fix) above).
 
 ## Deferred to later slices
 

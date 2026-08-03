@@ -93,8 +93,26 @@ if (searchIndexName is not null)
         databaseName,
         collectionName,
         fullTextOptions);
-    IReadOnlyList<MongoDBRAGResult> fullTextResults = await fullTextProvider.SearchAsync(
-        "What color do widgets ship in?");
+
+    // Atlas Search indexes newly (re-)seeded documents asynchronously, so an immediate query can race the
+    // index and miss "quickstart-chunk-1" even though SeedKnowledgeAsync already completed. Poll boundedly
+    // until it is searchable so this sample's output is deterministic; production SearchAsync never polls.
+    IReadOnlyList<MongoDBRAGResult> fullTextResults;
+    try
+    {
+        fullTextResults = await PollUntilSearchableAsync(
+            fullTextProvider,
+            "What color do widgets ship in?",
+            "quickstart-chunk-1",
+            timeout: TimeSpan.FromSeconds(30),
+            pollInterval: TimeSpan.FromSeconds(1));
+    }
+    catch (TimeoutException ex)
+    {
+        Console.WriteLine($"  {ex.Message}");
+        fullTextResults = [];
+    }
+
     foreach (MongoDBRAGResult result in fullTextResults)
     {
         Console.WriteLine($"  [{result.Score:F3}] {result.Text} (source: {result.SourceName ?? "n/a"})");
@@ -105,6 +123,44 @@ else
     Console.WriteLine();
     Console.WriteLine("Skipping FullText demo: set MONGODB_RAG_SEARCH_INDEX to a Search index over " +
         "the \"text\" field to see it.");
+}
+
+/// <summary>
+/// Bounded polling that repeatedly invokes <see cref="MongoDBRAGProvider.SearchAsync(string, CancellationToken)"/>
+/// until <paramref name="expectedId"/> appears in its results or <paramref name="timeout"/> elapses. This exists
+/// only to make this sample's FullText output deterministic across an Atlas Search index's asynchronous indexing
+/// lag; it is not part of the production <see cref="MongoDBRAGProvider"/> contract, which never polls on a
+/// caller's behalf. Cancellation always propagates as a clear <see cref="TimeoutException"/> rather than a bare
+/// <see cref="OperationCanceledException"/>.
+/// </summary>
+static async Task<IReadOnlyList<MongoDBRAGResult>> PollUntilSearchableAsync(
+    MongoDBRAGProvider provider,
+    string query,
+    string expectedId,
+    TimeSpan timeout,
+    TimeSpan pollInterval)
+{
+    using var cts = new CancellationTokenSource(timeout);
+    try
+    {
+        while (true)
+        {
+            IReadOnlyList<MongoDBRAGResult> results = await provider.SearchAsync(query, cts.Token);
+            if (results.Any(result => result.Id == expectedId))
+            {
+                return results;
+            }
+
+            await Task.Delay(pollInterval, cts.Token);
+        }
+    }
+    catch (OperationCanceledException) when (cts.IsCancellationRequested)
+    {
+        throw new TimeoutException(
+            $"Timed out after {timeout} waiting for document '{expectedId}' to become searchable for query " +
+            $"'{query}'. This indicates Atlas Search indexing lag exceeded the bounded poll window, not a " +
+            "MongoDBRAGProvider defect.");
+    }
 }
 
 static async Task SeedKnowledgeAsync(IMongoCollection<BsonDocument> collection)

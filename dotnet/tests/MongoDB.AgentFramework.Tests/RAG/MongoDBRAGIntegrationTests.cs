@@ -123,6 +123,46 @@ public sealed class MongoDBRAGIntegrationTests
         }
     }
 
+    /// <summary>
+    /// Bounded polling that repeatedly invokes <see cref="MongoDBRAGProvider.SearchAsync(string, CancellationToken)"/>
+    /// until <paramref name="expectedId"/> appears in its results or <paramref name="timeout"/> elapses. Atlas
+    /// Search indexes newly written documents asynchronously, so a single immediate query after
+    /// <c>InsertManyAsync</c> can race the index and flake; this exists only to make the test/sample deterministic
+    /// and is not part of the production <see cref="MongoDBRAGProvider"/> contract, which never polls on a
+    /// caller's behalf. Cancellation always propagates as a clear <see cref="TimeoutException"/> rather than a bare
+    /// <see cref="OperationCanceledException"/>, so a failure unambiguously reads as "index lag exceeded the
+    /// bounded wait", not a product defect.
+    /// </summary>
+    private static async Task<IReadOnlyList<MongoDBRAGResult>> PollUntilSearchableAsync(
+        MongoDBRAGProvider provider,
+        string query,
+        string expectedId,
+        TimeSpan timeout,
+        TimeSpan pollInterval)
+    {
+        using var cts = new CancellationTokenSource(timeout);
+        try
+        {
+            while (true)
+            {
+                IReadOnlyList<MongoDBRAGResult> results = await provider.SearchAsync(query, cts.Token);
+                if (results.Any(result => result.Id == expectedId))
+                {
+                    return results;
+                }
+
+                await Task.Delay(pollInterval, cts.Token);
+            }
+        }
+        catch (OperationCanceledException) when (cts.IsCancellationRequested)
+        {
+            throw new TimeoutException(
+                $"Timed out after {timeout} waiting for document '{expectedId}' to become searchable for " +
+                $"query '{query}'. This indicates Atlas Search indexing lag exceeded the bounded poll window, " +
+                "not a MongoDBRAGProvider defect.");
+        }
+    }
+
     [MongoIntegrationFact]
     [Trait("Category", "integration-rag-search")]
     public async Task FullTextSearchIsolatesTenantsOnAPreProvisionedIndex()
@@ -170,7 +210,12 @@ public sealed class MongoDBRAGIntegrationTests
                 },
             ]);
 
-            IReadOnlyList<MongoDBRAGResult> results = await provider.SearchAsync("blue widgets");
+            IReadOnlyList<MongoDBRAGResult> results = await PollUntilSearchableAsync(
+                provider,
+                "blue widgets",
+                tenantAId,
+                timeout: TimeSpan.FromSeconds(30),
+                pollInterval: TimeSpan.FromSeconds(1));
             Assert.Contains(results, result => result.Id == tenantAId);
             Assert.DoesNotContain(results, result => result.Id == tenantBId);
 
