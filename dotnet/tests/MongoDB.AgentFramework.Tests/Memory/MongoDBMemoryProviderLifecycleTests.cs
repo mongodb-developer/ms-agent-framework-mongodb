@@ -147,6 +147,86 @@ public sealed class MongoDBMemoryProviderLifecycleTests
     }
 
     [Fact]
+    public void ConnectionStringConstructorValidatesIndexNameAgainstTheAllowlistBeforeCreatingAClient()
+    {
+        bool clientFactoryInvoked = false;
+
+        // A fully functional client/database/collection stands by (constructing MemoryCollectionProxy never
+        // throws), proving this is not merely a "GetDatabase throws" scenario. IndexName is well-formed enough to
+        // satisfy MongoDBMemoryProviderOptions.Validate()'s plain non-empty check, but "bad/name" fails the
+        // independent, stricter MongoDB Vector Search index-name allowlist (Internal.IndexName) that constructing
+        // MongoDBVectorSearchIndexDefinition enforces. PrepareOptions must derive that index definition -- and
+        // therefore reject "bad/name" -- entirely before Connect ever calls the client factory, or the owned
+        // client would be created and then immediately leaked when the core constructor later failed to build the
+        // index definition.
+        var databaseState = new FakeMongoDatabaseState
+        {
+            Collection = MemoryCollectionProxy.Create(new MemoryCollectionState()),
+        };
+        var clientState = new FakeMongoClientState
+        {
+            Database = FakeMongoDatabaseProxy.Create(databaseState),
+        };
+
+        Assert.Throws<MongoDBConfigurationException>(() => new MongoDBMemoryProvider(
+            "mongodb://localhost:27017",
+            "database",
+            "memories",
+            new RecordingEmbeddingGenerator(),
+            3,
+            _ => new MongoDBMemoryProvider.State(new MongoDBMemoryScope(userId: "user")),
+            new MongoDBMemoryProviderOptions { IndexName = "bad/name" },
+            logger: null,
+            clientFactory: _ =>
+            {
+                clientFactoryInvoked = true;
+                return FakeMongoClientProxy.Create(clientState);
+            }));
+
+        // The client factory is never invoked at all: the strongest possible assertion, and stronger than merely
+        // proving an already-created client gets disposed.
+        Assert.False(clientFactoryInvoked);
+        Assert.Equal(0, clientState.DisposeCount);
+    }
+
+    [Fact]
+    public async Task ConnectionStringConstructorSucceedsWithAFullyFunctionalClientWhenEverythingIsValid()
+    {
+        // Companion positive control for the allowlist test above: proves the fully functional fake
+        // client/database/collection chain (and the refactored PreparedConfiguration plumbing) still succeeds
+        // end-to-end for valid input, so the negative assertion above is meaningful.
+        var databaseState = new FakeMongoDatabaseState
+        {
+            Collection = MemoryCollectionProxy.Create(new MemoryCollectionState()),
+        };
+        var clientState = new FakeMongoClientState
+        {
+            Database = FakeMongoDatabaseProxy.Create(databaseState),
+        };
+        bool clientFactoryInvoked = false;
+
+        MongoDBMemoryProvider provider = new(
+            "mongodb://localhost:27017",
+            "database",
+            "memories",
+            new RecordingEmbeddingGenerator(),
+            3,
+            _ => new MongoDBMemoryProvider.State(new MongoDBMemoryScope(userId: "user")),
+            options: null,
+            logger: null,
+            clientFactory: _ =>
+            {
+                clientFactoryInvoked = true;
+                return FakeMongoClientProxy.Create(clientState);
+            });
+
+        Assert.True(clientFactoryInvoked);
+        Assert.True(provider.OwnsClient);
+        await provider.DisposeAsync();
+        Assert.Equal(1, clientState.DisposeCount);
+    }
+
+    [Fact]
     public void ConnectionStringConstructorValidatesEmbeddingGeneratorBeforeCreatingAClient()
     {
         bool clientFactoryInvoked = false;
