@@ -82,6 +82,58 @@ public sealed class IncrementalIngestionPipelineTests
     }
 
     [Fact]
+    public async Task IngestAsyncUpsertsChunksWhenOnlyTitleChangesWithIdenticalContent()
+    {
+        var store = new FakeChunkStore();
+        var pipeline = CreatePipeline(store);
+        var original = new SourceDocument("tenant-a", "source-1", "Identical content that never changes.", Title: "Original Title");
+        await pipeline.IngestAsync(original);
+
+        var titleOnlyChange = original with { Title = "Updated Title" };
+        IngestionResult result = await pipeline.IngestAsync(titleOnlyChange);
+
+        // An attribution-only (title) edit with identical chunk text must still be detected as a change, so the
+        // stored record's title metadata is corrected rather than left stale forever.
+        Assert.True(result.ChunksUpserted > 0);
+        Assert.Equal(0, result.ChunksUnchanged);
+        Assert.All(store.Records.Values, record => Assert.Equal("Updated Title", record.SourceName));
+    }
+
+    [Fact]
+    public async Task IngestAsyncUpsertsChunksWhenOnlyUrlChangesWithIdenticalContent()
+    {
+        var store = new FakeChunkStore();
+        var pipeline = CreatePipeline(store);
+        var original = new SourceDocument(
+            "tenant-a", "source-1", "Identical content that never changes.", Url: "https://example.test/original");
+        await pipeline.IngestAsync(original);
+
+        var urlOnlyChange = original with { Url = "https://example.test/updated" };
+        IngestionResult result = await pipeline.IngestAsync(urlOnlyChange);
+
+        // An attribution-only (URL) edit with identical chunk text must still be detected as a change, so the
+        // stored record's URL metadata is corrected rather than left stale forever.
+        Assert.True(result.ChunksUpserted > 0);
+        Assert.Equal(0, result.ChunksUnchanged);
+        Assert.All(store.Records.Values, record => Assert.Equal("https://example.test/updated", record.SourceUrl));
+    }
+
+    [Fact]
+    public async Task IngestAsyncSkipsRerunWhenTitleAndUrlAndContentAreAllUnchanged()
+    {
+        var store = new FakeChunkStore();
+        var pipeline = CreatePipeline(store);
+        var document = new SourceDocument(
+            "tenant-a", "source-1", "Identical content that never changes.", Title: "Title", Url: "https://example.test");
+        await pipeline.IngestAsync(document);
+
+        IngestionResult result = await pipeline.IngestAsync(document);
+
+        Assert.Equal(0, result.ChunksUpserted);
+        Assert.True(result.ChunksUnchanged > 0);
+    }
+
+    [Fact]
     public async Task IngestAsyncOnlyDeletesWithinTheSameTenantAndSourceScope()
     {
         var store = new FakeChunkStore();

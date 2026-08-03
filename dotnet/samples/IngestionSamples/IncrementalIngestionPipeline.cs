@@ -42,7 +42,13 @@ public sealed class IncrementalIngestionPipeline
         for (int index = 0; index < chunkTexts.Count; index++)
         {
             string id = DeterministicId.ForChunk(document.TenantId, document.SourceId, index);
-            string hash = ContentHash.Compute(chunkTexts[index]);
+            // The tracked hash covers every persisted, per-record field that matters -- chunk text as well as the
+            // Title/Url attribution stamped onto every ChunkRecord (see below) -- not just the chunk text, so a
+            // title-only or URL-only edit (no chunk text change) is still detected as a change on the next run and
+            // the stale attribution metadata gets corrected rather than left stale forever. ContentHash.ComputeFramed
+            // uses canonical length-prefixed framing (CanonicalFraming), not delimiter-joined concatenation, so a
+            // Title/Url/text boundary shift can never be silently mistaken for unchanged content.
+            string hash = ContentHash.ComputeFramed(chunkTexts[index], document.Title, document.Url);
             desired.Add(new ChunkCandidate(id, ParentId: null, ChunkRecord.FlatChunkRecordType, chunkTexts[index], hash, NeedsEmbedding: true));
         }
 
