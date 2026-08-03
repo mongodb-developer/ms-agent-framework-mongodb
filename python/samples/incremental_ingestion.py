@@ -17,7 +17,13 @@ from agent_framework_mongodb import (
     MongoDBRAGProviderOptions,
     MongoDBSearchMode,
 )
-from samples.ingestion_helpers import IncrementalIngestor, MongoDBDocumentLoader
+
+try:
+    from samples.ingestion_helpers import IncrementalIngestor, MongoDBDocumentLoader
+except ModuleNotFoundError as exc:
+    if exc.name != "samples":
+        raise
+    from ingestion_helpers import IncrementalIngestor, MongoDBDocumentLoader
 
 
 @dataclass(frozen=True)

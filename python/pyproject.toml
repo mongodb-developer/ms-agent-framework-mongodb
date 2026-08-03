@@ -9,11 +9,27 @@ description = "MongoDB integrations for Microsoft Agent Framework"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Shankar Narayanan SGS" },
+]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3 :: Only",
+    "Typing :: Typed",
+]
 dependencies = [
     "agent-framework-core>=1.13,<2",
     "opentelemetry-api>=1.39,<2",
     "pymongo>=4.13,<5",
 ]
+
+[project.urls]
+Source = "https://github.com/mongo/ms-agent-framework-mongodb"
 
 [project.optional-dependencies]
 dev = [
@@ -29,6 +45,14 @@ dev = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/agent_framework_mongodb"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/LICENSE",
+    "/README.md",
+    "/pyproject.toml",
+    "/src/agent_framework_mongodb",
+]
 
 [tool.pytest.ini_options]
 addopts = "--strict-config --strict-markers"
