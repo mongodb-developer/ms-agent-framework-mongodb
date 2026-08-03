@@ -86,6 +86,48 @@ requirement and the vector family's `VectorIndexName`/`VectorFieldName` requirem
 vector configuration, and `VectorAnn`/`VectorEnn` do not require any search configuration; only `HybridRrf` requires
 both once implemented.
 
+## Search-index capability validation (review fix)
+
+rag.md's capability matrix (291-314) requires FullText retrieval to make Search-index capability gaps explicit and
+cacheable rather than surfacing as opaque `$search` pipeline failures. This slice adds a read-only, mode-gated
+`ValidateSearchIndexAsync(bool requireReady = true, bool refresh = false, CancellationToken)` seam that mirrors
+Memory's `EnsureVectorSearchIndexAsync`/`ValidateVectorSearchIndexAsync` pattern:
+
+- It lists the configured `SearchIndexName` via `IMongoCollection<BsonDocument>.SearchIndexes.ListAsync` and requires
+  the match's `type` to be `"search"`.
+- Where a static (non-dynamic) mapping definition is available (`{ mappings: { dynamic: false, fields: { ... } } }`
+  — structurally different from Vector Search's flat `fields` array), it resolves each configured
+  `SearchTextFieldNames` path (including dotted/nested paths through nested `type: "document"` mappings) and
+  requires a text-compatible type (`string`/`autocomplete`/`token`). A dynamic mapping (`mappings.dynamic == true`)
+  indexes every field automatically, so `listSearchIndexes` provides no per-field enumeration to validate in that
+  case; this is a documented driver/Atlas limitation, not a validation gap, and field validation is skipped for a
+  fully dynamic mapping.
+- `requireReady` (default `true`) additionally requires the index to report a queryable/`READY` status.
+- `SearchAsync` never calls this method — it is an opt-in health-check/startup gate, not an implicit precondition on
+  every query — so normal retrieval never pays for the extra round trip. A successful result is cached in-memory for
+  `SearchIndexValidationCacheDuration` (30 seconds) to keep a caller that *does* invoke it repeatedly (for example, a
+  periodic health check) from re-inspecting the index on every call; `refresh: true` bypasses the cache. A cached
+  lenient (`requireReady: false`) result never silently satisfies a later strict (`requireReady: true`) call, so a
+  known-not-ready index can never appear to have become ready purely because the cache had not expired. The clock is
+  exposed through an `internal TimeProvider` test-only property (not a constructor parameter, to avoid touching any
+  public construction signature), defaulting to `TimeProvider.System`.
+- Failures translate to actionable, existing exception types: `MongoDBIndexMissingException` (index absent),
+  `MongoDBIndexMismatchException` (wrong type, or a configured field maps to a non-text-compatible type), and
+  `MongoDBIndexNotReadyException` (`requireReady: true` and not queryable). Calling this method against a mode other
+  than `FullText`, or a `$listSearchIndexes` call that itself fails (deployment/driver does not support it), throws
+  `MongoDBCapabilityException` — intentionally diverging from Memory's `MongoDBRetrievalException` for the
+  equivalent Vector Search inspection failure, since rag.md's capability matrix treats an uninspectable Search index
+  as a capability-detection concern rather than a generic retrieval failure.
+- `OperationCanceledException` always propagates unchanged, never wrapped.
+
+Tests live in `MongoDBRAGSearchIndexValidationTests`, using a new `RAGSearchIndexManagerProxy` test double (faking
+`SearchIndexes.ListAsync`, mirroring Memory's equivalent proxy) and a settable-clock `FakeTimeProvider`. They cover:
+missing index, wrong index type, missing/wrong-type configured text field, nested dotted field paths, dynamic-
+mapping field-skip, not-ready rejection and allowance, mode gating (rejecting non-`FullText` configurations),
+cancellation propagation, `MongoDBCapabilityException` wrapping of a `$listSearchIndexes` failure, and cache
+behavior (TTL reuse without a second network call, `refresh: true` bypass, TTL expiry, and no stale-serving across a
+`requireReady` escalation).
+
 ## Errors, cancellation, and result mapping
 
 Unchanged from [slice 8](dotnet-rag-vector-search.md#errors-and-cancellation): `MongoException` translation to
@@ -132,6 +174,9 @@ Tests live under `dotnet/tests/MongoDB.AgentFramework.Tests/RAG/` and were writt
   index per run, and only ever inserts/deletes documents whose IDs carry a unique, test-owned prefix. It also
   asserts, against a real MongoDB deployment, that `RawDocument` preserves a field the mapping configuration never
   names (`tenant_id`) and never contains the reserved `_ragScore` alias.
+- `MongoDBRAGSearchIndexValidationTests` — see the
+  [Search-index capability validation review fix](#search-index-capability-validation-review-fix) above for full
+  coverage.
 
 Run:
 

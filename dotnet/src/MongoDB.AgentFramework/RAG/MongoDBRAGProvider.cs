@@ -18,12 +18,26 @@ namespace MongoDB.AgentFramework;
 /// </summary>
 public sealed class MongoDBRAGProvider : IAsyncDisposable
 {
+    /// <summary>
+    /// How long a successful <see cref="ValidateSearchIndexAsync"/> result is trusted before the next call
+    /// re-inspects the index, bounding repeated-call cost (rag.md's cacheable-detection requirement) without
+    /// letting a caller-invoked health check ever go permanently stale.
+    /// </summary>
+    private static readonly TimeSpan SearchIndexValidationCacheDuration = TimeSpan.FromSeconds(30);
+
     private readonly IMongoCollection<BsonDocument> _collection;
     private readonly IEmbeddingGenerator<string, Embedding<float>>? _embeddingGenerator;
     private readonly MongoDBRAGProviderOptions _options;
     private readonly int _vectorDimensions;
     private readonly OwnedResource<IMongoClient>? _client;
     private readonly ILogger<MongoDBRAGProvider> _logger;
+    private (DateTimeOffset ValidatedAt, bool RequireReady)? _searchIndexValidation;
+
+    /// <summary>
+    /// Test-only seam controlling the clock <see cref="ValidateSearchIndexAsync"/> uses for its bounded cache;
+    /// defaults to <see cref="TimeProvider.System"/> and is never part of the public construction surface.
+    /// </summary>
+    internal TimeProvider TimeProvider { get; set; } = TimeProvider.System;
 
     /// <summary>Creates a provider over an injected database, which remains caller-owned.</summary>
     public MongoDBRAGProvider(
@@ -352,6 +366,60 @@ public sealed class MongoDBRAGProvider : IAsyncDisposable
     public bool OwnsClient => _client?.OwnsValue is true;
 
     /// <summary>
+    /// Validates the <see cref="MongoDBSearchMode.FullText"/> Search index (rag.md's capability matrix, 291-314)
+    /// without ever mutating MongoDB: existence, index type, configured field mappings where the definition is
+    /// available, and (when <paramref name="requireReady"/>) readiness/queryability. <see cref="SearchAsync"/>
+    /// never calls this method, so a query never pays for the extra round trip this performs; a caller that wants
+    /// a startup or health-check gate should invoke it explicitly instead. A successful result is cached for a
+    /// bounded interval (see <see cref="SearchIndexValidationCacheDuration"/>) so repeated caller-side checks
+    /// (for example, a periodic health check) do not re-inspect the index on every call; pass
+    /// <paramref name="refresh"/><c>: true</c> to force a fresh check regardless of the cache.
+    /// </summary>
+    /// <param name="requireReady">
+    /// When <c>true</c> (the default), also requires the index to report <c>READY</c>/queryable status. A cached
+    /// result only satisfies this when it was itself validated with <paramref name="requireReady"/><c>: true</c>,
+    /// so a prior lenient check can never silently satisfy a later readiness-requiring one.
+    /// </param>
+    /// <param name="refresh">When <c>true</c>, bypasses the cache and re-inspects the index.</param>
+    /// <param name="cancellationToken">A token used to cancel the check.</param>
+    /// <exception cref="MongoDBCapabilityException">
+    /// The configured <see cref="MongoDBRAGProviderOptions.SearchMode"/> does not use a Search index, or the
+    /// deployment/driver could not be inspected (for example, <c>$listSearchIndexes</c> is unsupported).
+    /// </exception>
+    /// <exception cref="MongoDBIndexMissingException">The configured Search index does not exist.</exception>
+    /// <exception cref="MongoDBIndexMismatchException">
+    /// The index is not a Search index, or does not map a configured text field to a text-compatible type.
+    /// </exception>
+    /// <exception cref="MongoDBIndexNotReadyException">
+    /// <paramref name="requireReady"/> is <c>true</c> and the index is not queryable.
+    /// </exception>
+    public async Task ValidateSearchIndexAsync(
+        bool requireReady = true,
+        bool refresh = false,
+        CancellationToken cancellationToken = default)
+    {
+        RequireSearchIndexMode();
+
+        if (!refresh &&
+            _searchIndexValidation is { } cached &&
+            (cached.RequireReady || !requireReady) &&
+            TimeProvider.GetUtcNow() - cached.ValidatedAt < SearchIndexValidationCacheDuration)
+        {
+            return;
+        }
+
+        BsonDocument? index = await FindSearchIndexAsync(cancellationToken).ConfigureAwait(false);
+        if (index is null)
+        {
+            throw new MongoDBIndexMissingException(
+                $"Search index '{_options.SearchIndexName}' does not exist; create it explicitly.");
+        }
+
+        ValidateSearchIndexDefinition(index, requireReady);
+        _searchIndexValidation = (TimeProvider.GetUtcNow(), requireReady);
+    }
+
+    /// <summary>
     /// Searches with the configured retrieval strategy. The configured
     /// <see cref="MongoDBRAGProviderOptions.MandatoryFilter"/> is always translated and placed inside the active
     /// retrieval stage; this is the sole supported authorization mechanism. Only
@@ -456,6 +524,142 @@ public sealed class MongoDBRAGProvider : IAsyncDisposable
                 $"{MongoDBSearchMode.FullText}.");
         }
     }
+
+    private void RequireSearchIndexMode()
+    {
+        if (_options.SearchMode != MongoDBSearchMode.FullText)
+        {
+            throw new MongoDBCapabilityException(
+                $"{nameof(ValidateSearchIndexAsync)} validates the Search index used by " +
+                $"'{MongoDBSearchMode.FullText}'; the configured search mode is '{_options.SearchMode}'.");
+        }
+    }
+
+    private async Task<BsonDocument?> FindSearchIndexAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            using IAsyncCursor<BsonDocument> cursor = await _collection.SearchIndexes.ListAsync(
+                _options.SearchIndexName,
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            while (await cursor.MoveNextAsync(cancellationToken).ConfigureAwait(false))
+            {
+                BsonDocument? match = cursor.Current.FirstOrDefault(
+                    index => index.GetValue("name", "").AsString == _options.SearchIndexName);
+                if (match is not null)
+                {
+                    return match;
+                }
+            }
+
+            return null;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (MongoException exception)
+        {
+            // Unlike Memory's analogous Vector Search inspection, a failure here is treated as a capability gap
+            // rather than a generic retrieval failure: $listSearchIndexes itself can be unsupported by the
+            // deployment type or driver/server version, which is exactly the condition rag.md's capability matrix
+            // asks callers to detect explicitly.
+            throw new MongoDBCapabilityException(
+                $"Unable to inspect Search index '{_options.SearchIndexName}'; the deployment type or driver/" +
+                "server version may not support $listSearchIndexes.",
+                exception);
+        }
+    }
+
+    /// <summary>
+    /// Validates an Atlas Search index definition. Static (non-dynamic) mappings have shape
+    /// <c>{ mappings: { dynamic: false, fields: { name: { type, ... } } } }</c> -- structurally different from
+    /// Vector Search's flat <c>fields</c> array -- and a dynamic mapping (<c>mappings.dynamic == true</c>) indexes
+    /// every field automatically, so <c>listSearchIndexes</c> provides no per-field enumeration to validate
+    /// against in that case; this is a documented limitation, not a validation gap (see
+    /// docs/development/rag/dotnet-rag-full-text-search.md).
+    /// </summary>
+    private void ValidateSearchIndexDefinition(BsonDocument index, bool requireReady)
+    {
+        if (!string.Equals(index.GetValue("type", "").AsString, "search", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new MongoDBIndexMismatchException(
+                $"Search index '{_options.SearchIndexName}' is not a Search index (found type " +
+                $"'{index.GetValue("type", "").AsString}'); FullText requires a Search index, not a Vector " +
+                "Search index.");
+        }
+
+        BsonDocument definition = index.GetValue(
+            "latestDefinition",
+            index.GetValue("definition", new BsonDocument())).AsBsonDocument;
+        BsonDocument mappings = definition.GetValue("mappings", new BsonDocument()).AsBsonDocument;
+        if (!mappings.GetValue("dynamic", false).ToBoolean())
+        {
+            BsonDocument fields = mappings.GetValue("fields", new BsonDocument()).AsBsonDocument;
+            foreach (string textField in _options.SearchTextFieldNames)
+            {
+                if (!TryResolveMappedField(fields, textField, out BsonDocument? fieldMapping))
+                {
+                    throw new MongoDBIndexMismatchException(
+                        $"Search index '{_options.SearchIndexName}' does not map configured field " +
+                        $"'{textField}'.");
+                }
+
+                if (!IsTextCompatible(fieldMapping!))
+                {
+                    throw new MongoDBIndexMismatchException(
+                        $"Search index '{_options.SearchIndexName}' maps field '{textField}' to " +
+                        $"'{fieldMapping!.GetValue("type", "").AsString}', which is not text-searchable.");
+                }
+            }
+        }
+
+        if (requireReady &&
+            (!string.Equals(index.GetValue("status", "").AsString, "READY", StringComparison.OrdinalIgnoreCase) ||
+             !index.GetValue("queryable", false).ToBoolean()))
+        {
+            throw new MongoDBIndexNotReadyException(
+                $"Search index '{_options.SearchIndexName}' is not queryable.");
+        }
+    }
+
+    /// <summary>Resolves a possibly dotted field path through nested <c>type: "document"</c> mappings.</summary>
+    private static bool TryResolveMappedField(BsonDocument fields, string path, out BsonDocument? mapping)
+    {
+        string[] segments = path.Split('.');
+        BsonDocument current = fields;
+        BsonDocument? found = null;
+        for (int i = 0; i < segments.Length; i++)
+        {
+            if (!current.TryGetValue(segments[i], out BsonValue? value) || value is not BsonDocument segmentMapping)
+            {
+                mapping = null;
+                return false;
+            }
+
+            found = segmentMapping;
+            bool isLastSegment = i == segments.Length - 1;
+            if (!isLastSegment)
+            {
+                if (!string.Equals(
+                        segmentMapping.GetValue("type", "").AsString,
+                        "document",
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    mapping = null;
+                    return false;
+                }
+
+                current = segmentMapping.GetValue("fields", new BsonDocument()).AsBsonDocument;
+            }
+        }
+
+        mapping = found;
+        return found is not null;
+    }
+
+    private static bool IsTextCompatible(BsonDocument fieldMapping) =>
+        fieldMapping.GetValue("type", "").AsString is "string" or "autocomplete" or "token";
 
     private static int DefaultNumCandidates(int topK) =>
         Math.Min(MongoDBRAGProviderOptions.MaxNumCandidates, Math.Max(topK * 10, 100));
