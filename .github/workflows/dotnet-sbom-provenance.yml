@@ -29,10 +29,17 @@ name: .NET package SBOM and build provenance
 #     this repository and workflow run -- not a fabricated publisher identity) over the exact artifact the
 #     `sbom` job already produced, verified, and version/tag-checked. Attestation is a release-time action tied
 #     to a specific, identifiable build, so this job runs ONLY for a trusted push of a `dotnet-v*` tag, or for a
-#     `workflow_dispatch` run that both sets `confirm_attestation: yes` AND targets the `dotnet-release-attestation`
-#     GitHub Environment (an explicit, owner-configured protection gate -- see that job for detail). It never
-#     runs for `pull_request`, so a fork PR can never reach the `id-token`/`attestations`/`artifact-metadata`
-#     permissions that job requires.
+#     `workflow_dispatch` run that sets `confirm_attestation: yes`. Because `workflow_dispatch` lets its operator
+#     select ANY existing branch/tag, that trigger check alone is not a sufficient release-ref gate: the job's
+#     own first two steps (dotnet/scripts/verify-attestation-ref.ps1, then a `git merge-base --is-ancestor`
+#     ancestry check) explicitly re-validate, in workflow LOGIC, that the ref is either a real `dotnet-v*`
+#     release tag matching this repository's grammar or exactly `refs/heads/main`, AND that the triggering commit
+#     is genuinely reachable from `origin/main` -- before anything is downloaded or attested. The
+#     `dotnet-release-attestation` GitHub Environment (an owner-configured protection gate) is a SECOND,
+#     independent layer of defense-in-depth on top of that workflow-logic gate, not a substitute for it: an
+#     Environment with no protection rule configured must never be the only thing standing between an arbitrary
+#     `workflow_dispatch`-selected ref and attestation. It never runs for `pull_request`, so a fork PR can never
+#     reach the `id-token`/`attestations`/`artifact-metadata` permissions that job requires.
 #
 # Neither job publishes the package anywhere or requires an owner-provided secret.
 #
@@ -96,12 +103,24 @@ jobs:
       # already verified a tag-pushed artifact. A plain pull_request/push-to-main run here uses the faster
       # pack+allowlist+metadata-only path (still never a naked/unverified `dotnet pack`) since dotnet-quality.yml
       # already runs the full script for those triggers on both OS matrix legs.
+      #
+      # `github.event_name`/`github.ref` are passed through step-level `env:` values, never interpolated directly
+      # into this script's source text: GitHub Actions substitutes `${{ }}` expressions into the YAML string
+      # BEFORE the shell ever parses it, so a ref containing a quote, a `$()` subexpression, or a semicolon could
+      # otherwise break out of the intended string literal and execute arbitrary code on the runner. A tag name
+      # is not restricted to "safe" characters by git itself (only a handful of characters are forbidden, and
+      # `$`, `(`, `)`, backticks, and quotes are all still legal in a git ref), so this is a real injection
+      # surface, not a theoretical one -- see dotnet/scripts/ReleaseVersionTag.ps1's Test-ValidReleaseTagGrammar
+      # doc comment for the identical rationale already applied to the tag/version-match step further below.
       - name: Determine verification depth
         id: verify-depth
         shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
         run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]] || \
-             { [[ "${{ github.event_name }}" == "push" ]] && [[ "${{ github.ref }}" == refs/tags/dotnet-v* ]]; }; then
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]] || \
+             { [[ "$EVENT_NAME" == "push" ]] && [[ "$REF" == refs/tags/dotnet-v* ]]; }; then
             echo "full=true" >> "$GITHUB_OUTPUT"
           else
             echo "full=false" >> "$GITHUB_OUTPUT"
@@ -116,12 +135,20 @@ jobs:
       - name: Pack and verify the package (allowlist, metadata; full verification on a trusted tag push/dispatch)
         shell: pwsh
         working-directory: dotnet
+        env:
+          # Passed through env, not interpolated into this script's source text, for the same reason as every
+          # other `${{ github.* }}`/`${{ steps.*.outputs.* }}` value in this workflow -- see this job's first
+          # step's comment. This particular value only ever contains the literal string "true" or "false" (this
+          # workflow's own prior step produced it), so it carries no realistic injection payload today, but is
+          # still passed this way so the pattern remains uniform and does not silently regress if that prior
+          # step's logic ever changes to derive this value from less-trusted input.
+          VERIFY_DEPTH_FULL: ${{ steps.verify-depth.outputs.full }}
         run: |
           # NOTE: switches must be splatted from a hashtable (@{ Name = $true }), never a string array of
           # '-Name' tokens -- array splatting only maps to *positional* parameters and would otherwise pass
           # these dashed strings straight through as positional arguments, which verify-package.ps1 has none of.
           $extraArgs = @{}
-          if ('${{ steps.verify-depth.outputs.full }}' -ne 'true') {
+          if ($env:VERIFY_DEPTH_FULL -ne 'true') {
             $extraArgs['SkipReproducibility'] = $true
             $extraArgs['SkipConsumerSmoke'] = $true
           }
@@ -200,11 +227,25 @@ jobs:
   # re-packs -- so the attestation subject is provably the same bytes that passed the SBOM/checksum step. This
   # job intentionally requires elevated, secret-adjacent permissions (id-token/attestations/artifact-metadata)
   # that a fork pull_request must never receive, so its `if:` only ever matches a trusted push of a `dotnet-v*`
-  # tag (a real, protected, maintainer-controlled ref) or an explicit, opted-in workflow_dispatch run. The
-  # `environment: dotnet-release-attestation` gate is a second, independent guard: GitHub Environments can
-  # require manual reviewer approval and/or restrict which refs may deploy to them, so even a workflow_dispatch
-  # run with confirm_attestation=yes still waits on that owner-configured protection rule before this job's
-  # steps execute. Neither trigger path is reachable from a fork's pull_request.
+  # tag (the coarse `startsWith(github.ref, ...)` check here is a fast, cheap PREFILTER that keeps this job from
+  # even starting on an ordinary push to `main`, not the sole ref-validity check -- see below) or an explicit,
+  # opted-in `workflow_dispatch` run. Neither of those two triggers alone is a sufficient release-ref gate,
+  # though: `workflow_dispatch` lets its operator select ANY existing branch/tag as the ref to run against, and
+  # the `environment: dotnet-release-attestation` protection rule below is an OWNER-SIDE GitHub configuration
+  # step this workflow's YAML cannot itself enforce or verify -- if that Environment happened to have no
+  # protection rule configured, relying on it alone would let a `workflow_dispatch` run with
+  # `confirm_attestation: yes` against an arbitrary selected branch reach attestation. This job's first two steps
+  # below are therefore an explicit, workflow-LOGIC gate that does not depend on that external configuration at
+  # all: "Validate attestation ref is eligible" (dotnet/scripts/verify-attestation-ref.ps1/
+  # verify-attestation-ref.tests.ps1) re-validates the EXACT ref grammar (not just the coarse `startsWith`
+  # prefilter above) and requires the ref to be either a `refs/tags/dotnet-v<version>` release tag matching this
+  # repository's grammar, or (for `workflow_dispatch` only) exactly `refs/heads/main`; "Validate commit is
+  # reachable from origin/main" then additionally proves the actual triggering COMMIT is real ancestry-verified
+  # history of `main`, not merely a ref whose NAME happens to match the pattern (e.g. a tag pushed against a
+  # commit that was never actually merged to `main`). The `environment: dotnet-release-attestation` gate remains
+  # configured as a genuine SECOND, independent layer of defense-in-depth (manual reviewer approval and/or
+  # GitHub's own ref-protection UI) -- it is not this job's only or primary gate, and this job must never be
+  # considered safe on the assumption that environment protection alone is sufficient.
   provenance-attestation:
     name: Provenance attestation (trusted release ref only)
     needs: sbom
@@ -219,6 +260,40 @@ jobs:
       attestations: write
       artifact-metadata: write
     steps:
+      # Full history (not the default shallow clone) is required so `origin/main` is available locally for the
+      # ancestry check two steps below.
+      - name: Checkout (full history for ancestry validation)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+
+      # The workflow-logic ref-shape gate described in this job's header comment above. Passed through
+      # step-level `env:` values, never interpolated into this script's source text, for the same injection
+      # rationale as every other `${{ github.* }}` value in this workflow (see the `sbom` job's first step).
+      - name: Validate attestation ref is eligible
+        shell: pwsh
+        working-directory: dotnet
+        env:
+          ATTESTATION_EVENT_NAME: ${{ github.event_name }}
+          ATTESTATION_REF: ${{ github.ref }}
+        run: |
+          ./scripts/verify-attestation-ref.ps1 -EventName $env:ATTESTATION_EVENT_NAME -Ref $env:ATTESTATION_REF
+
+      # Ancestry/commit validation: proves the actual triggering commit is reachable from origin/main's history,
+      # not merely that the ref's NAME matched the expected shape above. A ref name check alone cannot catch a
+      # `dotnet-v*` tag (or, in principle, a differently-named ref) pointing at a commit that was never actually
+      # merged into `main`.
+      - name: Validate commit is reachable from origin/main (ancestry check)
+        shell: bash
+        env:
+          ATTESTATION_SHA: ${{ github.sha }}
+        run: |
+          if ! git merge-base --is-ancestor "$ATTESTATION_SHA" origin/main; then
+            echo "::error::Commit $ATTESTATION_SHA is not an ancestor of origin/main; refusing to attest provenance for a commit that never reached the protected main branch."
+            exit 1
+          fi
+          echo "Commit $ATTESTATION_SHA is reachable from origin/main."
+
       - name: Download packages and SBOMs from the sbom job
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
