@@ -115,6 +115,7 @@ def test_python_release_creates_main_reachable_tag_and_requires_explicit_publish
     assert 'test "$DISPATCH_REF" = main' in workflow
     assert 'git merge-base --is-ancestor "$SHA" origin/main' in workflow
     assert "github.event_name == 'push' && github.sha || inputs.commit" in workflow
+    assert 'if [ "${{ github.event_name }}" = push ]; then' in workflow
     assert 'test "$SHA" = "$GITHUB_SHA"' in workflow
     assert "--output tag" in workflow
     assert 'VERSION="${TAG#python-v}"' in workflow
@@ -147,6 +148,11 @@ def test_python_release_creates_main_reachable_tag_and_requires_explicit_publish
     assert "github-release:" in workflow
     assert 'gh release create "$RELEASE_TAG"' in workflow
     assert "steps.attest.outputs.bundle-path" in workflow
+    assert "uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d" in workflow
+    assert "predicate-type: https://slsa.dev/provenance/v1" in workflow
+    assert "predicate-path: dist/release-provenance-predicate.json" in workflow
+    assert "RELEASE_SHA: ${{ needs.tag.outputs.sha }}" in workflow
+    assert '"digest": {"gitCommit": sha}' in workflow
     assert "PACKAGE_SHA256SUMS" in workflow
     assert "agent-framework-mongodb.sbom.cdx.json" in workflow
     assert "scripts/run_framework_compatibility.py" in workflow
@@ -166,6 +172,34 @@ def test_all_workflow_actions_are_pinned() -> None:
                 continue
             reference = line.rsplit("@", 1)[1].split()[0]
             assert re.fullmatch(r"[0-9a-f]{40}", reference), f"{path.name}: {line}"
+
+
+def test_common_workflow_actions_are_pinned_to_their_reviewed_repositories() -> None:
+    reviewed: dict[str, set[str]] = {
+        "actions/checkout": {
+            "11d5960a326750d5838078e36cf38b85af677262",
+            "08c6903cd8c0fde910a37f88322edcfb5dd907a8",
+        },
+        "actions/upload-artifact": {
+            "ea165f8d65b6e75b540449e92b4886f43607fa02",
+            "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+        },
+        "actions/download-artifact": {
+            "d3f86a106a0bac45b974a628896c90dbdf5c8093",
+            "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
+        },
+        "github/codeql-action/init": {"c4dd10e44af883a891fe31ced449bcb4a6728b9b"},
+        "github/codeql-action/analyze": {"c4dd10e44af883a891fe31ced449bcb4a6728b9b"},
+    }
+    for path in _WORKFLOWS.glob("*.yml"):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped.startswith("- uses:"):
+                continue
+            action, reference = stripped.removeprefix("- uses: ").split("@", 1)
+            sha = reference.split()[0]
+            if action in reviewed:
+                assert sha in reviewed[action], f"{path.name}: {line}"
 
 
 def test_python_release_actions_are_pinned_to_reviewed_commits() -> None:

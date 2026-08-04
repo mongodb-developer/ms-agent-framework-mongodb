@@ -108,8 +108,8 @@ vector-only options, so none of the three modes can accidentally require the oth
 
 Per rag.md's capability matrix (server gate "MongoDB 8.0+", indexes "Vector Search + Search"), this slice adds a
 read-only, mode-gated `ValidateHybridSearchCapabilityAsync(bool requireReady = true, bool refresh = false,
-CancellationToken)` seam, mirroring `ValidateSearchIndexAsync`'s ([slice 10](dotnet-rag-full-text-search.md
-#search-index-capability-validation-review-fix)) design exactly:
+CancellationToken)` seam, mirroring `ValidateSearchIndexAsync`'s
+([slice 10](dotnet-rag-full-text-search.md#search-index-capability-validation-review-fix)) design exactly:
 
 - Checks the connected server's `buildInfo.version` major component against a minimum of `8`, wrapping any
   `MongoException` from the `buildInfo` command (or an unparsable version string) as an actionable

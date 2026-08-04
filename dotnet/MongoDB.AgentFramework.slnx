@@ -7,11 +7,16 @@
     <Project Path="samples/IncrementalIngestionQuickstart/IncrementalIngestionQuickstart.csproj" />
     <Project Path="samples/IndexManagementQuickstart/IndexManagementQuickstart.csproj" />
     <Project Path="samples/IngestionSamples/IngestionSamples.csproj" />
+    <Project Path="samples/MemoryAndRAG/MemoryAndRAG.csproj" />
     <Project Path="samples/MemoryQuickstart/MemoryQuickstart.csproj" />
+    <Project Path="samples/MongoDBDocumentLoader/MongoDBDocumentLoader.csproj" />
+    <Project Path="samples/OnDemandRetrievalTool/OnDemandRetrievalTool.csproj" />
     <Project Path="samples/ParentDocumentRAGQuickstart/ParentDocumentRAGQuickstart.csproj" />
     <Project Path="samples/RAGQuickstart/RAGQuickstart.csproj" />
     <Project Path="samples/SessionPersistenceQuickstart/SessionPersistenceQuickstart.csproj" />
+    <Project Path="samples/StructuredMetadataRetrieval/StructuredMetadataRetrieval.csproj" />
     <Project Path="samples/WorkflowCheckpointResumeQuickstart/WorkflowCheckpointResumeQuickstart.csproj" />
+    <Project Path="samples/WorkflowRetrieval/WorkflowRetrieval.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/IngestionSamples.Tests/IngestionSamples.Tests.csproj" />

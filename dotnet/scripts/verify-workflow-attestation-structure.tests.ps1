@@ -65,6 +65,7 @@ $RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "../..")
 $WorkflowsDir = Join-Path $RepoRoot ".github/workflows"
 $SbomWorkflowPath = Join-Path $WorkflowsDir "dotnet-sbom-provenance.yml"
 $AttestationWorkflowPath = Join-Path $WorkflowsDir "dotnet-release-attestation.yml"
+$PythonReleaseWorkflowPath = Join-Path $WorkflowsDir "release-python.yml"
 $UpstreamWorkflowName = ".NET package SBOM (credential-free verification)"
 
 $script:AssertionFailures = 0
@@ -181,7 +182,14 @@ foreach ($workflowFile in $allWorkflowFiles) {
         }
     }
 
-    if ($hasElevatedJob) {
+    if ($hasElevatedJob -and $workflowFile.Name -ceq 'release-python.yml') {
+        Assert-True (
+            $triggerKeys.Count -eq 2 -and
+            $triggerKeys -contains 'push' -and
+            $triggerKeys -contains 'workflow_dispatch'
+        ) "release-python.yml is the single reviewed direct-release exception and keeps only push/workflow_dispatch triggers -- found triggers: $($triggerKeys -join ', ')"
+    }
+    elseif ($hasElevatedJob) {
         $disallowedTriggers = $triggerKeys | Where-Object { $_ -ne 'workflow_run' }
         Assert-True (
             $triggerKeys.Count -gt 0 -and $disallowedTriggers.Count -eq 0
@@ -191,6 +199,38 @@ foreach ($workflowFile in $allWorkflowFiles) {
         Assert-True $true "$($workflowFile.Name) has no job with elevated id-token/attestations/artifact-metadata permissions (no trigger restriction required)"
     }
 }
+
+# release-python.yml is allowed to publish and attest directly because both entry points are restricted to the
+# default branch, the selected source must be main-reachable, and custom provenance binds the validated source SHA.
+$pythonReleaseText = Get-Content -Path $PythonReleaseWorkflowPath -Raw
+$pythonReleaseJobBlocks = Get-WorkflowJobBlocks -Path $PythonReleaseWorkflowPath
+Assert-True (
+    $pythonReleaseText -match '(?ms)^  push:\s+branches:\s+- main\s+paths:\s+- "python/pyproject\.toml"'
+) "release-python.yml push execution is restricted to main and the Python version manifest"
+Assert-True (
+    $pythonReleaseText -match [regex]::Escape('test "$DISPATCH_REF" = main')
+) "release-python.yml manual dispatch rejects every branch except main"
+Assert-True (
+    $pythonReleaseText -match '(?s)if \[ "\$\{\{ github\.event_name \}\}" = push \]; then\s+test "\$SHA" = "\$GITHUB_SHA"\s+fi'
+) "release-python.yml requires push releases to equal the immutable triggering event SHA"
+Assert-True (
+    $pythonReleaseText -match [regex]::Escape('git merge-base --is-ancestor "$SHA" origin/main')
+) "release-python.yml independently proves the release source is reachable from origin/main"
+Assert-True (
+    $pythonReleaseJobBlocks['provenance'] -match 'needs:\s*\[tag,\s*build\]' -and
+    $pythonReleaseJobBlocks['publish'] -match 'needs:\s*\[tag,\s*build,\s*provenance\]'
+) "release-python.yml elevated provenance/publish jobs remain transitively gated by tag validation and the release build"
+Assert-True (
+    $pythonReleaseJobBlocks['publish'] -match 'environment:\s*\$\{\{\s*vars\.PYPI_ENVIRONMENT\s*\}\}' -and
+    $pythonReleaseJobBlocks['publish'] -match "vars\.PYPI_PUBLISHING_APPROVED == 'true'"
+) "release-python.yml publishing remains protected by an explicitly approved GitHub environment"
+Assert-True (
+    $pythonReleaseJobBlocks['provenance'] -match [regex]::Escape('RELEASE_SHA: ${{ needs.tag.outputs.sha }}') -and
+    $pythonReleaseJobBlocks['provenance'] -match '"digest": \{"gitCommit": sha\}' -and
+    $pythonReleaseJobBlocks['provenance'] -match 'uses:\s*actions/attest@[0-9a-f]{40}\s*#\s*actions/attest v4\.\d+\.\d+' -and
+    $pythonReleaseJobBlocks['provenance'] -match 'predicate-type:\s*https://slsa\.dev/provenance/v1' -and
+    $pythonReleaseJobBlocks['provenance'] -match 'predicate-path:\s*dist/release-provenance-predicate\.json'
+) "release-python.yml custom provenance binds the validated tag output SHA through a pinned generic attestation action"
 
 # --- Assertion 2: dotnet-sbom-provenance.yml is fully unprivileged ----------------------------------------------
 $sbomJobBlocks = Get-WorkflowJobBlocks -Path $SbomWorkflowPath
@@ -283,9 +323,16 @@ Assert-True (
 # instead generates a custom predicate that explicitly binds resolvedDependencies to the validated commit SHA.
 foreach ($workflowFile in $allWorkflowFiles) {
     $fileText = Get-Content -Path $workflowFile.FullName -Raw
-    Assert-True (
-        $fileText -notmatch 'uses:\s*actions/attest-build-provenance'
-    ) "$($workflowFile.Name) never ACTUALLY USES the stock actions/attest-build-provenance action (it would derive misleading provenance under workflow_run -- see ReleaseProvenancePredicate.ps1's rationale; mentioning it only in explanatory comments is fine)"
+    if ($workflowFile.Name -ceq 'release-python.yml') {
+        Assert-True (
+            $fileText -notmatch 'uses:\s*actions/attest-build-provenance'
+        ) "release-python.yml never uses ambient stock provenance for a recoverable historical main commit"
+    }
+    else {
+        Assert-True (
+            $fileText -notmatch 'uses:\s*actions/attest-build-provenance'
+        ) "$($workflowFile.Name) never ACTUALLY USES the stock actions/attest-build-provenance action (it would derive misleading provenance under workflow_run -- see ReleaseProvenancePredicate.ps1's rationale; mentioning it only in explanatory comments is fine)"
+    }
 }
 
 Assert-True (

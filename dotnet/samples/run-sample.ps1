@@ -5,12 +5,17 @@ param(
     [Parameter(Mandatory)]
     [ValidateSet(
         'HistoryQuickstart',
+        'MemoryAndRAG',
+        'MongoDBDocumentLoader',
+        'OnDemandRetrievalTool',
         'IncrementalIngestionQuickstart',
         'IndexManagementQuickstart',
         'MemoryQuickstart',
         'ParentDocumentRAGQuickstart',
         'RAGQuickstart',
         'SessionPersistenceQuickstart',
+        'StructuredMetadataRetrieval',
+        'WorkflowRetrieval',
         'WorkflowCheckpointResumeQuickstart')]
     [string] $Sample,
 

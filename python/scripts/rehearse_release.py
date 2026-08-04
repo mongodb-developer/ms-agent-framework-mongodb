@@ -120,8 +120,8 @@ def main() -> int:
     if args.dry_run:
         print("\n".join(subprocess.list2cmdline(command) for command in plan))
         print(
-            "Dynamically resolve and run isolated latest-stable and previous-stable "
-            "Agent Framework compatibility rows."
+            "Dynamically resolve and run isolated compatibility rows for up to the latest "
+            "two supported stable Agent Framework releases."
         )
         print("No upload or publication command is present.")
         return 0
