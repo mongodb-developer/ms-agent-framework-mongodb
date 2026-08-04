@@ -25,6 +25,14 @@ class MongoDBMappingError(MongoDBIntegrationError):
     """Raised when a MongoDB document cannot be mapped safely."""
 
 
+class MongoDBSerializationError(MongoDBMappingError):
+    """Raised when a value cannot be serialized without losing identity semantics."""
+
+
+class MongoDBFilterTranslationError(MongoDBIntegrationError):
+    """Raised when a mandatory filter cannot be translated completely."""
+
+
 class MongoDBAuthorizationError(MongoDBIntegrationError):
     """Raised when MongoDB authentication or authorization fails."""
 
@@ -45,6 +53,10 @@ class MongoDBIndexNotReadyError(MongoDBIndexError):
     """Raised when an index exists but is not queryable."""
 
 
+class MongoDBIndexFailedError(MongoDBIndexError):
+    """Raised when an index entered a permanent failed state."""
+
+
 class MongoDBRetrievalError(MongoDBIntegrationError):
     """Raised when a direct MongoDB read operation fails."""
 
@@ -55,6 +67,10 @@ class MongoDBTransientRetrievalError(MongoDBRetrievalError):
 
 class MongoDBPersistenceError(MongoDBIntegrationError):
     """Raised when a direct MongoDB write operation fails."""
+
+
+class MongoDBConcurrencyError(MongoDBPersistenceError):
+    """Raised when optimistic session or checkpoint concurrency fails."""
 
 
 class MongoDBTransientPersistenceError(MongoDBPersistenceError):

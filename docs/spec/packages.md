@@ -54,18 +54,44 @@ API MUST not expose VectorData limitations as MongoDB limitations.
 Public types:
 
 ```csharp
+MongoDBAgentSessionPage
+MongoDBAgentSessionRecord
+MongoDBAgentSessionStore
+MongoDBAgentSessionStoreOptions
+MongoDBAgentSessionSummary
+MongoDBChatHistoryProvider
+MongoDBChatHistoryProviderOptions
+MongoDBCheckpointPage
+MongoDBCheckpointRecord
+MongoDBCheckpointStore
+MongoDBCheckpointStoreOptions
+MongoDBCheckpointSummary
+MongoDBIndexComparison
+MongoDBIndexInfo
+MongoDBIndexStatus
+MongoDBMemoryIndexManager
+MongoDBMemoryMetadata
+MongoDBMemoryMetadataPage
 MongoDBMemoryProvider
 MongoDBMemoryProviderOptions
 MongoDBMemoryScope
-MongoDBChatHistoryProvider
-MongoDBChatHistoryProviderOptions
+MongoDBMemorySearchResult
+MongoDBRAGContextProvider
+MongoDBRAGContextProviderOptions
+MongoDBRAGFilter
+MongoDBRAGIndexManager
 MongoDBRAGProvider
 MongoDBRAGProviderOptions
 MongoDBRAGResult
 MongoDBSearchMode
-MongoDBAgentSessionStore
-MongoDBCheckpointStore
+MongoDBSearchIndexDefinition
+MongoDBVectorSearchIndexDefinition
 ```
+
+The package also exposes the `MongoDBIntegrationException` hierarchy for actionable configuration, capability,
+concurrency, embedding, index, mapping, persistence, retrieval, and timeout failures. The complete member-level public
+surface is enforced by `dotnet/src/MongoDB.AgentFramework/PublicAPI.Unshipped.txt`; this section documents its
+consumer-facing type groups rather than duplicating every member signature.
 
 The current prototype uses `Microsoft.Agents.AI.MongoDB` and `MongoDBProvider`. Those names are acceptable only inside
 a Microsoft-owned and Microsoft-published package. During extraction, rename them to the canonical external package
