@@ -106,6 +106,7 @@ jobs:
       validated-sha: ${{ steps.record-sha.outputs.sha }}
       is-tag-push: ${{ steps.validate-ref.outputs.is-tag-push }}
       tag-name: ${{ steps.validate-ref.outputs.tag-name }}
+      release-tag: ${{ steps.release-tag.outputs.tag }}
     steps:
       # Explicit and auditable alongside (never a substitute for) this workflow's own `workflow_run` trigger,
       # which GitHub guarantees already resolves this entire workflow's job graph from the default branch
@@ -159,6 +160,28 @@ jobs:
           fi
           echo "Commit $ATTESTATION_SHA is reachable from origin/main."
 
+      - name: Resolve matching manifest release tag
+        id: release-tag
+        shell: pwsh
+        env:
+          ATTESTATION_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          $projectText = git show "$($env:ATTESTATION_SHA):dotnet/src/MongoDB.AgentFramework/MongoDB.AgentFramework.csproj"
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to read the package manifest at the validated commit.' }
+          [xml]$project = $projectText
+          $tag = "dotnet-v$([string]$project.Project.PropertyGroup.Version)"
+          git show-ref --verify --quiet "refs/tags/$tag"
+          if ($LASTEXITCODE -eq 0) {
+            $tagCommit = (git rev-parse "$tag^{commit}").Trim()
+            if ($tagCommit -cne $env:ATTESTATION_SHA) {
+              throw "Manifest tag '$tag' exists but does not target validated commit $env:ATTESTATION_SHA."
+            }
+            "tag=$tag" | Add-Content $env:GITHUB_OUTPUT
+          }
+          else {
+            "tag=" | Add-Content $env:GITHUB_OUTPUT
+          }
+
       # Records the plain, already-GitHub-verified upstream commit SHA as this job's output, for
       # `provenance-attestation` to check out and rebuild from below -- the ONLY commit that job is allowed to
       # trust, never `github.sha`/`github.ref` of this workflow's own `workflow_run` context (which always
@@ -204,6 +227,22 @@ jobs:
             9.0.x
             10.0.x
 
+      - name: Run release unit tests with TRX evidence
+        shell: pwsh
+        working-directory: dotnet
+        run: |
+          dotnet test MongoDB.AgentFramework.slnx --configuration Release `
+            --logger "trx;LogFileName=release-tests.trx" `
+            --results-directory artifacts/release-test-results
+          if ($LASTEXITCODE -ne 0) { throw 'Release tests failed.' }
+          ./scripts/assert-trx-executed.ps1 `
+            -TrxPath artifacts/release-test-results/release-tests.trx -Label release
+
+      - name: Verify declared Agent Framework compatibility endpoints
+        shell: pwsh
+        working-directory: dotnet
+        run: ./scripts/verify-agent-framework-compatibility.ps1 -Configuration Release -Versions "1.13.0","1.16.0"
+
       # Rebuilds the package fresh from the validated checkout -- the full verify-package.ps1 verification
       # (pack, exact-match allowlist, nuspec metadata, double-pack reproducibility, and the multi-TFM isolated
       # consumer smoke test) always runs here, regardless of trigger depth, since this is the one build whose
@@ -212,6 +251,41 @@ jobs:
         shell: pwsh
         working-directory: dotnet
         run: ./scripts/verify-package.ps1 -Configuration Release
+
+      - name: Generate release SPDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          path: dotnet/artifacts/packages
+          format: spdx-json
+          output-file: dotnet/artifacts/packages/MongoDB.AgentFramework.sbom.spdx.json
+          upload-artifact: false
+
+      - name: Generate release CycloneDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          path: dotnet/artifacts/packages
+          format: cyclonedx-json
+          output-file: dotnet/artifacts/packages/MongoDB.AgentFramework.sbom.cyclonedx.json
+          upload-artifact: false
+
+      - name: Write release validation report and checksums
+        shell: pwsh
+        working-directory: dotnet
+        env:
+          VALIDATED_SHA: ${{ needs.validate-attestation-eligibility.outputs.validated-sha }}
+        run: |
+          @"
+          # MongoDB.AgentFramework release validation
+
+          - Validated commit: `$env:VALIDATED_SHA`
+          - Unit tests: passed; see `release-tests.trx`
+          - Declared compatibility endpoints: `1.13.0`, `1.16.0`; see `compatibility-report.md`
+          - Package metadata/content/reproducibility/local-feed smoke: passed
+          "@ | Set-Content artifacts/packages/release-validation.md
+          Get-ChildItem artifacts/packages -File | ForEach-Object {
+            $hash = Get-FileHash $_.FullName -Algorithm SHA256
+            "$($hash.Hash)  $($_.Name)"
+          } | Set-Content artifacts/packages/checksums.sha256.txt
 
       # Independently re-verifies the tag/package-version match from THIS trusted rebuild's own artifact, never
       # trusting whatever the upstream (differently-triggered, no-OIDC) sbom job asserted about its own build.
@@ -267,6 +341,7 @@ jobs:
       # correctly and honestly identifies this workflow/ref as the actual builder, which it genuinely is
       # (workflow_run guarantees this file's own content is always sourced from main).
       - name: Attest custom release provenance (binds validated commit, never the stock auto-provenance mode)
+        id: attest
         uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         with:
           subject-path: |
@@ -274,6 +349,32 @@ jobs:
             dotnet/artifacts/packages/*.snupkg
           predicate-type: https://slsa.dev/provenance/v1
           predicate-path: dotnet/artifacts/release-provenance-predicate.json
+
+      - name: Collect attestation and reports
+        shell: pwsh
+        working-directory: dotnet
+        env:
+          ATTESTATION_BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+        run: |
+          Copy-Item $env:ATTESTATION_BUNDLE artifacts/packages/MongoDB.AgentFramework.provenance.json
+          Copy-Item artifacts/release-provenance-predicate.json artifacts/packages/
+          Copy-Item artifacts/release-test-results/release-tests.trx artifacts/packages/
+          Copy-Item artifacts/agent-framework-compat-results/compatibility-report.* artifacts/packages/
+          if (Test-Path artifacts/packages/checksums.sha256.txt) {
+            Remove-Item artifacts/packages/checksums.sha256.txt
+          }
+          Get-ChildItem artifacts/packages -File | ForEach-Object {
+            $hash = Get-FileHash $_.FullName -Algorithm SHA256
+            "$($hash.Hash)  $($_.Name)"
+          } | Set-Content artifacts/packages/checksums.sha256.txt
+
+      - name: Upload exact release bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dotnet-release-bundle
+          path: dotnet/artifacts/packages/*
+          if-no-files-found: error
+          retention-days: 90
 
       # BLOCKED (see file header): no owner-issued NuGet code-signing certificate or ADR 0013 acceptance exists
       # yet. This step is intentionally never executed (`if: false`); it documents the exact command a future,
@@ -286,3 +387,70 @@ jobs:
           --certificate-path "${{ secrets.NUGET_SIGNING_CERTIFICATE_PATH }}"
           --certificate-password "${{ secrets.NUGET_SIGNING_CERTIFICATE_PASSWORD }}"
           --timestamper http://timestamp.digicert.com
+
+  publish-nuget-and-github-release:
+    name: Publish NuGet package and create GitHub Release
+    needs: [validate-attestation-eligibility, provenance-attestation]
+    if: needs.validate-attestation-eligibility.outputs.release-tag != '' && vars.NUGET_ENVIRONMENT != ''
+    runs-on: ubuntu-latest
+    environment: ${{ vars.NUGET_ENVIRONMENT }}
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ needs.validate-attestation-eligibility.outputs.release-tag }}
+      NUGET_SOURCE_URL: ${{ vars.NUGET_SOURCE_URL || 'https://api.nuget.org/v3/index.json' }}
+      NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+    steps:
+      - name: Download exact attested release bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dotnet-release-bundle
+          path: release-bundle
+      - name: Setup .NET
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
+        with:
+          dotnet-version: 10.0.x
+      - name: Validate protected publishing configuration
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:NUGET_API_KEY)) {
+            throw 'NUGET_API_KEY is missing from the protected NuGet environment.'
+          }
+          if (-not [Uri]::IsWellFormedUriString($env:NUGET_SOURCE_URL, [UriKind]::Absolute)) {
+            throw 'NUGET_SOURCE_URL must be an absolute NuGet V3 feed URL.'
+          }
+      - name: Publish exact nupkg and snupkg
+        shell: pwsh
+        run: |
+          $packages = @(Get-ChildItem release-bundle -Filter '*.nupkg' |
+            Where-Object { $_.Name -notlike '*.snupkg' })
+          $symbols = @(Get-ChildItem release-bundle -Filter '*.snupkg')
+          if ($packages.Count -ne 1 -or $symbols.Count -ne 1) {
+            throw "Expected exactly one nupkg and one snupkg; found $($packages.Count) and $($symbols.Count)."
+          }
+          dotnet nuget push $packages[0].FullName `
+            --api-key $env:NUGET_API_KEY --source $env:NUGET_SOURCE_URL
+          if ($LASTEXITCODE -ne 0) { throw 'NuGet publication failed.' }
+      - name: Verify published package is restorable from configured feed
+        shell: pwsh
+        run: |
+          $version = $env:RELEASE_TAG.Substring('dotnet-v'.Length)
+          New-Item -ItemType Directory published-consumer | Out-Null
+          dotnet new console --output published-consumer --framework net10.0 --no-restore
+          dotnet add published-consumer package MongoDB.AgentFramework `
+            --version $version --source $env:NUGET_SOURCE_URL --no-restore
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to configure the published-package consumer.' }
+          $restored = $false
+          for ($attempt = 1; $attempt -le 12; $attempt++) {
+            dotnet restore published-consumer --force --no-cache --source $env:NUGET_SOURCE_URL
+            if ($LASTEXITCODE -eq 0) { $restored = $true; break }
+            Start-Sleep -Seconds 10
+          }
+          if (-not $restored) { throw 'Published package was not restorable after bounded feed propagation retries.' }
+      - name: Create immutable GitHub Release with exact bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create "$RELEASE_TAG" release-bundle/*
+          --verify-tag --title "MongoDB.AgentFramework ${RELEASE_TAG#dotnet-v}"
+          --generate-notes

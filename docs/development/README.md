@@ -54,4 +54,5 @@ This documentation explains the implemented system at the code level. The
 
 - [.NET packaging and release engineering](release/dotnet-packaging-release.md)
 - [.NET Agent Framework compatibility matrix](release/dotnet-agent-framework-compatibility-matrix.md)
+- [.NET release operations](release/dotnet-release-operations.md)
 - [.NET samples inventory](release/dotnet-samples-inventory.md)

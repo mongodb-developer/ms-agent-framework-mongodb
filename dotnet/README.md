@@ -4,6 +4,10 @@
 
 ## Status
 
+For local non-publishing builds, dynamic Agent Framework compatibility reports,
+version promotion, and protected release configuration, see the
+[.NET release operations guide](../docs/development/release/dotnet-release-operations.md).
+
 The package version is a **pre-1.0 preview** (`0.1.0-preview.*`). The public
 API surface, package metadata, symbols/SourceLink, and packaging pipeline are
 implemented and verified; see the

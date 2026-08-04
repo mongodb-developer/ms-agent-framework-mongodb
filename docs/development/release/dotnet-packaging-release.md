@@ -579,10 +579,16 @@ human-readable tag next to the pinned commit SHA):
 ## Versioning and tagging
 
 The package version is `0.1.0-preview.1`. Per `packages.md`/
-`compatibility-migration.md`, the eventual tag convention is
-`dotnet-v<version>` (for example `dotnet-v0.1.0-preview.1`). **No tag has
-been created by this work** -- tagging and publishing are explicitly
-excluded from this packaging-engineering slice pending ADR 0013 acceptance.
+`compatibility-migration.md`, the tag convention is `dotnet-v<version>` (for
+example `dotnet-v0.1.0-preview.1`). The explicit-main
+`.github/workflows/dotnet-release.yml` coordinator validates the manifest and
+main reachability, creates the annotated tag through Actions, and explicitly
+dispatches the credential-free release build. This explicit dispatch is
+required because a tag created with `GITHUB_TOKEN` does not recursively trigger
+a tag-push workflow. Publication then remains inside the default-branch-sourced
+`workflow_run` trust graph and requires the environment named by
+`NUGET_ENVIRONMENT`; see
+[.NET release operations](dotnet-release-operations.md).
 When a `dotnet-v*` tag is eventually pushed, `dotnet-sbom-provenance.yml`'s
 `sbom` job asserts the packed `.nuspec`'s `<version>` exactly matches that
 tag (`scripts/verify-release-tag.ps1`) before its own SBOM/checksum upload,

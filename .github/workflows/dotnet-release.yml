@@ -1,0 +1,61 @@
+name: .NET release coordinator
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_release:
+        description: Type RELEASE to create the manifest tag and start the protected release chain
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  create-tag-and-dispatch:
+    if: github.ref == 'refs/heads/main' && inputs.confirm_release == 'RELEASE'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - name: Checkout main with tags
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Validate main reachability and derive manifest tag
+        id: release
+        shell: pwsh
+        run: |
+          git fetch origin main --tags
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to fetch origin/main and tags.' }
+          $sha = (git rev-parse HEAD).Trim()
+          git merge-base --is-ancestor $sha origin/main
+          if ($LASTEXITCODE -ne 0) { throw "Release commit $sha is not reachable from origin/main." }
+          [xml]$project = Get-Content dotnet/src/MongoDB.AgentFramework/MongoDB.AgentFramework.csproj -Raw
+          $version = [string]$project.Project.PropertyGroup.Version
+          if ($version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$') {
+            throw "Manifest version '$version' is not a valid repository release SemVer."
+          }
+          $tag = "dotnet-v$version"
+          git show-ref --verify --quiet "refs/tags/$tag"
+          if ($LASTEXITCODE -eq 0) { throw "Tag '$tag' already exists; versions are immutable." }
+          "tag=$tag" | Add-Content $env:GITHUB_OUTPUT
+      - name: Create and push annotated release tag
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$RELEASE_TAG" -m "Release MongoDB.AgentFramework ${RELEASE_TAG#dotnet-v}"
+          git push origin "refs/tags/$RELEASE_TAG"
+      - name: Dispatch credential-free release build on main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run dotnet-sbom-provenance.yml --ref main
+      - name: Explain non-recursive chain
+        run: >
+          echo "Created ${{ steps.release.outputs.tag }} and explicitly dispatched the SBOM workflow.
+          Tags created with GITHUB_TOKEN do not recursively trigger push workflows; workflow_dispatch is the
+          documented GITHUB_TOKEN exception and its completion starts the trusted workflow_run attestation chain."
