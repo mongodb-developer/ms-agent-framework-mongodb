@@ -31,8 +31,14 @@ expect a `GITHUB_TOKEN` tag push to recursively start another workflow.
 `publish: true` is necessary but insufficient. Repository owners must set:
 
 - `PYTHON_PROVENANCE_APPROVED=true`;
+- `PYPI_PUBLISHING_APPROVED=true`;
 - `PYPI_ENVIRONMENT` to the protected GitHub Environment configured as the PyPI
   trusted publisher for `.github/workflows/release-python.yml`.
+
+`PYPI_PUBLISHING_APPROVED` is a governance kill switch, not a developer
+convenience flag. Owners may set it only after ADR 0013 is accepted and package
+publishing ownership, approvers, support, and security contacts are confirmed.
+Until then it must remain unset or false.
 
 The environment must require reviewer approval. The publish job receives only
 `id-token: write` and `contents: read`; there is no password or API-token input.
@@ -43,8 +49,9 @@ checksums, JUnit/release reports, compatibility reports, CycloneDX SBOM, and
 GitHub provenance bundle.
 
 Merely pushing or merging never tags or publishes. A dispatch with
-`publish: false`, an unset `PYPI_ENVIRONMENT`, missing provenance approval, or a
-rejected environment deployment never uploads to PyPI.
+`publish: false`, an unset/false `PYPI_PUBLISHING_APPROVED`, an unset
+`PYPI_ENVIRONMENT`, missing provenance approval, or a rejected environment
+deployment never uploads to PyPI.
 
 ## Agent Framework compatibility
 
@@ -76,13 +83,20 @@ python scripts\rehearse_release.py
 ```
 
 The command removes only `python/dist/rehearsal`, runs credential-free quality
-and tests, builds exactly one wheel and sdist, validates both, installs each
-local artifact in its own environment, and writes:
+and coverage, dynamically resolves latest and previous stable Agent Framework
+Core from PyPI, and runs each exact version through the same isolated
+compatibility-row helper used by release CI. It then builds exactly one wheel
+and sdist, validates both, installs each local artifact in its own environment,
+and writes:
 
 - `dist/rehearsal/SHA256SUMS`;
 - `dist/rehearsal/tests.xml`;
 - `dist/rehearsal/rehearsal-report.json`;
 - `dist/rehearsal/rehearsal-report.md`.
+
+Each compatibility subdirectory also retains coverage, JUnit, `pip freeze`,
+JSON, and Markdown evidence. Checksums and reports are local evidence only;
+neither the rehearsal nor the compatibility helper contains a publish action.
 
 Use `python scripts\rehearse_release.py --dry-run` to inspect the plan without
 changing files. The script contains no upload operation.

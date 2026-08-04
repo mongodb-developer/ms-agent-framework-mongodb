@@ -58,6 +58,9 @@ not authorize publication.
 - [ ] Owners create a protected GitHub environment, store only its name in
   `PYPI_ENVIRONMENT`, require reviewers, and configure PyPI OIDC trusted
   publishing for this repository/workflow/environment.
+- [ ] ADR 0013 is accepted and publishing ownership, approvers, support, and
+  security contacts are confirmed before owners set
+  `PYPI_PUBLISHING_APPROVED=true`; otherwise it remains unset or false.
 - [ ] Owners approve provenance by setting
   `PYTHON_PROVENANCE_APPROVED=true`.
 - [ ] Organization signature policy is recorded and implemented; do not invent

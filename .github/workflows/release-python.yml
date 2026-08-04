@@ -114,37 +114,15 @@ jobs:
           python-version: "3.10"
           cache: pip
           cache-dependency-path: python/pyproject.toml
-      - name: Install exact compatibility version
+      - name: Run isolated compatibility gate
+        id: gate
+        continue-on-error: true
         run: |
-          python -m pip install --disable-pip-version-check -e ".[dev]"
-          python -m pip install --disable-pip-version-check \
-            --force-reinstall "agent-framework-core==$FRAMEWORK_VERSION"
-          python -m pip check
-      - name: Run compatibility gate
-        run: |
-          mkdir -p "$REPORT_DIR"
-          python -m pytest --junitxml="$REPORT_DIR/pytest.xml" -q
-          python -m ruff check src tests samples scripts ../scripts/scan_credentials.py
-          python -m ruff format --check src tests samples scripts ../scripts/scan_credentials.py
-          python -m mypy
-          python -m pyright
-          python scripts/check_api_baseline.py api-baseline.json
-          python ../scripts/scan_credentials.py
-          python -m build --outdir dist/compatibility
-          python -m twine check dist/compatibility/*.whl dist/compatibility/*.tar.gz
-          python scripts/verify_artifacts.py \
-            dist/compatibility/*.whl dist/compatibility/*.tar.gz
-          python -m venv .compatibility-wheel
-          .compatibility-wheel/bin/python -m pip install --disable-pip-version-check \
-            "agent-framework-core==$FRAMEWORK_VERSION" dist/compatibility/*.whl
-          .compatibility-wheel/bin/python scripts/smoke_public_api.py
-          python -m venv .compatibility-sdist
-          .compatibility-sdist/bin/python -m pip install --disable-pip-version-check \
-            "agent-framework-core==$FRAMEWORK_VERSION" dist/compatibility/*.tar.gz
-          .compatibility-sdist/bin/python scripts/smoke_public_api.py
-          python -m pip freeze > "$REPORT_DIR/pip-freeze.txt"
-          printf '# Compatibility result\n\n- Version: `%s`\n- Selection: `%s`\n- Result: **passed**\n' \
-            "$FRAMEWORK_VERSION" "${{ matrix.label }}" > "$REPORT_DIR/summary.md"
+          python scripts/run_framework_compatibility.py \
+            --version "$FRAMEWORK_VERSION" \
+            --label "${{ matrix.label }}" \
+            --channel "${{ matrix.channel }}" \
+            --report-dir "$REPORT_DIR"
       - uses: actions/upload-artifact@11d5960a326750d5838078e36cf38b85af677262 # actions/upload-artifact v4
         if: always()
         with:
@@ -152,6 +130,11 @@ jobs:
           path: python/compatibility-reports/
           if-no-files-found: error
           retention-days: 30
+      - name: Enforce compatibility outcome after retaining evidence
+        if: always()
+        env:
+          GATE_OUTCOME: ${{ steps.gate.outcome }}
+        run: test "$GATE_OUTCOME" = success
 
   build:
     needs: [tag, compatibility]
@@ -169,6 +152,8 @@ jobs:
           cache: pip
           cache-dependency-path: python/pyproject.toml
       - name: Validate exact tag and install release tools
+        id: setup
+        continue-on-error: true
         working-directory: python
         env:
           RELEASE_TAG: ${{ needs.tag.outputs.tag }}
@@ -179,6 +164,9 @@ jobs:
           python -m pip install --disable-pip-version-check -e ".[dev]"
           python -m pip install --disable-pip-version-check "pip-audit==2.10.1"
       - name: Run credential-free release gate
+        id: release-gate
+        if: always()
+        continue-on-error: true
         working-directory: python
         run: |
           mkdir -p dist/reports
@@ -193,6 +181,9 @@ jobs:
           printf '# Release gate\n\nCommit: `%s`\n\nResult: **passed**\n' \
             "${{ needs.tag.outputs.sha }}" > dist/reports/release-gate.md
       - name: Build and validate exact artifacts
+        id: package
+        if: always()
+        continue-on-error: true
         working-directory: python
         env:
           RELEASE_VERSION: ${{ needs.tag.outputs.version }}
@@ -215,12 +206,46 @@ jobs:
           sha256sum dist/packages/* dist/*.sbom.cdx.json > dist/SHA256SUMS
           python scripts/verify_artifacts.py --supplemental \
             dist/*.sbom.cdx.json dist/PACKAGE_SHA256SUMS dist/SHA256SUMS
+      - name: Finalize release evidence
+        if: always()
+        working-directory: python
+        env:
+          SETUP_OUTCOME: ${{ steps.setup.outcome }}
+          GATE_OUTCOME: ${{ steps.release-gate.outcome }}
+          PACKAGE_OUTCOME: ${{ steps.package.outcome }}
+          RELEASE_SHA: ${{ needs.tag.outputs.sha }}
+        run: |
+          mkdir -p dist/reports
+          python -m pip freeze > dist/reports/pip-freeze.txt
+          if [ ! -s dist/reports/pytest.xml ]; then
+            printf '%s\n' \
+              '<?xml version="1.0" encoding="UTF-8"?>' \
+              '<testsuite name="python-release-gate" tests="1" failures="1">' \
+              '<testcase name="release-gate"><failure message="pytest did not complete"/></testcase>' \
+              '</testsuite>' > dist/reports/pytest.xml
+          fi
+          python -c "import json, os, pathlib; pathlib.Path('dist/reports/release-gate.json').write_text(json.dumps({'commit': os.environ['RELEASE_SHA'], 'setup': os.environ['SETUP_OUTCOME'], 'gate': os.environ['GATE_OUTCOME'], 'package': os.environ['PACKAGE_OUTCOME']}, indent=2) + '\n', encoding='utf-8')"
+          printf '# Release gate\n\nCommit: `%s`\n\n- Setup: **%s**\n- Gate: **%s**\n- Package: **%s**\n' \
+            "$RELEASE_SHA" "$SETUP_OUTCOME" "$GATE_OUTCOME" "$PACKAGE_OUTCOME" \
+            > dist/reports/release-gate.md
       - uses: actions/upload-artifact@11d5960a326750d5838078e36cf38b85af677262 # actions/upload-artifact v4
+        if: always()
         with:
           name: python-release-${{ needs.tag.outputs.tag }}
           path: python/dist/
           if-no-files-found: error
           retention-days: 30
+      - name: Enforce release outcomes after retaining evidence
+        if: always()
+        working-directory: python
+        env:
+          SETUP_OUTCOME: ${{ steps.setup.outcome }}
+          GATE_OUTCOME: ${{ steps.release-gate.outcome }}
+          PACKAGE_OUTCOME: ${{ steps.package.outcome }}
+        run: |
+          test "$SETUP_OUTCOME" = success
+          test "$GATE_OUTCOME" = success
+          test "$PACKAGE_OUTCOME" = success
 
   provenance:
     needs: [tag, build]
@@ -257,6 +282,7 @@ jobs:
         inputs.publish &&
         needs.build.result == 'success' &&
         needs.provenance.result == 'success' &&
+        vars.PYPI_PUBLISHING_APPROVED == 'true' &&
         vars.PYPI_ENVIRONMENT != ''
       }}
     runs-on: ubuntu-latest

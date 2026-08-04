@@ -73,6 +73,32 @@ def test_release_rehearsal_dry_run_is_non_publishing() -> None:
     )
 
     assert "pytest" in completed.stdout
+    assert "--cov=agent_framework_mongodb" in completed.stdout
     assert "build" in completed.stdout
+    assert "latest-stable and previous-stable" in completed.stdout
     assert "No upload or publication command is present." in completed.stdout
     assert "twine upload" not in completed.stdout
+
+
+def test_release_rehearsal_reuses_dynamic_resolution_and_row_runner() -> None:
+    script = (_PYTHON_ROOT / "scripts" / "rehearse_release.py").read_text(encoding="utf-8")
+
+    assert "resolve_matrix(fetch_pypi())" in script
+    assert 'row["channel"],' in script
+    assert "run_row(" in script
+    assert "framework-resolution.json" in script
+    assert "framework-resolution.md" in script
+
+
+def test_compatibility_runner_retains_failure_evidence_contract() -> None:
+    script = (_PYTHON_ROOT / "scripts" / "run_framework_compatibility.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "pip-freeze.txt" in script
+    assert "pytest.xml" in script
+    assert "summary.json" in script
+    assert "summary.md" in script
+    assert "publishing_attempted" in script
+    assert "--cov=agent_framework_mongodb" in script
+    assert "finally:" in script

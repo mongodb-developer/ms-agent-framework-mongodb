@@ -88,13 +88,14 @@ def test_python_release_creates_main_reachable_tag_and_requires_explicit_publish
     assert 'TAG="python-v$VERSION"' in workflow
     assert 'git push origin "refs/tags/$TAG"' in workflow
     assert "inputs.publish" in workflow
+    assert "vars.PYPI_PUBLISHING_APPROVED == 'true'" in workflow
     assert "vars.PYPI_ENVIRONMENT != ''" in workflow
     assert "environment: ${{ vars.PYPI_ENVIRONMENT }}" in workflow
     assert "id-token: write" in workflow
     assert "validate_release_tag.py" in workflow
     assert ".release-smoke-wheel" in workflow
     assert ".release-smoke-sdist" in workflow
-    assert workflow.count("scripts/smoke_public_api.py") >= 6
+    assert workflow.count("scripts/smoke_public_api.py") >= 4
     assert "verify-published:" in workflow
     published = workflow.split("  verify-published:", 1)[1]
     assert "environment: ${{ vars.PYPI_ENVIRONMENT }}" in published
@@ -111,6 +112,13 @@ def test_python_release_creates_main_reachable_tag_and_requires_explicit_publish
     assert "steps.attest.outputs.bundle-path" in workflow
     assert "PACKAGE_SHA256SUMS" in workflow
     assert "agent-framework-mongodb.sbom.cdx.json" in workflow
+    assert "scripts/run_framework_compatibility.py" in workflow
+    assert workflow.count("continue-on-error: true") >= 4
+    assert workflow.count("if: always()") >= 6
+    assert "pip-freeze.txt" in workflow
+    assert "release-gate.json" in workflow
+    assert "Enforce compatibility outcome after retaining evidence" in workflow
+    assert "Enforce release outcomes after retaining evidence" in workflow
 
 
 def test_python_release_actions_are_pinned_to_reviewed_commits() -> None:
@@ -137,8 +145,12 @@ def test_framework_compatibility_workflow_is_dynamic_and_reports_every_row() -> 
     assert "--exact" in workflow
     assert "schedule:" in workflow
     assert "fromJSON(needs.resolve.outputs.matrix)" in workflow
-    assert '"agent-framework-core==$FRAMEWORK_VERSION"' in workflow
-    assert "--junitxml=" in workflow
-    assert "summary.json" in workflow
-    assert "summary.md" in workflow
+    assert "scripts/run_framework_compatibility.py" in workflow
+    runner = (_ROOT / "python" / "scripts" / "run_framework_compatibility.py").read_text(
+        encoding="utf-8"
+    )
+    assert "agent-framework-core=={version}" in runner
+    assert "--junitxml=" in runner
+    assert "summary.json" in runner
+    assert "summary.md" in runner
     assert "continue-on-error: true" in workflow

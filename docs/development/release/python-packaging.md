@@ -69,10 +69,14 @@ all yanked. The default matrix is latest stable plus immediately previous
 stable. Manual mode adds latest preview when present and an optional exact
 version. Stable is never relabeled or substituted as preview.
 
-Each matrix row force-installs the exact resolved version and runs the complete
+`scripts/run_framework_compatibility.py` is the shared isolated row runner used
+by release CI and the local rehearsal. Each matrix row force-installs the exact
+resolved version and runs the complete
 credential-free test, Ruff, MyPy, Pyright, API baseline, credential scan,
 package build/validation, and clean wheel/sdist consumer gates. JUnit XML,
-machine-readable JSON, Markdown, and `pip freeze` are retained. Pull requests,
+coverage XML, machine-readable JSON, Markdown, and `pip freeze` are retained,
+including on failure; workflows upload evidence in `always()` steps and enforce
+the recorded outcome only afterward. Pull requests,
 the Python build branch, `main`, weekly upstream drift, and manual dispatch are
 covered. These dynamic results are run evidence, not a hard-coded compatibility
 claim.
@@ -115,7 +119,9 @@ wheel, sdist, JUnit/report files, checksums, SBOM, and provenance. Publication
 also requires the explicit `publish` input and both owner settings:
 
 1. `PYTHON_PROVENANCE_APPROVED=true`, enabling GitHub artifact provenance; and
-2. `PYPI_ENVIRONMENT`, naming an owner-created protected GitHub environment
+2. `PYPI_PUBLISHING_APPROVED=true`, which owners must not set until ADR 0013 is
+   accepted and publishing ownership is confirmed; and
+3. `PYPI_ENVIRONMENT`, naming an owner-created protected GitHub environment
    configured for PyPI trusted publishing.
 
 The publish job has only `contents: read` and `id-token: write`; it accepts no
@@ -140,10 +146,13 @@ python -m pip install -e ".[dev]"
 python scripts\rehearse_release.py
 ```
 
-It cleans only `dist/rehearsal`, executes quality/tests/API/credential checks,
-builds and validates wheel and sdist, clean-installs each local artifact, and
-writes SHA-256, JUnit, JSON, and Markdown evidence. `--dry-run` validates and
-prints the plan. It has no publishing code. CI additionally creates the
+It cleans only `dist/rehearsal`, executes coverage,
+quality/tests/API/credential checks, resolves latest/previous stable Agent
+Framework Core from PyPI, and executes both through the shared isolated row
+runner. It then builds and validates wheel and sdist, clean-installs each local
+artifact, and writes SHA-256, coverage, JUnit, JSON, Markdown, and `pip freeze`
+evidence. `--dry-run` validates and prints the plan. It has no publishing code.
+CI additionally creates the
 CycloneDX SBOM and GitHub provenance. The
 [release runbook](../../release/python-release.md) documents inputs,
 environments, promotion, reports, and failure recovery; the

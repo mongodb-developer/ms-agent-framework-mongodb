@@ -12,6 +12,9 @@ import sys
 import time
 from pathlib import Path
 
+from resolve_framework_versions import fetch_pypi, resolve_matrix, write_report
+from run_framework_compatibility import run_row
+
 _ROOT = Path(__file__).resolve().parents[1]
 _REPOSITORY = _ROOT.parent
 _OUTPUT = _ROOT / "dist" / "rehearsal"
@@ -23,7 +26,16 @@ def _venv_python(path: Path) -> Path:
 
 def command_plan(python: str = sys.executable) -> list[list[str]]:
     return [
-        [python, "-m", "pytest", "--junitxml=dist/rehearsal/tests.xml", "-q"],
+        [
+            python,
+            "-m",
+            "pytest",
+            "--cov=agent_framework_mongodb",
+            "--cov-report=term",
+            "--cov-report=xml:dist/rehearsal/coverage.xml",
+            "--junitxml=dist/rehearsal/tests.xml",
+            "-q",
+        ],
         [
             python,
             "-m",
@@ -107,6 +119,10 @@ def main() -> int:
     plan = command_plan()
     if args.dry_run:
         print("\n".join(subprocess.list2cmdline(command) for command in plan))
+        print(
+            "Dynamically resolve and run isolated latest-stable and previous-stable "
+            "Agent Framework compatibility rows."
+        )
         print("No upload or publication command is present.")
         return 0
 
@@ -121,6 +137,34 @@ def main() -> int:
     try:
         for command in plan:
             _run(command, commands)
+        matrix = resolve_matrix(fetch_pypi())
+        (_OUTPUT / "framework-resolution.json").write_text(
+            json.dumps({"include": matrix}, indent=2) + "\n", encoding="utf-8"
+        )
+        write_report(_OUTPUT / "framework-resolution.md", matrix, False)
+        for row in matrix:
+            compatibility_dir = _OUTPUT / "compatibility" / f"{row['label']}-{row['version']}"
+            started = time.monotonic()
+            return_code = run_row(
+                row["version"],
+                row["label"],
+                row["channel"],
+                compatibility_dir,
+            )
+            commands.append(
+                {
+                    "command": (
+                        "run isolated Agent Framework compatibility row "
+                        f"{row['label']}=={row['version']}"
+                    ),
+                    "exit_code": return_code,
+                    "duration_seconds": round(time.monotonic() - started, 3),
+                }
+            )
+            if return_code:
+                raise RuntimeError(
+                    f"Agent Framework compatibility failed for {row['label']} ({row['version']})"
+                )
         packages = list((_OUTPUT / "packages").glob("*.whl")) + list(
             (_OUTPUT / "packages").glob("*.tar.gz")
         )
