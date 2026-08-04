@@ -62,6 +62,7 @@ def test_python_quality_verifies_release_artifacts_and_dependency_endpoints() ->
 
     assert ".github/workflows/release-python.yml" in pull_request
     assert ".github/workflows/release-python.yml" in push
+    assert ".github/workflows/python-agent-framework-compatibility.yml" in workflow
     assert "scripts/check_api_baseline.py api-baseline.json" in workflow
     assert "scripts/verify_artifacts.py dist/*.whl dist/*.tar.gz" in workflow
     assert "python -m twine check dist/*.whl dist/*.tar.gz" in workflow
@@ -77,43 +78,67 @@ def test_python_quality_verifies_release_artifacts_and_dependency_endpoints() ->
     assert "--format cyclonedx-json" in workflow
 
 
-def test_python_release_requires_owner_environment_and_oidc() -> None:
+def test_python_release_creates_main_reachable_tag_and_requires_explicit_publish() -> None:
     workflow = _workflow("release-python.yml")
 
     assert "  workflow_dispatch:" in workflow
-    assert "python-v<version>" in workflow
+    assert "default: false" in workflow
+    assert 'test "$DISPATCH_REF" = main' in workflow
+    assert 'git merge-base --is-ancestor "$SHA" origin/main' in workflow
+    assert 'TAG="python-v$VERSION"' in workflow
+    assert 'git push origin "refs/tags/$TAG"' in workflow
+    assert "inputs.publish" in workflow
     assert "vars.PYPI_ENVIRONMENT != ''" in workflow
     assert "environment: ${{ vars.PYPI_ENVIRONMENT }}" in workflow
     assert "id-token: write" in workflow
     assert "validate_release_tag.py" in workflow
     assert ".release-smoke-wheel" in workflow
     assert ".release-smoke-sdist" in workflow
-    assert workflow.count("scripts/smoke_public_api.py --expected-version") >= 4
+    assert workflow.count("scripts/smoke_public_api.py") >= 6
     assert "verify-published:" in workflow
     published = workflow.split("  verify-published:", 1)[1]
     assert "environment: ${{ vars.PYPI_ENVIRONMENT }}" in published
     assert "pip download" in workflow
     assert "sha256sum --check" in workflow
     assert "python -m twine check dist/packages/*.whl dist/packages/*.tar.gz" in workflow
-    assert (
-        "scripts/verify_artifacts.py --supplemental "
-        "dist/*.sbom.cdx.json dist/PACKAGE_SHA256SUMS dist/SHA256SUMS"
-    ) in workflow
+    assert "scripts/verify_artifacts.py --supplemental" in workflow
+    assert "dist/*.sbom.cdx.json dist/PACKAGE_SHA256SUMS dist/SHA256SUMS" in workflow
     assert "python -m twine check dist/packages/*\n" not in workflow
     assert "${{ secrets." not in workflow
     assert "password:" not in workflow
+    assert "github-release:" in workflow
+    assert 'gh release create "$RELEASE_TAG"' in workflow
+    assert "steps.attest.outputs.bundle-path" in workflow
+    assert "PACKAGE_SHA256SUMS" in workflow
+    assert "agent-framework-mongodb.sbom.cdx.json" in workflow
 
 
 def test_python_release_actions_are_pinned_to_reviewed_commits() -> None:
-    workflow = _workflow("release-python.yml")
-    action_lines = [
-        line.strip() for line in workflow.splitlines() if line.strip().startswith("- uses:")
-    ]
+    for name in ("release-python.yml", "python-agent-framework-compatibility.yml"):
+        workflow = _workflow(name)
+        action_lines = [
+            line.strip() for line in workflow.splitlines() if line.strip().startswith("- uses:")
+        ]
 
-    assert action_lines
-    for line in action_lines:
-        reference = line.rsplit("@", 1)[1].split()[0]
-        assert re.fullmatch(r"[0-9a-f]{40}", reference), line
-    assert "# actions/checkout v4" in workflow
-    assert "# actions/setup-python v5" in workflow
-    assert "# pypa/gh-action-pypi-publish release/v1" in workflow
+        assert action_lines
+        for line in action_lines:
+            reference = line.rsplit("@", 1)[1].split()[0]
+            assert re.fullmatch(r"[0-9a-f]{40}", reference), line
+        assert "# actions/checkout v4" in workflow
+        assert "# actions/setup-python v5" in workflow
+
+
+def test_framework_compatibility_workflow_is_dynamic_and_reports_every_row() -> None:
+    workflow = _workflow("python-agent-framework-compatibility.yml")
+
+    assert "pypi.org/pypi/agent-framework-core/json" not in workflow
+    assert "scripts/resolve_framework_versions.py" in workflow
+    assert "--include-preview" in workflow
+    assert "--exact" in workflow
+    assert "schedule:" in workflow
+    assert "fromJSON(needs.resolve.outputs.matrix)" in workflow
+    assert '"agent-framework-core==$FRAMEWORK_VERSION"' in workflow
+    assert "--junitxml=" in workflow
+    assert "summary.json" in workflow
+    assert "summary.md" in workflow
+    assert "continue-on-error: true" in workflow

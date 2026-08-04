@@ -12,13 +12,18 @@ python -m pip install agent-framework-mongodb
 ```
 
 This repository has not published the distribution yet. For release-candidate
-testing, build from this directory and install the exact wheel:
+testing, run the complete non-publishing rehearsal from this directory:
 
 ```powershell
-python -m build
-python -m twine check dist\*.whl dist\*.tar.gz
-python -m pip install dist\agent_framework_mongodb-*.whl
+python -m pip install -e ".[dev]"
+python scripts\rehearse_release.py
 ```
+
+It builds and validates wheel and sdist, tests clean local installs, and writes
+checksums plus JUnit, JSON, and Markdown reports under `dist\rehearsal`. It has
+no upload operation. See the
+[release runbook](../docs/release/python-release.md) for promotion, Actions
+inputs, compatibility modes, and failure recovery.
 
 Do not install an unverified registry project with this name. The package
 requires Python 3.10 or later, Agent Framework Core 1.13 or later (but below

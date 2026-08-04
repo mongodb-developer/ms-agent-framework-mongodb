@@ -45,3 +45,4 @@ This documentation explains the implemented system at the code level. The
 ## Packaging and release
 
 - [Python packaging, compatibility, and release evidence](release/python-packaging.md)
+- [Python release runbook](../release/python-release.md)

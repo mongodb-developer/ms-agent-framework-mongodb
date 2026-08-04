@@ -55,6 +55,8 @@ deployment and pre-created indexes. Credentialed compatibility evidence is not
 available in this repository yet, so publication remains blocked. See the
 [Python compatibility evidence](docs/development/release/python-packaging.md)
 and [release checklist](docs/release/python-release-checklist.md).
+Maintainers use the [Python release runbook](docs/release/python-release.md);
+the documented local rehearsal never publishes.
 
 ## Development
 

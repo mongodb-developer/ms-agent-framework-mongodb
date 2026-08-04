@@ -8,9 +8,8 @@ not authorize publication.
 
 - [ ] Release commit is reviewed and has no unrelated changes.
 - [ ] `pyproject.toml` and `api-baseline.json` contain the same reviewed release
-  version and `python-v<version>` is an existing protected tag resolving to that
-  commit. The current candidate permits only the prerelease tag
-  `python-v0.1.0.dev0`; a different release needs a reviewed version commit.
+  version. The explicit `main` release workflow creates or verifies the
+  protected `python-v<version>` tag at that reachable commit.
 - [ ] Distribution/import identities, README, MIT license, author, classifiers,
   dependencies, and source URL match repository facts.
 - [ ] `api-baseline.json` names the first published version and intentional API
@@ -25,6 +24,9 @@ not authorize publication.
 - [ ] Ruff format/check, MyPy, and Pyright pass.
 - [ ] Exact minimum and newest-allowed dependencies resolve and pass constructor
   smoke; retained `pip freeze` output records versions.
+- [ ] Dynamically resolved latest and previous stable Agent Framework Core rows
+  pass; any requested preview/exact rows and their JUnit/JSON/Markdown reports
+  are reviewed.
 - [ ] Wheel and sdist pass Twine and archive allow/deny policy.
 - [ ] Exact wheel and sdist install into separate clean environments and public
   provider constructors run.
@@ -61,6 +63,8 @@ not authorize publication.
 - [ ] Organization signature policy is recorded and implemented; do not invent
   a signing identity or key.
 - [ ] Protected tag policy for `python-v<version>` is enabled.
+- [ ] The release workflow is dispatched from `main` with the reviewed commit;
+  `publish` is true only for an intended production publication.
 - [ ] Published-package verification downloads from PyPI, verifies metadata,
   hashes/attestations/signatures per policy, and repeats public API smoke.
 

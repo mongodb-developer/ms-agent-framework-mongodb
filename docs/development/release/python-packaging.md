@@ -59,16 +59,31 @@ signature/default changes, or any mismatch between `baseline_version` and the
 installed package version. Later intentional changes require semantic-version,
 migration, and deprecation review before regenerating it with `--write`.
 
-## Compatibility matrix
+## Dynamic Agent Framework compatibility
 
-Only credential-free evidence is available. A dependency range is a support
-claim only after both endpoint jobs pass; MongoDB deployment cells remain
+`.github/workflows/python-agent-framework-compatibility.yml` implements the
+runtime-resolved compatibility gate. `scripts/resolve_framework_versions.py`
+reads the official PyPI JSON API and uses `packaging.version.Version`; it
+excludes releases with no distributions and releases whose distributions are
+all yanked. The default matrix is latest stable plus immediately previous
+stable. Manual mode adds latest preview when present and an optional exact
+version. Stable is never relabeled or substituted as preview.
+
+Each matrix row force-installs the exact resolved version and runs the complete
+credential-free test, Ruff, MyPy, Pyright, API baseline, credential scan,
+package build/validation, and clean wheel/sdist consumer gates. JUnit XML,
+machine-readable JSON, Markdown, and `pip freeze` are retained. Pull requests,
+the Python build branch, `main`, weekly upstream drift, and manual dispatch are
+covered. These dynamic results are run evidence, not a hard-coded compatibility
+claim.
+
+Only credential-free evidence is available. MongoDB deployment cells remain
 unadvertised until a named owner records real-deployment evidence.
 
 | Surface | Declared range or mode | Evidence on 2026-08-03 | Release status |
 | --- | --- | --- | --- |
 | Python | `>=3.10` | complete local gate uses CPython 3.10.4; CI uses 3.10 | Python versions above 3.10 are not yet release-evidenced |
-| Agent Framework Core | `>=1.13,<2` | minimum and newest-allowed local resolutions both use 1.13.0; CI repeats both | endpoint CI required on reviewed tag |
+| Agent Framework Core | `>=1.13,<2` | latest/previous stable resolved at workflow runtime; manual preview/exact modes | retained compatibility workflow required on reviewed tag |
 | PyMongo | `>=4.13,<5` | local minimum 4.13.0 and newest-allowed 4.17.0 both pass constructor smoke; CI repeats both | endpoint CI required on reviewed tag |
 | OpenTelemetry API | `>=1.39,<2` | local minimum 1.39.0 and newest-allowed 1.44.0 both pass constructor smoke; CI repeats both | endpoint CI required on reviewed tag |
 | Vector ANN / ENN | pre-created MongoDB Vector Search index | no credentialed deployment evidence recorded | unsupported for publication |
@@ -87,14 +102,17 @@ constructor smoke, dependency endpoints, a CycloneDX SBOM, checksums, and
 artifact retention. Security workflows separately run dependency review,
 credential scanning, CodeQL, and `pip-audit`.
 
-`release-python.yml` is manual and accepts only an existing
-`python-v<version>` tag whose version exactly matches both `pyproject.toml` and
-`api-baseline.json`. The current reviewed tag is therefore
-`python-v0.1.0.dev0`; a different release requires a reviewed commit updating
-both version sources rather than unreviewed build-time substitution. The
-workflow rebuilds from the tagged commit, exact-tests wheel and sdist in
-separate environments, and repeats the credential-free gate. Publication is skipped
-unless owners configure both:
+`release-python.yml` is manual and must be dispatched from `main`. It accepts a
+commit, proves that commit is reachable from `origin/main`, verifies the static
+manifest/API-baseline version, and creates or verifies the annotated
+`python-v<version>` tag. It then continues in the same workflow run, avoiding
+the incorrect assumption that a `GITHUB_TOKEN`-created tag triggers another
+workflow. Build-branch pushes and ordinary merges cannot tag or publish.
+
+The workflow clean-builds from the exact SHA, runs latest/previous stable
+compatibility rows and release gates, attests the distributions, and retains
+wheel, sdist, JUnit/report files, checksums, SBOM, and provenance. Publication
+also requires the explicit `publish` input and both owner settings:
 
 1. `PYTHON_PROVENANCE_APPROVED=true`, enabling GitHub artifact provenance; and
 2. `PYPI_ENVIRONMENT`, naming an owner-created protected GitHub environment
@@ -103,9 +121,11 @@ unless owners configure both:
 The publish job has only `contents: read` and `id-token: write`; it accepts no
 password or token secret. Release-sensitive actions are pinned to full,
 reviewed commit SHAs with their upstream major/ref recorded inline. After a
-successful publish, a protected job waits for the exact PyPI version, downloads
-both distributions, compares their SHA-256 hashes to the pre-publish artifacts,
-installs each separately, and repeats versioned public API smoke. Tag
+successful publish, a protected job waits for the exact PyPI version,
+downloads both distributions, compares their SHA-256 hashes to the pre-publish
+artifacts, installs each separately, and repeats versioned public API smoke.
+Only then is the GitHub Release created with the exact artifacts and evidence.
+Tag
 protection, environment reviewers, PyPI project
 ownership, support/security contacts, release approvers, and signature policy
 are owner settings and remain blockers. No signing placeholder is selected
@@ -113,23 +133,18 @@ until that policy is known.
 
 ## Local verification
 
-From `python` on Python 3.10:
+From `python` on Python 3.10, the single local rehearsal command is:
 
 ```powershell
-python -m pytest --cov=agent_framework_mongodb --cov-report=term -q
-python -m ruff check src tests samples scripts ..\scripts\scan_credentials.py
-python -m ruff format --check src tests samples scripts ..\scripts\scan_credentials.py
-python -m mypy
-python -m pyright
-python -m build
-python -m twine check dist\*.whl dist\*.tar.gz
-python scripts\verify_artifacts.py dist\*.whl dist\*.tar.gz
-python scripts\verify_artifacts.py --supplemental dist\*.sbom.cdx.json dist\SHA256SUMS
-python scripts\check_api_baseline.py api-baseline.json
-python ..\scripts\scan_credentials.py
+python -m pip install -e ".[dev]"
+python scripts\rehearse_release.py
 ```
 
-Clean artifact installs, dependency endpoints, `pip-audit`, SBOM generation,
-and checksums are scripted in the workflows because their paths are
-platform-specific. The [release checklist](../../release/python-release-checklist.md)
-records evidence and external blockers.
+It cleans only `dist/rehearsal`, executes quality/tests/API/credential checks,
+builds and validates wheel and sdist, clean-installs each local artifact, and
+writes SHA-256, JUnit, JSON, and Markdown evidence. `--dry-run` validates and
+prints the plan. It has no publishing code. CI additionally creates the
+CycloneDX SBOM and GitHub provenance. The
+[release runbook](../../release/python-release.md) documents inputs,
+environments, promotion, reports, and failure recovery; the
+[release checklist](../../release/python-release-checklist.md) records blockers.
