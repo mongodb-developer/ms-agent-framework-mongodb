@@ -15,11 +15,13 @@ name: .NET credentialed integration tests
 # (if configured by the repository owner) gates secret exposure further still.
 #
 # No live MongoDB deployment or environment secrets exist in the validation environment this workflow was
-# authored in. Each job below still runs `dotnet test` filtered to its own Category; the tests themselves already
-# skip cleanly (xunit Skip, not a failure) when MONGODB_URI/MONGODB_DATABASE are unset, exactly as they do for a
-# credential-free local contributor -- see tests/MongoDB.AgentFramework.Tests/**/*IntegrationTests.cs. This
-# workflow deliberately does not condition the job out of existence when secrets are absent, so it keeps
-# reporting an accurate (skipped, not falsely-green-by-omission) status until real credentials are provisioned.
+# authored in. Each job first runs a preflight step (below) that fails loudly and actionably if the
+# `dotnet-integration` environment's required secrets are absent -- job-level `if:` cannot reference `secrets.*`,
+# so this cannot be done by conditioning the job out of existence, and skipping the tests silently would report a
+# false-green "0 tests, all passed". Once credentials are configured, each job also asserts (via the produced TRX
+# file's `<Counters executed="...">`, not console output or exit code alone) that its filtered Category actually
+# executed at least one test, since an unrestored project or a mistyped/impossible `--filter` can both otherwise
+# "succeed" having run zero tests.
 #
 # Supply-chain note: actions pinned exactly as in dotnet-security.yml/dotnet-quality.yml.
 on:
@@ -70,6 +72,26 @@ jobs:
             9.0.x
             10.0.x
 
+      # Job-level `if:` cannot reference `secrets.*` (GitHub Actions does not expose secrets to job/step `if:`
+      # expressions), so an absent MONGODB_URI/MONGODB_DATABASE on the `dotnet-integration` environment cannot be
+      # used to skip this job out of existence -- it would otherwise report a silently-empty "success" with zero
+      # tests executed. Instead this preflight *step* fails loudly and actionably before restore/test even runs,
+      # so a misconfigured environment is an unmissable red job, never a quietly-green no-op.
+      - name: Verify dotnet-integration environment credentials are configured
+        env:
+          MONGODB_URI: ${{ secrets.MONGODB_URI }}
+          MONGODB_DATABASE: ${{ secrets.MONGODB_DATABASE }}
+        shell: pwsh
+        run: |
+          $missing = @()
+          if ([string]::IsNullOrWhiteSpace($env:MONGODB_URI)) { $missing += "MONGODB_URI" }
+          if ([string]::IsNullOrWhiteSpace($env:MONGODB_DATABASE)) { $missing += "MONGODB_DATABASE" }
+          if ($missing.Count -gt 0) {
+            Write-Host "::error::The 'dotnet-integration' GitHub Environment is missing required secret(s): $($missing -join ', '). Configure them on the environment (Settings > Environments > dotnet-integration) before this workflow can run credentialed integration tests. This job intentionally fails here instead of silently skipping, so a misconfigured environment is never reported as a false-green '0 tests, all passed'."
+            exit 1
+          }
+          Write-Host "dotnet-integration environment credentials are present (MONGODB_URI, MONGODB_DATABASE)."
+
       - name: Restore
         working-directory: dotnet
         run: dotnet restore tests/MongoDB.AgentFramework.Tests/MongoDB.AgentFramework.Tests.csproj
@@ -84,4 +106,15 @@ jobs:
             --configuration Release \
             --no-restore \
             --filter "Category=${{ matrix.category }}" \
-            --logger "console;verbosity=normal"
+            --logger "console;verbosity=normal" \
+            --logger "trx;LogFileName=${{ matrix.job }}.trx" \
+            --results-directory artifacts/integration-test-results
+
+      # A passing exit code above does not prove any test ran: an unrestored project or an impossible --filter
+      # both "succeed" having executed zero tests. This step parses the TRX's <Counters executed="..."> and
+      # fails the job unless it is strictly greater than zero -- so a credentialed job whose category's tests
+      # all skip themselves (e.g. because the preflight step above was somehow bypassed, or the category name
+      # was mistyped and matched nothing) fails here rather than reporting a false-green "0 executed, 0 failed".
+      - name: Verify at least one ${{ matrix.job }} test actually executed
+        shell: pwsh
+        run: pwsh dotnet/scripts/assert-trx-executed.ps1 -TrxPath "dotnet/artifacts/integration-test-results/${{ matrix.job }}.trx" -Label "${{ matrix.job }}"

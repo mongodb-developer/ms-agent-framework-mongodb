@@ -292,10 +292,23 @@ human-readable tag next to the pinned commit SHA):
   `dotnet-integration` GitHub Environment supplying `MONGODB_URI`/
   `MONGODB_DATABASE` secrets, and triggers **only** on push to `main`,
   `schedule`, and `workflow_dispatch` -- never on `pull_request` -- so
-  untrusted fork code can never see credentialed secrets. No test code
-  changes were needed: every integration test already skips cleanly (xUnit
+  untrusted fork code can never see credentialed secrets. Because a
+  job-level `if:` cannot reference `secrets.*`, an absent secret cannot be
+  used to skip the job out of existence (which would report a
+  false-green no-op); instead a preflight step fails loudly and
+  actionably first when either required secret is empty. Each category's
+  `dotnet test` step also runs with a per-job TRX logger
+  (`--logger "trx;LogFileName=<job>.trx"`), and a following step
+  (`dotnet/scripts/assert-trx-executed.ps1`, backed by the shared
+  `TrxResults.ps1`/`Get-TrxExecutedCount` also used by the Agent Framework
+  compatibility script) parses the TRX's `<Counters executed="...">` and
+  fails the job unless it is strictly greater than zero -- so a
+  credentialed run whose filtered category matched nothing, or whose tests
+  all skipped themselves, fails rather than reporting a false-green
+  "0 executed, 0 failed". No production test code changes were needed
+  beyond this: every integration test already skips cleanly (xUnit
   `Skip = "..."`) when the environment variables are absent, which is
-  exactly what happens when this workflow is not run.
+  exactly what a credential-free local contributor run still exercises.
 - **`dotnet-sbom-provenance.yml`** -- split into two trust-gated jobs:
   - `sbom` runs on `pull_request`/push-to-`main`/push of a `dotnet-v*` tag/
     `workflow_dispatch`, with only `contents: read`. It runs
@@ -414,8 +427,9 @@ recorded output.
 - `dotnet build MongoDB.AgentFramework.slnx --configuration Release`
   (0 warnings, 0 errors, all TFMs).
 - `dotnet test MongoDB.AgentFramework.slnx --configuration Release`
-  (1100 passed, 0 failed, 13 skipped -- credentialed integration tests skip
-  cleanly without a live deployment).
+  (1100 passed [974 + 126], 0 failed, 13 skipped [10 + 3] across both test
+  projects -- credentialed integration tests skip cleanly without a live
+  deployment).
 - `dotnet/scripts/verify-package.ps1 -Configuration Release` (pack; exact
   package-content allowlist with multiplicity for both `.nupkg` [11
   entries] and `.snupkg` [7 entries]; nuspec metadata asserted via
@@ -461,6 +475,16 @@ recorded output.
   fixture; end-to-end process-exit-code checks of `verify-release-tag.ps1`
   for both the `-EnforceMatch` [tag-push] and record-only
   [`workflow_dispatch`] invocation shapes -- all 14 passed).
+- `dotnet/scripts/verify-trx-results.tests.ps1` and
+  `dotnet/scripts/verify-assert-trx-executed.tests.ps1` (self-tests for the
+  shared `TrxResults.ps1`/`Get-TrxExecutedCount` function and its
+  `assert-trx-executed.ps1` CLI wrapper used by both
+  `verify-agent-framework-compatibility.ps1` and `dotnet-integration.yml`:
+  a well-formed TRX with a nonzero executed count passes/exits 0; a TRX
+  where every matched test was skipped [`executed="0"`, `total>0`] fails/
+  exits 1 rather than returning the total or `$null`; a missing TRX file
+  and a malformed/non-XML TRX file both fail/exit 1 rather than throwing
+  -- all passed).
 - `dotnet/scripts/verify-agent-framework-compatibility.ps1 -Configuration
   Release` (restores `MongoDB.AgentFramework.Tests.csproj` -- which pulls in
   `MongoDB.AgentFramework.csproj` via `ProjectReference` -- and builds both
@@ -469,7 +493,9 @@ recorded output.
   `Workflows` versions at each bound from `project.assets.json`; confirms
   transitive `Microsoft.Extensions.Logging.Abstractions` stays at `10.0.9`
   -- within its declared range -- at both bounds; runs
-  `dotnet test --no-build --no-restore` with a TRX logger and asserts the
+  `dotnet test --no-build --no-restore` with a TRX logger and asserts,
+  via the shared `TrxResults.ps1`/`Get-TrxExecutedCount` function also used
+  by `assert-trx-executed.ps1`/`dotnet-integration.yml`, that the
   TRX's `executed` counter is nonzero [974 executed / 984 total / 10
   skipped at both bounds] rather than trusting console output or exit code
   alone -- both bounds passed).

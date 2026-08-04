@@ -68,6 +68,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "TrxResults.ps1")
 
 $DotnetRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $SrcProject = Join-Path $DotnetRoot "src/MongoDB.AgentFramework/MongoDB.AgentFramework.csproj"
@@ -112,24 +113,6 @@ function Get-ResolvedPackageVersion([string]$AssetsPath, [string]$PackageId) {
     }
 
     return ($libraryKey -split '/', 2)[1]
-}
-
-# Parses a VSTest TRX file's <ResultSummary><Counters> element and returns the executed-test count as an
-# integer, or $null if the file is missing/malformed. "executed" (not "total") deliberately excludes skipped
-# tests, so a matrix run that skips every credentialed integration test but somehow executes zero unit tests
-# still fails this check.
-function Get-TrxExecutedCount([string]$TrxPath) {
-    if (-not (Test-Path $TrxPath)) {
-        return $null
-    }
-
-    [xml]$trx = Get-Content $TrxPath -Raw
-    $countersNode = $trx.TestRun.ResultSummary.Counters
-    if (-not $countersNode -or -not $countersNode.executed) {
-        return $null
-    }
-
-    return [int]$countersNode.executed
 }
 
 foreach ($version in $Versions) {
