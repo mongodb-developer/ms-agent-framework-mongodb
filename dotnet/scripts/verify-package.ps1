@@ -21,7 +21,9 @@
          through a local NuGet feed and an isolated NUGET_PACKAGES cache directory -- never a ProjectReference,
          and never the developer machine's shared global package cache -- constructing every public
          provider/facade type across Memory, exact Chat History, RAG (all four MongoDBSearchMode values), Index
-         Management, Session Store, and Workflow Checkpoint Store.
+         Management, Session Store, and Workflow Checkpoint Store. Runs once per TFM MongoDB.AgentFramework
+         itself ships (`dotnet run -f net8.0|net9.0|net10.0`), proving the package restores and runs -- not just
+         compiles -- on every shipped target framework.
 
     This script never contacts a real MongoDB deployment, never publishes or pushes a package, and never invents
     a signing identity or publisher credential; see dotnet/README.md and the final report this script prints for
@@ -297,16 +299,30 @@ if ($SkipConsumerSmoke) {
     Write-Section "Step 5: consumer smoke test (skipped by -SkipConsumerSmoke)"
 }
 else {
-    Write-Section "Step 5: clean, isolated consumer smoke test"
+    Write-Section "Step 5: clean, isolated consumer smoke test (every shipped TFM)"
     Clear-PathIfExists $ConsumerCacheDir
     New-Item -ItemType Directory -Path $ConsumerCacheDir -Force | Out-Null
     Clear-PathIfExists (Join-Path $DotnetRoot "tests/PackageSmokeTest/bin")
     Clear-PathIfExists (Join-Path $DotnetRoot "tests/PackageSmokeTest/obj")
 
+    # Read the TFM list straight from PackageSmokeTest.csproj's own <TargetFrameworks> element instead of
+    # hardcoding it here a second time, so this script can never silently drift out of sync with the project
+    # actually being run (e.g. if a TFM is added to/removed from the smoke project without updating this script).
+    [xml]$smokeProjectXml = Get-Content $SmokeProject -Raw
+    $targetFrameworksValue = $smokeProjectXml.Project.PropertyGroup.TargetFrameworks
+    if ([string]::IsNullOrWhiteSpace($targetFrameworksValue)) {
+        throw "PackageSmokeTest.csproj must declare <TargetFrameworks> (semicolon-separated, multi-target) so " +
+              "every shipped TFM can be smoke-tested; found none."
+    }
+
+    $targetFrameworks = $targetFrameworksValue -split ';' | Where-Object { $_ }
+    Write-Host "Smoke-testing TFMs: $($targetFrameworks -join ', ')"
+
     # NUGET_PACKAGES is overridden to an isolated, disposable directory under artifacts/ so this restore can never
     # be satisfied by anything already present in the developer/CI machine's shared global package cache: it must
     # come only from nuget.org (transitive dependencies) and the local packed feed (MongoDB.AgentFramework itself,
-    # per tests/PackageSmokeTest/nuget.config).
+    # per tests/PackageSmokeTest/nuget.config). A single restore covers every TFM (NuGet restores the whole
+    # multi-targeted project graph together); each TFM is then run independently via `dotnet run -f <tfm>`.
     $previousNugetPackages = $env:NUGET_PACKAGES
     $env:NUGET_PACKAGES = $ConsumerCacheDir
     try {
@@ -315,18 +331,25 @@ else {
             throw "dotnet restore failed with exit code $LASTEXITCODE"
         }
 
-        & dotnet run --project $SmokeProject --configuration $Configuration --no-restore
-        $smokeExitCode = $LASTEXITCODE
+        $tfmFailures = @()
+        foreach ($tfm in $targetFrameworks) {
+            Write-Host ""
+            Write-Host "-- dotnet run -f $tfm --"
+            & dotnet run --project $SmokeProject --configuration $Configuration --framework $tfm --no-restore
+            if ($LASTEXITCODE -ne 0) {
+                $tfmFailures += "$tfm (exit code $LASTEXITCODE)"
+            }
+        }
     }
     finally {
         $env:NUGET_PACKAGES = $previousNugetPackages
     }
 
-    if ($smokeExitCode -ne 0) {
-        Write-Failure "Consumer smoke test exited with code $smokeExitCode"
+    if ($tfmFailures.Count -gt 0) {
+        Write-Failure "Consumer smoke test failed for: $($tfmFailures -join ', ')"
     }
     else {
-        Write-Ok "Consumer smoke test restored MongoDB.AgentFramework from the packed .nupkg and constructed every public feature area"
+        Write-Ok "Consumer smoke test restored MongoDB.AgentFramework from the packed .nupkg and constructed every public feature area on every TFM ($($targetFrameworks -join ', '))"
     }
 }
 

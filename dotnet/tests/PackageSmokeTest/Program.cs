@@ -5,11 +5,15 @@
 // Scope: construction only. There is no live, Search-capable MongoDB deployment available in this validation
 // environment (docs/spec/quality-release.md: "Real MongoDB integration tests still require suitable credentials
 // and Search-capable infrastructure"), so this smoke test proves every public provider/facade type across every
-// public feature area -- Memory, exact Chat History, RAG (all four MongoDBSearchMode values), Index Management,
-// Session Store, and Workflow Checkpoint Store -- constructs successfully from the packed artifact, with no
-// missing type/member/constructor and no unexpected exception. It intentionally never calls a method that would
-// perform network I/O (EnsureIndexesAsync, StoreAsync, SearchAsync, CreateAsync, etc.); those remain covered by
-// this repository's own skip-cleanly-without-credentials integration tests.
+// public feature area -- Memory, exact Chat History, RAG (all four MongoDBSearchMode values: VectorAnn, VectorEnn,
+// FullText, HybridRrf), Index Management, Session Store, and Workflow Checkpoint Store -- constructs successfully
+// from the packed artifact, with no missing type/member/constructor and no unexpected exception. It intentionally
+// never calls a method that would perform network I/O (EnsureIndexesAsync, StoreAsync, SearchAsync, CreateAsync,
+// etc.); those remain covered by this repository's own skip-cleanly-without-credentials integration tests.
+//
+// This project multi-targets every TFM MongoDB.AgentFramework ships (net8.0/net9.0/net10.0); verify-package.ps1
+// runs `dotnet run -f <tfm>` once per TFM from the isolated packed-package cache so every shipped target is
+// proven to actually restore and run, not just compile.
 #pragma warning disable MAAI001 // AIContextProvider is an evaluation-purposes-only API in this package version.
 
 using Microsoft.Extensions.AI;
@@ -85,7 +89,7 @@ Check("MongoDBChatHistoryProvider + MongoDBChatHistoryProviderOptions", () =>
         });
 });
 
-// ---- RAG: VectorAnn, FullText, HybridRrf (the fourth mode, VectorEnn, shares VectorAnn's constructor family) ----
+// ---- RAG: all four MongoDBSearchMode values (VectorAnn, VectorEnn, FullText, HybridRrf) ----
 MongoDBRAGFilter filter = MongoDBRAGFilter.And(
     MongoDBRAGFilter.Equal("tenant_id", "smoke-test"),
     MongoDBRAGFilter.In("category", ["news", "docs"]));
@@ -110,6 +114,25 @@ Check("MongoDBRAGProvider (VectorAnn) + MongoDBRAGProviderOptions + MongoDBRAGFi
 Check("MongoDBRAGContextProvider", () =>
 {
     _ = new MongoDBRAGContextProvider(vectorRagProvider!);
+});
+
+// VectorEnn (exact nearest neighbor) shares VectorAnn's vector-only constructor family, but its options must
+// leave NumCandidates unset (MongoDBRAGProviderOptions.Validate rejects it for exact search).
+MongoDBRAGProvider? vectorEnnRagProvider = null;
+Check("MongoDBRAGProvider (VectorEnn) + MongoDBRAGProviderOptions + MongoDBRAGFilter", () =>
+{
+    vectorEnnRagProvider = new MongoDBRAGProvider(
+        database,
+        "rag_chunks",
+        embeddingGenerator,
+        vectorDimensions: 3,
+        new MongoDBRAGProviderOptions
+        {
+            SearchMode = MongoDBSearchMode.VectorEnn,
+            VectorIndexName = "agent_framework_rag_vector_smoke",
+            TopK = 5,
+            MandatoryFilter = filter,
+        });
 });
 
 MongoDBRAGProvider? fullTextRagProvider = null;
@@ -206,7 +229,7 @@ if (historyProvider is not null)
     await historyProvider.DisposeAsync();
 }
 
-foreach (MongoDBRAGProvider? provider in new[] { vectorRagProvider, fullTextRagProvider, hybridRagProvider })
+foreach (MongoDBRAGProvider? provider in new[] { vectorRagProvider, vectorEnnRagProvider, fullTextRagProvider, hybridRagProvider })
 {
     if (provider is not null)
     {

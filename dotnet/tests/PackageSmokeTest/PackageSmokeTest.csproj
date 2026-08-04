@@ -1,7 +1,13 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net10.0</TargetFramework>
+    <!--
+      Multi-targets every TFM MongoDB.AgentFramework itself ships (src/MongoDB.AgentFramework.csproj's
+      TargetFrameworks). verify-package.ps1 runs `dotnet run -f <tfm>` once per TFM against the isolated
+      packed-package cache, proving the package actually restores and runs on every shipped target, not just
+      that it compiles against the newest one.
+    -->
+    <TargetFrameworks>net8.0;net9.0;net10.0</TargetFrameworks>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <IsPackable>false</IsPackable>
