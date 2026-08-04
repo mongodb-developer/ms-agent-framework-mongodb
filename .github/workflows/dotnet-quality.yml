@@ -15,6 +15,11 @@ name: .NET build, test, and package quality
 #
 # Supply-chain note: every action below is pinned to an immutable full commit SHA (not a mutable tag) with a
 # trailing `# vX.Y.Z` comment recording the release that SHA corresponds to, matching dotnet-security.yml.
+#
+# Compatibility-matrix note: the dotnet-agent-framework-compat job below is a separate credential-free job (not
+# an extra dotnet-quality matrix dimension) because it deliberately re-restores/builds/tests against a *different*
+# Agent Framework version per matrix entry via an MSBuild property override, rather than exercising this
+# workflow's own OS/tooling variance; see dotnet/scripts/verify-agent-framework-compatibility.ps1.
 on:
   pull_request:
   push:
@@ -107,3 +112,40 @@ jobs:
             dotnet/artifacts/packages/*.snupkg
           if-no-files-found: error
           retention-days: 14
+
+  dotnet-agent-framework-compat:
+    name: dotnet-agent-framework-compat (${{ matrix.agent-framework-version }})
+    runs-on: ubuntu-latest
+    # Compatibility-matrix gate for docs/spec/compatibility-migration.md: MongoDB.AgentFramework.csproj and
+    # MongoDB.AgentFramework.Tests.csproj both reference Microsoft.Agents.AI.Abstractions/Workflows through a
+    # single $(AgentFrameworkVersion) MSBuild property that defaults to the tracked [1.13.0,1.17.0) range. This
+    # job overrides that property to each reflection-verified matrix bound (1.13.0 minimum, 1.16.0 newest; see
+    # docs/development/persistence/dotnet-contract-research.md and dotnet-checkpoint-contract-research.md) via
+    # `-p:AgentFrameworkVersion=<exact version>` on restore/build/test -- it never edits a tracked .csproj, and
+    # the package's own default range is unaffected (see dotnet/scripts/verify-agent-framework-compatibility.ps1,
+    # which this job runs, for the full step-by-step rationale and local-repro instructions). Credential-free:
+    # safe to run on every pull request, including from forks.
+    strategy:
+      fail-fast: false
+      matrix:
+        agent-framework-version:
+          - "1.13.0"
+          - "1.16.0"
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+            10.0.x
+
+      - name: Verify Agent Framework compatibility matrix bound
+        shell: pwsh
+        working-directory: dotnet
+        run: ./scripts/verify-agent-framework-compatibility.ps1 -Versions "${{ matrix.agent-framework-version }}"
