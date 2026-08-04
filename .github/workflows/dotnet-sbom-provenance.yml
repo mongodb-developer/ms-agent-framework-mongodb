@@ -1,0 +1,128 @@
+name: .NET package SBOM and build provenance
+
+# Implements the SBOM/provenance portions of docs/spec/quality-release.md's "Package build and provenance"
+# release-engineering requirements for the .NET package, to the extent possible without owner publishing
+# credentials, a signing certificate, or a live release/tag:
+#
+#   - "Generate an SBOM for each release or repository release bundle."
+#   - "Generate provenance attestations for published artifacts and retain workflow/run references."
+#   - "Sign NuGet packages when organizational infrastructure supports it and verify signatures after download."
+#
+# This workflow packs the library, generates both an SPDX and a CycloneDX SBOM with anchore/sbom-action (a
+# widely used, actively maintained tool that wraps Syft; SHA-pinned below like every other action in this
+# repository), and requests a GitHub build-provenance attestation (actions/attest-build-provenance, GitHub's own
+# first-party SLSA-style attestation over the ambient, real GitHub Actions OIDC identity for this repository and
+# workflow run -- not a fabricated publisher identity). Both are uploaded as workflow artifacts for inspection;
+# neither step publishes the package anywhere or requires an owner-provided secret.
+#
+# NuGet package signing (Authenticode-style code signing over the .nupkg itself, distinct from the SLSA-style
+# build attestation above) remains BLOCKED: it requires an owner-issued, organization-approved code-signing
+# certificate and a decision on trusted-signing infrastructure, both of which depend on
+# docs/decisions/0013-establish-project-and-publishing-governance.md, which is still `proposed` (unconfirmed) as
+# of this workflow's authoring. Inventing a certificate/secret here would fabricate an unconfirmed publishing
+# identity, which this repository's engineering workflow explicitly forbids. The signing step below is kept
+# workflow-ready (correct command, correct inputs) but permanently disabled (`if: false`) with this blocker
+# documented inline, so accepting ADR 0013 and provisioning a certificate secret is the only change needed to
+# activate it; see dotnet/README.md's Status section for the same blocker surfaced to package consumers.
+#
+# Supply-chain note: actions pinned exactly as in dotnet-security.yml/dotnet-quality.yml.
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sbom-and-provenance:
+    name: SBOM and build provenance
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+            10.0.x
+
+      - name: Restore
+        working-directory: dotnet
+        run: dotnet restore src/MongoDB.AgentFramework/MongoDB.AgentFramework.csproj
+
+      - name: Pack (Release, deterministic)
+        working-directory: dotnet
+        run: >
+          dotnet pack src/MongoDB.AgentFramework/MongoDB.AgentFramework.csproj
+          --configuration Release
+          -p:ContinuousIntegrationBuild=true
+          -p:CI=true
+
+      - name: Generate SPDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          path: dotnet/artifacts/packages
+          format: spdx-json
+          output-file: dotnet/artifacts/packages/MongoDB.AgentFramework.sbom.spdx.json
+          upload-artifact: false
+
+      - name: Generate CycloneDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          path: dotnet/artifacts/packages
+          format: cyclonedx-json
+          output-file: dotnet/artifacts/packages/MongoDB.AgentFramework.sbom.cyclonedx.json
+          upload-artifact: false
+
+      # SLSA-style build provenance over this workflow run's own (real, GitHub-issued) OIDC identity -- distinct
+      # from, and not a substitute for, the NuGet package signing documented as blocked above.
+      - name: Attest build provenance for the packed artifacts
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: |
+            dotnet/artifacts/packages/*.nupkg
+            dotnet/artifacts/packages/*.snupkg
+
+      # BLOCKED (see file header): no owner-issued NuGet code-signing certificate or ADR 0013 acceptance exists
+      # yet. This step is intentionally never executed (`if: false`); it documents the exact command a future,
+      # owner-approved signing secret would need, without inventing that secret or claiming a signature exists.
+      - name: "Sign NuGet package (blocked: no signing certificate/ADR 0013 acceptance yet)"
+        if: false
+        working-directory: dotnet
+        run: >
+          dotnet nuget sign artifacts/packages/*.nupkg
+          --certificate-path "${{ secrets.NUGET_SIGNING_CERTIFICATE_PATH }}"
+          --certificate-password "${{ secrets.NUGET_SIGNING_CERTIFICATE_PASSWORD }}"
+          --timestamper http://timestamp.digicert.com
+
+      - name: Checksum manifest
+        working-directory: dotnet/artifacts/packages
+        shell: pwsh
+        run: |
+          Get-ChildItem -File | ForEach-Object {
+            $hash = Get-FileHash -Path $_.FullName -Algorithm SHA256
+            "$($hash.Hash)  $($_.Name)"
+          } | Set-Content -Path checksums.sha256.txt
+          Get-Content checksums.sha256.txt
+
+      - name: Upload SBOM, provenance-adjacent artifacts, and checksums
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nuget-sbom-and-checksums
+          path: |
+            dotnet/artifacts/packages/*.nupkg
+            dotnet/artifacts/packages/*.snupkg
+            dotnet/artifacts/packages/*.sbom.*.json
+            dotnet/artifacts/packages/checksums.sha256.txt
+          if-no-files-found: error
+          retention-days: 14

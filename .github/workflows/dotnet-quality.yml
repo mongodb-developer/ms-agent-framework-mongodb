@@ -1,0 +1,95 @@
+name: .NET build, test, and package quality
+
+# Implements the "dotnet-quality" job from docs/spec/quality-release.md's CI workflow topology: restore, build
+# every target framework with warnings as errors, formatting/analyzer validation, unit tests, pack, and a NuGet
+# install/runtime smoke test from the produced package (not a project reference). Credentialed Search-capable
+# deployment integration tests are covered separately by dotnet-integration.yml, gated behind an approved
+# environment/secrets per that same spec section; this workflow only ever runs credential-free checks, so it is
+# safe to run on every pull request, including from forks.
+#
+# TFM matrix note: every .NET target framework this package ships (net8.0/net9.0/net10.0) already builds from a
+# single multi-targeted `dotnet build`/`dotnet pack` invocation (see src/MongoDB.AgentFramework/MongoDB.AgentFramework.csproj's
+# <TargetFrameworks>), so a second matrix dimension over TFMs would not add real coverage here. The OS axis below
+# is the dimension that does: it exercises this workflow's own tooling (the .NET SDK, `dotnet format`, PowerShell
+# `verify-package.ps1`) on both of this repository's supported development platforms.
+#
+# Supply-chain note: every action below is pinned to an immutable full commit SHA (not a mutable tag) with a
+# trailing `# vX.Y.Z` comment recording the release that SHA corresponds to, matching dotnet-security.yml.
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dotnet-quality:
+    name: dotnet-quality (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+            10.0.x
+
+      - name: Restore
+        working-directory: dotnet
+        run: dotnet restore MongoDB.AgentFramework.slnx
+
+      # Covers "formatting/analyzer validation" from docs/spec/quality-release.md's .NET quality gates. Analyzer
+      # diagnostics (including the PublicAPI analyzer's RS0016/RS0017 for undeclared public API surface changes)
+      # are separately promoted to build errors by each project's TreatWarningsAsErrors, so the build step below
+      # catches those; this step catches whitespace/style formatting drift specifically.
+      - name: Verify formatting (no changes)
+        working-directory: dotnet
+        run: dotnet format MongoDB.AgentFramework.slnx --verify-no-changes --verbosity diagnostic
+
+      - name: Build all target frameworks (Release, warnings as errors)
+        working-directory: dotnet
+        run: dotnet build MongoDB.AgentFramework.slnx --configuration Release --no-restore
+
+      # Every project in the solution sets TreatWarningsAsErrors, so a clean exit code here already proves zero
+      # warnings; Search-capable-deployment integration tests (Trait Category integration-*) skip cleanly (not
+      # fail) without MONGODB_URI/MONGODB_DATABASE, exactly as they do for a local contributor without credentials.
+      - name: Unit tests (Release, all projects)
+        working-directory: dotnet
+        run: dotnet test MongoDB.AgentFramework.slnx --configuration Release --no-build --logger "console;verbosity=normal"
+
+      # Pack, package-content allowlist, reproducibility (double-pack comparison), and the clean isolated NuGet
+      # consumer smoke test (tests/PackageSmokeTest) all live in one script so local and CI runs exercise
+      # identically; see dotnet/scripts/verify-package.ps1 for the full step-by-step rationale.
+      - name: Pack and verify the package (allowlist, reproducibility, consumer smoke)
+        shell: pwsh
+        working-directory: dotnet
+        run: ./scripts/verify-package.ps1 -Configuration Release
+
+      - name: Build all sample projects
+        working-directory: dotnet
+        run: dotnet build samples/IngestionSamples/IngestionSamples.csproj samples/MemoryQuickstart/MemoryQuickstart.csproj samples/HistoryQuickstart/HistoryQuickstart.csproj samples/RAGQuickstart/RAGQuickstart.csproj samples/ParentDocumentRAGQuickstart/ParentDocumentRAGQuickstart.csproj samples/IncrementalIngestionQuickstart/IncrementalIngestionQuickstart.csproj samples/IndexManagementQuickstart/IndexManagementQuickstart.csproj samples/SessionPersistenceQuickstart/SessionPersistenceQuickstart.csproj samples/WorkflowCheckpointResumeQuickstart/WorkflowCheckpointResumeQuickstart.csproj --configuration Release --no-restore
+
+      - name: Upload packed artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nuget-packages-${{ matrix.os }}
+          path: |
+            dotnet/artifacts/packages/*.nupkg
+            dotnet/artifacts/packages/*.snupkg
+          if-no-files-found: error
+          retention-days: 14

@@ -1,0 +1,87 @@
+name: .NET credentialed integration tests
+
+# Implements docs/spec/quality-release.md's `integration-memory`, `integration-history`, `integration-rag-vector`,
+# `integration-rag-search`, `integration-rag-hybrid`, and `integration-persistence` CI jobs for .NET (plus
+# `integration-index-management`, an additional xunit Trait Category this repository's own integration tests
+# already use for Vector Search/Search index provisioning coverage). Each targets a real, Search-capable MongoDB
+# Atlas deployment reachable through the `MONGODB_URI`/`MONGODB_DATABASE` secrets configured on the
+# `dotnet-integration` GitHub Environment (an owner-configured protection rule, not created by this workflow).
+#
+# Fork/credential safety: per docs/spec/quality-release.md, "credentialed integration jobs ... must never execute
+# untrusted fork code with secrets." This workflow intentionally does NOT trigger on `pull_request` at all: it
+# runs only on push to main, on a schedule (to catch upstream Agent Framework/driver/MongoDB service changes per
+# the same spec section), and on manual workflow_dispatch -- all of which use this repository's own trusted
+# checkout, never a fork-supplied ref, and the `dotnet-integration` environment's own required-reviewer protection
+# (if configured by the repository owner) gates secret exposure further still.
+#
+# No live MongoDB deployment or environment secrets exist in the validation environment this workflow was
+# authored in. Each job below still runs `dotnet test` filtered to its own Category; the tests themselves already
+# skip cleanly (xunit Skip, not a failure) when MONGODB_URI/MONGODB_DATABASE are unset, exactly as they do for a
+# credential-free local contributor -- see tests/MongoDB.AgentFramework.Tests/**/*IntegrationTests.cs. This
+# workflow deliberately does not condition the job out of existence when secrets are absent, so it keeps
+# reporting an accurate (skipped, not falsely-green-by-omission) status until real credentials are provisioned.
+#
+# Supply-chain note: actions pinned exactly as in dotnet-security.yml/dotnet-quality.yml.
+on:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: "23 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dotnet-integration:
+    name: ${{ matrix.job }}
+    runs-on: ubuntu-latest
+    environment: dotnet-integration
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - job: integration-memory
+            category: integration-memory
+          - job: integration-history
+            category: integration-history
+          - job: integration-rag-vector
+            category: integration-rag
+          - job: integration-rag-search
+            category: integration-rag-search
+          - job: integration-rag-hybrid
+            category: integration-rag-hybrid
+          - job: integration-index-management
+            category: integration-index-management
+          - job: integration-persistence
+            category: integration-persistence
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+            10.0.x
+
+      - name: Restore
+        working-directory: dotnet
+        run: dotnet restore tests/MongoDB.AgentFramework.Tests/MongoDB.AgentFramework.Tests.csproj
+
+      - name: Run ${{ matrix.job }} (Category=${{ matrix.category }})
+        working-directory: dotnet
+        env:
+          MONGODB_URI: ${{ secrets.MONGODB_URI }}
+          MONGODB_DATABASE: ${{ secrets.MONGODB_DATABASE }}
+        run: |
+          dotnet test tests/MongoDB.AgentFramework.Tests/MongoDB.AgentFramework.Tests.csproj \
+            --configuration Release \
+            --no-restore \
+            --filter "Category=${{ matrix.category }}" \
+            --logger "console;verbosity=normal"
