@@ -19,9 +19,11 @@ single `<Version>` in
 and update `dotnet/CHANGELOG.md`. Run the rehearsal below and merge a reviewed
 pull request to `main`.
 
-Every push to the staging branch, and every pull request targeting
-`build/dotnet-packaging-release`, automatically starts these independent
-readiness surfaces:
+Every push to the staging branch automatically starts all readiness surfaces
+below. Pull requests targeting `build/dotnet-packaging-release` start the
+credential-free quality, manifest, security, and SBOM rows; credentialed
+integration runs only after the pull request is merged and the staging branch
+push occurs.
 
 | Workflow/status check(s) | Required evidence |
 | --- | --- |
@@ -31,18 +33,19 @@ readiness surfaces:
 | `SBOM (credential-free)` | package checks, checksums, SPDX and CycloneDX SBOM |
 | `integration-memory`, `integration-history`, `integration-rag-vector`, `integration-rag-search`, `integration-rag-hybrid`, `integration-index-management`, `integration-persistence` | protected-environment credentialed integration categories; may wait for approval |
 
-Configure branch protection for `build/dotnet-packaging-release` to require all
-applicable statuses above, including the exact stable status name
+Configure branch protection for `build/dotnet-packaging-release` to require the
+credential-free pull-request statuses above, including the exact stable status name
 `.NET manifest release readiness`. That aggregate uses `always()` so a failed,
 skipped, or cancelled dependency cannot skip the required status; it then fails
 explicitly unless both `dotnet-quality` and
 `dotnet-agent-framework-compat` report `success`, and only afterward runs
 manifest/version/package validation. It runs for pushes to the protected branch
 and pull requests targeting `build/dotnet-packaging-release`; unrelated pull
-request targets do not require this staging-only status. The integration
-environment must restrict this branch and supply `MONGODB_URI` and
-`MONGODB_DATABASE`; declining approval is not equivalent to passing integration
-readiness.
+request targets do not require this staging-only status. Do not configure the
+push-only integration job names as pull-request required checks. Instead, require
+their successful staging-branch run as release evidence. The integration environment
+must restrict this branch and supply `MONGODB_URI` and `MONGODB_DATABASE`; declining
+approval is not equivalent to passing integration readiness.
 
 After a reviewed manifest change reaches `main`, **.NET release coordinator**
 starts automatically because its push trigger is path-filtered to
