@@ -48,6 +48,54 @@ public sealed class MongoDBRAGIntegrationTests
             new RecordingEmbeddingGenerator(),
             3,
             options);
+
+        // No MandatoryFilter: used only to independently confirm both tenant documents are searchable (via each
+        // search mode) before that mode's tenant-A-scoped provider's exclusion of tenant B is asserted below.
+        // Without this, the exclusion assertions could pass vacuously merely because tenant B's document was never
+        // indexed/searchable in the first place (Atlas Search/Vector Search index newly written documents
+        // asynchronously), rather than because the mandatory filter actually excluded it.
+        var annReadinessOptions = new MongoDBRAGProviderOptions
+        {
+            SearchMode = MongoDBSearchMode.VectorAnn,
+            VectorIndexName = vectorIndexName,
+            TopK = 10,
+        };
+        await using MongoDBRAGProvider annReadinessProvider = new(
+            client,
+            databaseName!,
+            collectionName,
+            new RecordingEmbeddingGenerator(),
+            3,
+            annReadinessOptions);
+
+        var ennOptions = new MongoDBRAGProviderOptions
+        {
+            SearchMode = MongoDBSearchMode.VectorEnn,
+            VectorIndexName = vectorIndexName,
+            TopK = 10,
+            MandatoryFilter = MongoDBRAGFilter.Equal("tenant_id", "tenant-a"),
+        };
+        await using MongoDBRAGProvider ennProvider = new(
+            client,
+            databaseName!,
+            collectionName,
+            new RecordingEmbeddingGenerator(),
+            3,
+            ennOptions);
+
+        var ennReadinessOptions = new MongoDBRAGProviderOptions
+        {
+            SearchMode = MongoDBSearchMode.VectorEnn,
+            VectorIndexName = vectorIndexName,
+            TopK = 10,
+        };
+        await using MongoDBRAGProvider ennReadinessProvider = new(
+            client,
+            databaseName!,
+            collectionName,
+            new RecordingEmbeddingGenerator(),
+            3,
+            ennReadinessOptions);
         try
         {
             await collection.InsertManyAsync(
@@ -68,7 +116,21 @@ public sealed class MongoDBRAGIntegrationTests
                 },
             ]);
 
-            IReadOnlyList<MongoDBRAGResult> annResults = await provider.SearchAsync("blue widgets");
+            // ANN readiness: poll independently of ENN, since $vectorSearch's approximate index and an ENN exact
+            // scan can become consistent at different times after the same insert.
+            await PollUntilSearchableAsync(
+                annReadinessProvider,
+                "blue widgets",
+                results => results.Any(r => r.Id == tenantAId) && results.Any(r => r.Id == tenantBId),
+                timeout: TimeSpan.FromSeconds(30),
+                pollInterval: TimeSpan.FromSeconds(1));
+
+            IReadOnlyList<MongoDBRAGResult> annResults = await PollUntilSearchableAsync(
+                provider,
+                "blue widgets",
+                tenantAId,
+                timeout: TimeSpan.FromSeconds(30),
+                pollInterval: TimeSpan.FromSeconds(1));
             Assert.Contains(annResults, result => result.Id == tenantAId);
             Assert.DoesNotContain(annResults, result => result.Id == tenantBId);
 
@@ -79,21 +141,21 @@ public sealed class MongoDBRAGIntegrationTests
             Assert.Equal("tenant-a", tenantAAnnResult.RawDocument["tenant_id"].AsString);
             Assert.False(tenantAAnnResult.RawDocument.Contains("_ragScore"));
 
-            var ennOptions = new MongoDBRAGProviderOptions
-            {
-                SearchMode = MongoDBSearchMode.VectorEnn,
-                VectorIndexName = vectorIndexName,
-                TopK = 10,
-                MandatoryFilter = MongoDBRAGFilter.Equal("tenant_id", "tenant-a"),
-            };
-            await using MongoDBRAGProvider ennProvider = new(
-                client,
-                databaseName!,
-                collectionName,
-                new RecordingEmbeddingGenerator(),
-                3,
-                ennOptions);
-            IReadOnlyList<MongoDBRAGResult> ennResults = await ennProvider.SearchAsync("blue widgets");
+            // ENN readiness: polled independently of ANN above (separate provider, separate bounded deadline), per
+            // the same non-vacuous-isolation reasoning.
+            await PollUntilSearchableAsync(
+                ennReadinessProvider,
+                "blue widgets",
+                results => results.Any(r => r.Id == tenantAId) && results.Any(r => r.Id == tenantBId),
+                timeout: TimeSpan.FromSeconds(30),
+                pollInterval: TimeSpan.FromSeconds(1));
+
+            IReadOnlyList<MongoDBRAGResult> ennResults = await PollUntilSearchableAsync(
+                ennProvider,
+                "blue widgets",
+                tenantAId,
+                timeout: TimeSpan.FromSeconds(30),
+                pollInterval: TimeSpan.FromSeconds(1));
             Assert.Contains(ennResults, result => result.Id == tenantAId);
             Assert.DoesNotContain(ennResults, result => result.Id == tenantBId);
         }

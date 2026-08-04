@@ -220,7 +220,27 @@ Tests live under `dotnet/tests/MongoDB.AgentFramework.Tests/RAG/` and were writt
   (`MONGODB_RAG_COLLECTION`/`MONGODB_RAG_VECTOR_INDEX`, both with defaults) rather than creating its own index per
   run, and only ever inserts/deletes documents whose IDs carry a unique, test-owned prefix. It also asserts, against
   a real MongoDB deployment, that `RawDocument` preserves a field the mapping configuration never names
-  (`tenant_id`) and never contains the reserved `_ragScore` alias.
+  (`tenant_id`) and never contains the reserved `_ragScore` alias. See
+  [Deterministic ANN/ENN readiness polling (review fix)](#deterministic-annenn-readiness-polling-review-fix) below
+  for how it avoids Atlas indexing-lag flakiness and a vacuous isolation assertion.
+
+## Deterministic ANN/ENN readiness polling (review fix)
+
+`$vectorSearch`'s approximate (ANN) index and an exact-scan (ENN) `$vectorSearch` query can become consistent with a
+just-completed `InsertManyAsync` at different times, so a query issued immediately after insert can intermittently
+miss a document that Atlas has not finished indexing/replicating yet — exactly the same class of flakiness already
+fixed for FullText search (see
+[dotnet-rag-full-text-search.md](dotnet-rag-full-text-search.md#deterministic-fulltext-sampleintegration-tests-review-fix)).
+`MongoDBRAGIntegrationTests.VectorAnnAndEnnSearchIsolateTenantsOnAPreProvisionedIndex` now polls readiness for ANN
+and ENN **independently** (two separate unfiltered `readinessProvider` instances, one per search mode, each with its
+own bounded 30-second/1-second-interval `PollUntilSearchableAsync` deadline) before ever asserting on the
+tenant-A-scoped provider's results for that mode. Each readiness poll requires **both** the included tenant's
+document and the excluded tenant's document to be searchable — not just the included one — because otherwise the
+subsequent `Assert.DoesNotContain(..., tenantBId)` isolation assertion could pass vacuously merely because tenant
+B's document was never indexed/searchable in the first place, rather than because the `MandatoryFilter` actually
+excluded it. Only once both tenants' documents are confirmed searchable for a given mode does the test poll the
+tenant-A-scoped provider for tenant A's document and assert tenant B is excluded. As with FullText, polling exists
+only in this test, never in the production `MongoDBRAGProvider.SearchAsync` path.
 
 Run:
 
