@@ -19,7 +19,8 @@ single `<Version>` in
 and update `dotnet/CHANGELOG.md`. Run the rehearsal below and merge a reviewed
 pull request to `main`.
 
-Every push to the staging branch automatically starts these independent
+Every push to the staging branch, and every pull request targeting
+`build/dotnet-packaging-release`, automatically starts these independent
 readiness surfaces:
 
 | Workflow/status check(s) | Required evidence |
@@ -36,9 +37,12 @@ applicable statuses above, including the exact stable status name
 skipped, or cancelled dependency cannot skip the required status; it then fails
 explicitly unless both `dotnet-quality` and
 `dotnet-agent-framework-compat` report `success`, and only afterward runs
-manifest/version/package validation. The integration environment must restrict
-this branch and supply `MONGODB_URI` and `MONGODB_DATABASE`; declining approval
-is not equivalent to passing integration readiness.
+manifest/version/package validation. It runs for pushes to the protected branch
+and pull requests targeting `build/dotnet-packaging-release`; unrelated pull
+request targets do not require this staging-only status. The integration
+environment must restrict this branch and supply `MONGODB_URI` and
+`MONGODB_DATABASE`; declining approval is not equivalent to passing integration
+readiness.
 
 After a reviewed manifest change reaches `main`, **.NET release coordinator**
 starts automatically because its push trigger is path-filtered to

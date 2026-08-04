@@ -24,6 +24,9 @@ Assert-True ($quality -match '(?m)^\s+name: \.NET manifest release readiness\s*$
     'Stable required status check is named .NET manifest release readiness'
 Assert-True ($quality -match '(?ms)dotnet-manifest-readiness:.*?if:\s*>-\s+always\(\).*?github\.event_name') `
     'Manifest readiness aggregate runs after failed, skipped, or cancelled dependencies'
+Assert-True (
+    $quality -match "(?ms)dotnet-manifest-readiness:.*?always\(\).*?github\.event_name == 'push'.*?github\.ref == 'refs/heads/build/dotnet-packaging-release'.*?\|\|.*?github\.event_name == 'pull_request'.*?github\.base_ref == 'build/dotnet-packaging-release'"
+) 'Stable aggregate covers build-branch pushes and pull requests targeting the build branch'
 Assert-True ($quality -match 'assert-required-job-results\.ps1') `
     'Manifest readiness explicitly rejects every nonsuccess dependency result'
 Assert-True (
@@ -63,6 +66,10 @@ Assert-True (
     $attestation -match "workflow_run\.event == 'workflow_dispatch'" -and
     $attestation -match "startsWith\(github\.event\.workflow_run\.head_branch, 'dotnet-v'\)"
 ) 'Ordinary build-branch SBOM runs cannot enter the privileged release graph'
+
+$operations = Get-Content (Join-Path $root 'docs/development/release/dotnet-release-operations.md') -Raw
+Assert-True ($operations -match '(?i)pull requests targeting `build/dotnet-packaging-release`') `
+    'Branch-protection documentation requires the stable aggregate on build-branch pull requests'
 
 if ($failures -gt 0) { exit 1 }
 Write-Host 'All automatic readiness workflow self-tests PASSED.' -ForegroundColor Green

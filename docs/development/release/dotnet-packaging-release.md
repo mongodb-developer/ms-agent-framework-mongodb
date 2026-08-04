@@ -356,11 +356,13 @@ every construction succeeds.
 ## CI workflows
 
 Every build-branch push starts quality, security (dependency/secret/CodeQL),
-credential-free SBOM, and protected integration workflows. Compatibility is
-not duplicated in a second workflow because the quality graph already runs the
+credential-free SBOM, and protected integration workflows. Pull requests
+targeting `build/dotnet-packaging-release` run the credential-free quality
+graph, including its stable manifest-readiness aggregate. Compatibility is not
+duplicated in a second workflow because the quality graph already runs the
 complete dynamic latest/previous gate and uploads per-version TRX/JSON/Markdown.
-Branch protection should require their statuses, including the explicit
-manifest-readiness status described below.
+Branch protection should require their applicable statuses, including the
+explicit manifest-readiness status described below.
 
 The SHA-pinned workflows follow the existing
 `.github/workflows/dotnet-security.yml` pinning convention (comment with the

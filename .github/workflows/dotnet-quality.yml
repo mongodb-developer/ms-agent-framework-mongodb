@@ -202,8 +202,10 @@ jobs:
     name: .NET manifest release readiness
     if: >-
       always() &&
-      github.event_name == 'push' &&
-      github.ref == 'refs/heads/build/dotnet-packaging-release'
+      ((github.event_name == 'push' &&
+      github.ref == 'refs/heads/build/dotnet-packaging-release') ||
+      (github.event_name == 'pull_request' &&
+      github.base_ref == 'build/dotnet-packaging-release'))
     needs: [dotnet-quality, dotnet-agent-framework-compat]
     runs-on: ubuntu-24.04
     permissions:
