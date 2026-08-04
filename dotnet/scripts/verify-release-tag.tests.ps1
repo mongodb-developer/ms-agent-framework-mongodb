@@ -67,6 +67,33 @@ $caseMismatch = Test-ReleaseTagMatchesVersion -Version "1.2.3" -RefName "DOTNET-
 Assert-True (-not $caseMismatch.Matches) "Case sensitivity: version 1.2.3 / ref DOTNET-V1.2.3 -> does NOT match (git tags are case-sensitive)"
 
 # ---------------------------------------------------------------------------------------------------------------
+# Part 1b: Test-ValidReleaseTagGrammar -- the defense-in-depth check applied independently of (never as a
+# substitute for) passing -RefName as a proper parameter value rather than interpolating it into script text.
+# ---------------------------------------------------------------------------------------------------------------
+Assert-True (Test-ValidReleaseTagGrammar -RefName "dotnet-v1.2.3") "Grammar: 'dotnet-v1.2.3' is a valid release tag"
+Assert-True (Test-ValidReleaseTagGrammar -RefName "dotnet-v0.1.0-preview.1") "Grammar: 'dotnet-v0.1.0-preview.1' is a valid release tag (pre-release label)"
+Assert-True (-not (Test-ValidReleaseTagGrammar -RefName "main")) "Grammar: a plain branch name 'main' is not a valid release tag"
+Assert-True (-not (Test-ValidReleaseTagGrammar -RefName "")) "Grammar: an empty ref name is not a valid release tag"
+Assert-True (-not (Test-ValidReleaseTagGrammar -RefName "dotnet-v")) "Grammar: 'dotnet-v' with no version suffix is not a valid release tag"
+Assert-True (-not (Test-ValidReleaseTagGrammar -RefName "DOTNET-V1.2.3")) "Grammar: wrong case 'DOTNET-V1.2.3' is not a valid release tag (case-sensitive)"
+
+# Injection-shaped strings must be rejected by grammar (they contain characters outside [0-9A-Za-z.-]), proving
+# the grammar check itself provides a second, independent layer of defense even if some future call site ever
+# reintroduced string interpolation by mistake.
+$injectionShapedRefNames = @(
+    'dotnet-v1.2.3"; Remove-Item -Recurse -Force C:\; "'
+    'dotnet-v$(Remove-Item -Recurse -Force C:\)'
+    'dotnet-v1.2.3`; whoami'
+    "dotnet-v1.2.3'; malicious-command; '"
+    "dotnet-v1.2.3;malicious-command"
+    "dotnet-v1.2.3 && malicious-command"
+)
+foreach ($injectionShapedRefName in $injectionShapedRefNames) {
+    Assert-True (-not (Test-ValidReleaseTagGrammar -RefName $injectionShapedRefName)) `
+        "Grammar: injection-shaped ref name is rejected: $injectionShapedRefName"
+}
+
+# ---------------------------------------------------------------------------------------------------------------
 # Part 2: Get-NupkgVersion against a real, minimal fixture zip (only a .nuspec entry, no dll/xml needed).
 # ---------------------------------------------------------------------------------------------------------------
 Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -131,6 +158,43 @@ Assert-True ($LASTEXITCODE -eq 0) "verify-release-tag.ps1 without -EnforceMatch 
 
 & pwsh -NoProfile -File $verifyScript -NupkgPath $fixtureNupkgPreRelease -RefName "dotnet-v0.1.0-preview.1" -EnforceMatch | Out-Null
 Assert-True ($LASTEXITCODE -eq 0) "verify-release-tag.ps1 -EnforceMatch exits 0 for a matching pre-release version/tag"
+
+& pwsh -NoProfile -File $verifyScript -NupkgPath $fixtureNupkgMatching -RefName "main" -EnforceMatch | Out-Null
+Assert-True ($LASTEXITCODE -eq 1) "verify-release-tag.ps1 -EnforceMatch exits 1 for a grammar-invalid ref ('main') before even comparing versions"
+
+# ---------------------------------------------------------------------------------------------------------------
+# Part 4: injection-shaped -RefName values passed to the real script as a PROPER PARAMETER (never interpolated
+# into script source text, exactly matching how the fixed dotnet-sbom-provenance.yml workflow now invokes this
+# script via `$env:RELEASE_TAG`). Proves these values are treated purely as inert data: the process must not
+# execute anything embedded in the string, must not throw unexpectedly, and must report a grammar-invalid,
+# non-matching result. Each payload attempts to create a marker file if it were ever re-parsed as PowerShell
+# source -- the marker's absence afterward is the actual proof of safety, not merely the exit code.
+# ---------------------------------------------------------------------------------------------------------------
+$injectionMarkerPath = Join-Path $fixtureDir "injection-marker.txt"
+$injectionPayloadRefNames = @(
+    "dotnet-v1.2.3`"; Set-Content -Path '$injectionMarkerPath' -Value 'pwned'; `""
+    "dotnet-v`$(Set-Content -Path '$injectionMarkerPath' -Value 'pwned')"
+    "dotnet-v1.2.3``; Set-Content -Path '$injectionMarkerPath' -Value 'pwned'"
+    "dotnet-v1.2.3'; Set-Content -Path '$injectionMarkerPath' -Value 'pwned'; '"
+    "dotnet-v1.2.3;Set-Content -Path '$injectionMarkerPath' -Value 'pwned'"
+)
+
+foreach ($injectionPayloadRefName in $injectionPayloadRefNames) {
+    if (Test-Path $injectionMarkerPath) {
+        Remove-Item $injectionMarkerPath -Force
+    }
+
+    & pwsh -NoProfile -File $verifyScript -NupkgPath $fixtureNupkgMatching -RefName $injectionPayloadRefName -EnforceMatch | Out-Null
+    $exitCode = $LASTEXITCODE
+    $markerCreated = Test-Path $injectionMarkerPath
+
+    Assert-True (-not $markerCreated) "Injection-shaped ref name passed as a real parameter never executes embedded commands (no marker file created): $injectionPayloadRefName"
+    Assert-True ($exitCode -eq 1) "Injection-shaped ref name passed as a real parameter is treated as inert data and fails grammar/match (-EnforceMatch exits 1): $injectionPayloadRefName"
+}
+
+if (Test-Path $injectionMarkerPath) {
+    Remove-Item $injectionMarkerPath -Force
+}
 
 Remove-Item $fixtureDir -Recurse -Force
 

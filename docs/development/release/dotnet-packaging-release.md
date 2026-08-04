@@ -368,7 +368,17 @@ When a `dotnet-v*` tag is eventually pushed, `dotnet-sbom-provenance.yml`'s
 `sbom` job asserts the packed `.nuspec`'s `<version>` exactly matches that
 tag (`scripts/verify-release-tag.ps1`) before any upload or attestation can
 proceed, so a tag/version mismatch fails the workflow rather than silently
-publishing/attesting the wrong artifact.
+publishing/attesting the wrong artifact. Both steps that compare
+`github.ref_name` against the packed version pass it through a
+step-level `env: RELEASE_TAG: ${{ github.ref_name }}` and reference only
+`$env:RELEASE_TAG` inside the PowerShell `run:` block -- never
+string-interpolating the ref directly into script text -- and
+`Test-ValidReleaseTagGrammar` (`ReleaseVersionTag.ps1`) additionally
+rejects any ref not matching `^dotnet-v[0-9A-Za-z][0-9A-Za-z.-]*$` before
+any comparison runs, as defense-in-depth against a maliciously-named ref
+attempting shell/PowerShell injection (self-tested end-to-end in
+`verify-release-tag.tests.ps1` with real `$()`/quote/semicolon/backtick
+payloads passed as actual `-RefName` parameters).
 
 ## Known blockers (not resolved by this slice)
 
@@ -467,14 +477,19 @@ recorded output.
   wrong/stale hash fails, a missing library entry fails, a non-`package`
   type fails, a missing `sha512` fails, and looking up the wrong version
   fails -- all 7 passed).
-- `dotnet/scripts/verify-release-tag.tests.ps1` (self-test: 14 assertions --
+- `dotnet/scripts/verify-release-tag.tests.ps1` (self-test: 30+ assertions --
   pure tag/version comparison for exact match, mismatch, pre-release
   match/mismatch, missing `dotnet-` prefix, non-tag branch ref, and
-  case-sensitivity; `Get-NupkgVersion` parses both a normal and a
-  pre-release version from a real in-memory `.nuspec`-containing zip
-  fixture; end-to-end process-exit-code checks of `verify-release-tag.ps1`
-  for both the `-EnforceMatch` [tag-push] and record-only
-  [`workflow_dispatch`] invocation shapes -- all 14 passed).
+  case-sensitivity; `Test-ValidReleaseTagGrammar` fixtures for valid tags,
+  a plain branch name, an empty ref, an incomplete prefix, wrong case, and
+  six injection-shaped strings (`$()`, quotes, semicolons, backticks,
+  `&&`); `Get-NupkgVersion` parses both a normal and a pre-release version
+  from a real in-memory `.nuspec`-containing zip fixture; end-to-end
+  process-exit-code checks of `verify-release-tag.ps1` for both the
+  `-EnforceMatch` [tag-push] and record-only [`workflow_dispatch`]
+  invocation shapes, plus real injection-shaped `-RefName` values passed as
+  actual process parameters proving no embedded command ever executes
+  [marker-file technique] and the process still exits 1 -- all passed).
 - `dotnet/scripts/verify-trx-results.tests.ps1` and
   `dotnet/scripts/verify-assert-trx-executed.tests.ps1` (self-tests for the
   shared `TrxResults.ps1`/`Get-TrxExecutedCount` function and its

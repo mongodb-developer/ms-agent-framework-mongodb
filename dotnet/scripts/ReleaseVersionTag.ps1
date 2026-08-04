@@ -89,3 +89,32 @@ function Test-ReleaseTagMatchesVersion {
         Matches     = ($RefName -ceq $expectedTag)
     }
 }
+
+<#
+.SYNOPSIS
+    Validates a ref name against this repository's `dotnet-v<version>` tag grammar, as a defense-in-depth check
+    independent of (and in addition to) never interpolating the ref name into a shell/PowerShell script body.
+
+.DESCRIPTION
+    `dotnet-sbom-provenance.yml`'s tag/version-match step previously interpolated `github.ref_name` directly into
+    a `run: |` PowerShell script's source text (`-RefName "${{ github.ref_name }}"`), which GitHub Actions
+    substitutes BEFORE the shell ever parses the script -- a ref name crafted with an embedded quote, `$()`
+    subexpression, or semicolon could break out of the intended string literal and execute arbitrary code in the
+    runner. The fix passes the ref through a step-level `env:` value instead (`$env:RELEASE_TAG`), which is never
+    re-parsed as script syntax, so injection via that path is structurally impossible.
+
+    This function is the SEPARATE, additional safeguard the review also required: even with the injection vector
+    closed, a malformed/garbage ref name should never silently reach the version-match comparison as if it were
+    a plausible tag. `-cmatch` is case-sensitive (git tags are case-sensitive; "DOTNET-V1.2.3" is not this tag).
+
+.OUTPUTS
+    [bool] $true only if $RefName matches `^dotnet-v[0-9A-Za-z][0-9A-Za-z.-]*$` exactly (anchored both ends).
+#>
+function Test-ValidReleaseTagGrammar {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$RefName
+    )
+
+    return [bool]($RefName -cmatch '^dotnet-v[0-9A-Za-z][0-9A-Za-z.-]*$')
+}

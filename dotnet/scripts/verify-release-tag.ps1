@@ -17,6 +17,15 @@
     mismatch in that mode, per this repository's "manual dispatch can record/check without enforcing tag match"
     design. Pass -EnforceMatch only for the trusted tag-push trigger path.
 
+    -RefName MUST be passed as a proper PowerShell parameter value (e.g. from a step-level `env:` value such as
+    `$env:RELEASE_TAG`), NEVER by interpolating `${{ github.ref_name }}`/`${{ github.ref }}` directly into a
+    `run: |` script's source text -- GitHub Actions substitutes `${{ }}` expressions into the YAML string before
+    the shell/PowerShell interpreter ever parses it, so a ref name containing a quote, a `$()` subexpression, or
+    a semicolon could otherwise break out of the intended string literal and execute arbitrary code in the
+    runner. As additional defense in depth (independent of that fix), -RefName is also validated against the
+    `^dotnet-v[0-9A-Za-z][0-9A-Za-z.-]*$` tag grammar (see ReleaseVersionTag.ps1's Test-ValidReleaseTagGrammar)
+    before any match is enforced, so a malformed/garbage ref can never silently reach or pass the enforced check.
+
 .PARAMETER NupkgPath
     Path to the packed .nupkg to read the version from.
 
@@ -49,11 +58,22 @@ if (-not (Test-Path $NupkgPath)) {
 }
 
 $version = Get-NupkgVersion -NupkgPath $NupkgPath
+$grammarValid = Test-ValidReleaseTagGrammar -RefName $RefName
 $check = Test-ReleaseTagMatchesVersion -Version $version -RefName $RefName
 
 Write-Host "Package version (from packed .nuspec): $($check.Version)"
 Write-Host "Triggering ref name: $($check.RefName)"
 Write-Host "Expected tag for this version: $($check.ExpectedTag)"
+Write-Host "Ref name matches required tag grammar (^dotnet-v[0-9A-Za-z][0-9A-Za-z.-]*`$): $grammarValid"
+
+# Defense-in-depth, independent of how $RefName reached this process: even though passing it as a proper
+# PowerShell parameter (never string-interpolated into script source, see the workflow's `env:` usage) already
+# closes the injection vector, a malformed/garbage ref should never be allowed to reach -- or silently pass --
+# the enforced tag/version match below.
+if ($EnforceMatch -and -not $grammarValid) {
+    Write-Host "[FAIL] ref '$RefName' does not match the required release tag grammar '^dotnet-v[0-9A-Za-z][0-9A-Za-z.-]*`$' -- refusing to upload/attest for a malformed ref" -ForegroundColor Red
+    exit 1
+}
 
 if ($check.Matches) {
     Write-Host "[ OK ] ref '$($check.RefName)' matches the expected release tag for package version '$($check.Version)'" -ForegroundColor Green
