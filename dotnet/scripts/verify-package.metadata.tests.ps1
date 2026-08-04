@@ -255,6 +255,39 @@ Test-DependencyMutation "An analyzer package leaks into the net10.0 group's depe
     $net10.dependency = @($net10.dependency) + [pscustomobject]@{ id = "Microsoft.CodeAnalysis.PublicApiAnalyzers"; version = "[5.6.0, 6.0.0)" }
 }
 
+# Every named assertion that (directly or via the per-TFM loop) invokes Get-NuspecDependencyGroupsByTfm depends
+# on that single shared group map, so a duplicate that function now rejects by throwing must fail ALL FIVE of
+# them -- not just the one TFM the duplicate happens to involve -- since none of them can obtain a group map at
+# all once the function throws. This is the regression proof for "Reject duplicate groups and duplicate
+# dependency IDs before lookup": before this fix, `$groupsByTfm[$tfm] = ...`/`$dependenciesById[$id] = ...`
+# silently overwrote the earlier entry and every assertion below still PASSED against the (wrong) surviving
+# entry, masking the duplication entirely.
+$allDependencyGroupDependentAssertions = @(
+    "dependency groups are exactly net8.0, net9.0, and net10.0 (no more, no less)"
+    "net8.0 dependency group has exactly the expected package ids and version ranges"
+    "net9.0 dependency group has exactly the expected package ids and version ranges"
+    "net10.0 dependency group has exactly the expected package ids and version ranges"
+    "no analyzer/source-link/build-only packages leak into the nuspec dependency list"
+)
+
+Test-DependencyMutation "Duplicate net8.0 dependency group (same TFM declared twice)" $allDependencyGroupDependentAssertions {
+    param($m)
+    $duplicateNet8 = New-ValidNuspecDependencyGroupFixture "net8.0"
+    $m.dependencies.group = @($m.dependencies.group) + $duplicateNet8
+}
+
+Test-DependencyMutation "Duplicate net8.0 dependency group differing only by TFM case/whitespace ('  NET8.0  ')" $allDependencyGroupDependentAssertions {
+    param($m)
+    $duplicateNet8 = New-ValidNuspecDependencyGroupFixture "  NET8.0  "
+    $m.dependencies.group = @($m.dependencies.group) + $duplicateNet8
+}
+
+Test-DependencyMutation "Duplicate MongoDB.Driver dependency id within the net9.0 group" $allDependencyGroupDependentAssertions {
+    param($m)
+    $net9 = $m.dependencies.group | Where-Object { $_.targetFramework -eq "net9.0" }
+    $net9.dependency = @($net9.dependency) + [pscustomobject]@{ id = "MongoDB.Driver"; version = "[9.9.9, 10.0.0)" }
+}
+
 # ---------------------------------------------------------------------------------------------------------------
 Write-Host ""
 if ($script:AssertionFailures -gt 0) {

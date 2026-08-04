@@ -140,6 +140,20 @@ function Get-NormalizedVersionRange {
     Reads a nuspec <metadata>'s <dependencies> element into an ordered TFM -> (ordered package id -> normalized
     version range) map, tolerating the classic PowerShell XML "single child collapses out of array form" quirk
     (a nuspec with exactly one <group> or exactly one <dependency> would otherwise not enumerate as a collection).
+
+.DESCRIPTION
+    Rejects, by throwing, either of two duplicate shapes rather than silently overwriting the earlier entry in
+    the dictionary being built:
+      - Two (or more) <group targetFramework="..."> elements normalizing to the same TFM (e.g. two "net8.0"
+        groups, or "net8.0" and " NET8.0 "). Assigning `$groupsByTfm[$tfm] = ...` a second time would otherwise
+        silently discard the first group's dependency set with no error and no assertion ever seeing it existed.
+      - Two (or more) <dependency id="..."> elements within the SAME group sharing an id (e.g. "MongoDB.Driver"
+        declared twice, possibly with conflicting version ranges). Assigning `$dependenciesById[$id] = ...` a
+        second time would otherwise silently discard the first range the same way.
+    Both shapes indicate a genuinely malformed/ambiguous nuspec (or a broken msbuild/pack configuration that
+    emitted it) that must fail loudly here, BEFORE any assertion performs a dictionary lookup against
+    potentially-incomplete data -- a silently-dropped duplicate could otherwise mask a real dependency drift (the
+    surviving entry might not be the one a reviewer expects) while every assertion still appears to pass.
 #>
 function Get-NuspecDependencyGroupsByTfm {
     [CmdletBinding()]
@@ -152,10 +166,19 @@ function Get-NuspecDependencyGroupsByTfm {
         if ($null -eq $group) { continue }
 
         $tfm = Get-NormalizedTfm $group.targetFramework
+        if ($groupsByTfm.Contains($tfm)) {
+            throw "Nuspec <dependencies> declares more than one <group targetFramework> normalizing to '$tfm' -- duplicate dependency groups for the same target framework are rejected instead of silently overwriting the earlier group."
+        }
+
         $dependenciesById = [ordered]@{}
         foreach ($dependency in @($group.dependency)) {
             if ($null -eq $dependency) { continue }
-            $dependenciesById[[string]$dependency.id] = Get-NormalizedVersionRange ([string]$dependency.version)
+            $id = [string]$dependency.id
+            if ($dependenciesById.Contains($id)) {
+                throw "Nuspec dependency group '$tfm' declares package id '$id' more than once -- duplicate dependency ids within one group are rejected instead of silently overwriting the earlier range."
+            }
+
+            $dependenciesById[$id] = Get-NormalizedVersionRange ([string]$dependency.version)
         }
 
         $groupsByTfm[$tfm] = $dependenciesById
