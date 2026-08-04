@@ -124,6 +124,18 @@ real (`System.Xml.XmlElement`) `.nuspec` metadata -- not a synthetic
 fixture object -- and invokes the same assertions from three deliberately
 different invocation-scope shapes (see "Closure/scope regression" below).
 
+`Get-NuspecDependencyGroupsByTfm` also rejects, by throwing before ever
+building its lookup dictionary, a nuspec with two `<group>` elements
+normalizing to the same TFM (including a case/whitespace-only difference
+such as `"  NET8.0  "` vs. `net8.0`) or two `<dependency>` elements sharing
+one id within the same group -- ordinary hashtable/`[ordered]` dictionary
+assignment silently keeps only the *last* duplicate written and would
+otherwise mask a real duplication/drift bug behind an apparently passing
+check. `dotnet/scripts/verify-package.metadata.tests.ps1` includes fixtures
+for both duplicate shapes, each asserting that every dependency-group-
+dependent assertion fails together (since they all share the one throwing
+helper call).
+
 #### Closure/scope regression (and why the original self-test missed it)
 
 A review pass reported that `verify-package.ps1`'s production Step 3 failed
@@ -236,23 +248,35 @@ with the rationale recorded inline.
 
 ## Reproducible, deterministic packing
 
-Packing the same commit twice (`verify-package.ps1` step 4) produces
-byte-identical `lib/**/*.dll`, `lib/**/*.xml`, `*.nuspec`, and `README.md`
-package entries -- this proves the *build* is deterministic. Two OPC
-container artifacts are **not** byte-identical across repacks, and this is
-expected NuGet.Client `dotnet pack` packaging behavior, not a build
-determinism regression:
+Packing the same commit twice (`verify-package.ps1` step 4,
+`dotnet/scripts/PackageReproducibility.ps1`) proves the *build* is
+deterministic by comparing **every** zip entry across two independent
+`dotnet pack` invocations from a clean `bin`/`obj`/`artifacts` state --
+including the full content of `_rels/.rels` and every `*.psmdcp` entry, not
+just their presence. Two OPC container artifacts are not byte-identical
+*before* normalization, and this is expected NuGet.Client `dotnet pack`
+packaging behavior, not a build determinism regression:
 
 - `package/services/metadata/core-properties/{guid}.psmdcp` -- the part
-  *filename* is a freshly generated random GUID on every `dotnet pack`
-  invocation (the part's *content*, aside from the filename, was verified
-  identical).
-- `_rels/.rels` -- its `Relationship Id="..."` attributes (and the reference
-  to the psmdcp GUID filename above) are also regenerated per invocation.
+  *filename* (and every reference to it) is a freshly generated random GUID
+  on every `dotnet pack` invocation.
+- `_rels/.rels` -- its `Relationship Id="..."` attributes are also
+  regenerated per invocation.
 
-`verify-package.ps1` normalizes/excludes exactly these two artifacts and
-requires every other zip entry to match byte-for-byte across two independent
-`dotnet pack` invocations from a clean `bin`/`obj`/`artifacts` state.
+`Test-PackageReproducibility` normalizes *only* those two generated-identifier
+shapes (the 32-hex-digit psmdcp GUID, wherever it appears in an entry name or
+in `_rels/.rels` content, and the `Id="R<hex>"` relationship-id attribute
+values) and then requires the resulting normalized bytes of **every** entry,
+including `_rels/.rels` and each `*.psmdcp` part in full, to match exactly.
+This is a meaningful check, not a tautology that always passes those two
+entries: `dotnet/scripts/verify-package.reproducibility.tests.ps1` proves a
+genuine `.psmdcp` content difference (e.g. a different embedded
+`dc:creator`/`dc:identifier`) and a genuine `_rels/.rels` content difference
+(e.g. a relationship pointing at the wrong `Target`) both still fail the
+comparison, and separately reproduces the *original*, buggy
+"exclude-these-two-entries-entirely" comparison shape to demonstrate it would
+have silently passed both of those same corruptions -- confirming the current
+implementation is a real regression guard, not just normalization theater.
 
 ## Package-content allowlist
 
@@ -414,19 +438,49 @@ human-readable tag next to the pinned commit SHA):
     `actions/attest-build-provenance`
     (`id-token: write`, `attestations: write`, `artifact-metadata: write`,
     `contents: read` -- the exact permissions that action's own
-    documentation requires, nothing broader). It runs **only** for a
+    documentation requires, nothing broader). Its `if:` runs **only** for a
     trusted push of a `dotnet-v*` tag, or a `workflow_dispatch` run with an
-    explicit `confirm_attestation: yes` input, and is additionally gated by
-    a `dotnet-release-attestation` GitHub Environment an owner must
-    configure (protection rules/required reviewers) before this job can
-    ever execute -- a fork's `pull_request` event can never reach it at
-    all, since that event type is not in its trigger list. It also contains
-    the same **permanently disabled** (`if: false`) NuGet package-signing
-    step as before, documenting the exact `dotnet nuget sign` invocation a
-    future owner-approved signing certificate would need, referencing
-    placeholder secret names (`NUGET_SIGNING_CERTIFICATE_PATH`/`_PASSWORD`)
-    purely as documentation -- it never executes and never claims a
-    certificate exists.
+    explicit `confirm_attestation: yes` input -- but because
+    `workflow_dispatch` lets its operator pick *any* existing branch or tag
+    as the ref, that trigger-level check alone is not a sufficient release-ref
+    gate. This job's first two real steps therefore re-validate, in workflow
+    LOGIC (not merely GitHub's own environment configuration), that the ref
+    is actually eligible before anything is downloaded:
+    - **Validate attestation ref is eligible**
+      (`scripts/verify-attestation-ref.ps1`, backed by the pure
+      `Test-AttestationRefEligible` function in `scripts/ReleaseVersionTag.ps1`
+      and self-tested in `scripts/verify-attestation-ref.tests.ps1`) requires
+      the triggering event/ref pair to be either a `push` of a ref matching
+      this repository's exact `refs/tags/dotnet-v<version>` grammar, or a
+      `workflow_dispatch` targeting exactly `refs/heads/main` or a valid
+      release tag -- every other event/ref combination (an arbitrary
+      `workflow_dispatch`-selected feature branch, a malformed or
+      injection-shaped ref, a wrong event name, even differing only by case)
+      is rejected. The event name and ref are always passed to this script
+      through step-level `env:` values (`ATTESTATION_EVENT_NAME`/
+      `ATTESTATION_REF`), never interpolated directly into shell/PowerShell
+      source, for the same injection-surface reason documented on
+      `verify-release-tag.ps1`.
+    - **Validate commit is reachable from origin/main (ancestry check)** then
+      additionally runs `git merge-base --is-ancestor` (against a full-history
+      checkout) to prove the actual triggering *commit* -- not merely a ref
+      whose *name* happens to match the grammar -- is real, verified ancestry
+      of `main`, catching e.g. a `dotnet-v*` tag pushed against a commit that
+      was never actually merged.
+
+    The `dotnet-release-attestation` GitHub Environment (protection
+    rules/required reviewers an owner must configure) remains a genuine
+    SECOND, independent layer of defense-in-depth on top of these two
+    workflow-logic steps -- it is not this job's sole or primary gate, and
+    this job must never be considered safe on the assumption that an
+    Environment with no protection rule configured is enough by itself. A
+    fork's `pull_request` event can never reach this job at all, since that
+    event type is not in its trigger list. It also contains the same
+    **permanently disabled** (`if: false`) NuGet package-signing step as
+    before, documenting the exact `dotnet nuget sign` invocation a future
+    owner-approved signing certificate would need, referencing placeholder
+    secret names (`NUGET_SIGNING_CERTIFICATE_PATH`/`_PASSWORD`) purely as
+    documentation -- it never executes and never claims a certificate exists.
 
 ## Versioning and tagging
 
@@ -487,15 +541,22 @@ packaging engineering itself:
    dropped.
 6. **`dotnet-release-attestation` GitHub Environment not yet configured.**
    `dotnet-sbom-provenance.yml`'s `provenance-attestation` job references a
-   `dotnet-release-attestation` GitHub Environment as an explicit,
-   owner-configurable protection gate (required reviewers/branch
-   restrictions). This repository cannot create or configure that
-   Environment's protection rules itself; until an owner does, the job's
-   `if:` condition (trusted `dotnet-v*` tag push, or `workflow_dispatch`
-   with an explicit `confirm_attestation: yes` input) is necessary but not
-   sufficient -- GitHub will not grant the environment's protections until
-   they are configured, which is itself an additional (fail-safe, not
-   fail-open) barrier to accidental attestation runs.
+   `dotnet-release-attestation` GitHub Environment as an owner-configurable
+   protection gate (required reviewers/branch restrictions). This repository
+   cannot create or configure that Environment's protection rules itself;
+   until an owner does, that particular layer is simply absent. This is no
+   longer a fail-open exposure, though: the job's own workflow-LOGIC steps
+   ("Validate attestation ref is eligible"
+   (`scripts/verify-attestation-ref.ps1`/`Test-AttestationRefEligible`) and
+   "Validate commit is reachable from origin/main") independently require a
+   real `dotnet-v*` release tag (on `push`) or exactly `refs/heads/main` with
+   ancestry-verified commit history (on `workflow_dispatch`) before anything
+   is downloaded or attested -- regardless of whether the Environment has any
+   protection configured. The Environment remains a genuine, recommended
+   SECOND layer of defense-in-depth (manual reviewer approval) once an owner
+   configures it; it was never intended to be, and is no longer treated as,
+   the *only* thing standing between an arbitrary `workflow_dispatch`-selected
+   ref and attestation.
 
 ## Validation performed
 
@@ -603,6 +664,31 @@ recorded output.
   TRX's `executed` counter is nonzero [974 executed / 984 total / 10
   skipped at both bounds] rather than trusting console output or exit code
   alone -- both bounds passed).
+- `dotnet/scripts/verify-package.reproducibility.tests.ps1` (new self-test
+  for `PackageReproducibility.ps1`: 6 cases -- GUID/relationship-id-only
+  differences across two real packed-nupkg entry maps normalize and pass;
+  a genuine `.psmdcp` content difference [different `dc:creator`] fails,
+  attributed to the `.psmdcp` entry specifically; a genuine `_rels/.rels`
+  content difference [wrong `Target`] fails, attributed to `_rels/.rels`
+  specifically; a genuine real-payload `.dll` difference still fails
+  [regression guard]; a missing/extra entry reports as an
+  `EntrySetMismatch`; and a reproduction of the *original*, buggy
+  "exclude `.psmdcp`/`_rels/.rels` entirely" comparison shape is shown to
+  have silently passed both the psmdcp and `_rels/.rels` content-difference
+  cases above, proving the current implementation is a meaningful
+  regression guard rather than normalization theater -- all 6 passed).
+- `dotnet/scripts/verify-attestation-ref.tests.ps1` (new self-test for
+  `Test-AttestationRefEligible` in `ReleaseVersionTag.ps1`: ~20 assertions
+  covering valid/malformed tag pushes; `workflow_dispatch` targeting
+  `refs/heads/main` [eligible] vs. an arbitrary feature branch [the core
+  fail-open regression this function closes -- NOT eligible]; `push`
+  targeting `refs/heads/main` [NOT eligible -- only `workflow_dispatch` may
+  target main]; injection-shaped refs [`$()`, quote+semicolon, trailing
+  whitespace] on both trigger types; other event types [`pull_request`,
+  `schedule`, an empty event name]; and case-sensitivity of both the event
+  name and the ref [`PUSH`/`REFS/HEADS/main`/`refs/heads/MAIN` are all
+  correctly rejected via `-ceq`, not silently matched by PowerShell's
+  case-insensitive default `-eq`] -- all ~20 passed).
 - Explicit `dotnet build --configuration Release` of every one of the nine
   sample projects under `dotnet/samples/` individually (0 errors each), and
   separately via `dotnet-quality.yml`'s per-project loop step (`dotnet
@@ -617,10 +703,21 @@ recorded output.
   `.github/scripts/secret-scan.test.sh` (self-test: detects a planted AWS
   key fixture, respects the `SENTINEL-SECRET-` exclusion fixture, and
   reports no findings on a clean fixture -- all three scenarios passed).
-- `python -c "import yaml; yaml.safe_load(...)"` against all three
+- `python -c "import yaml; yaml.safe_load(...)"` against all four
   workflow files (`dotnet-quality.yml`, `dotnet-sbom-provenance.yml`,
-  `dotnet-integration.yml`) -- all parse cleanly, and
-  `dotnet-quality.yml`/`dotnet-sbom-provenance.yml` show the expected job
-  names (`dotnet-quality`, `dotnet-agent-framework-compat`; `sbom`,
-  `provenance-attestation`).
+  `dotnet-integration.yml`, `dotnet-security.yml`) -- all parse cleanly, and
+  `dotnet-sbom-provenance.yml` shows the expected job names (`sbom`,
+  `provenance-attestation`) with the expected `if:`/`permissions:`/step
+  list for `provenance-attestation`.
+- Manual grep audit of every `${{\s*(github\.|inputs\.|steps\.)` occurrence
+  across all four workflow files' `run:` step bodies, confirming each one is
+  passed through a step-level `env:` value and referenced as
+  `$NAME`/`$env:NAME` inside the shell/PowerShell source, never interpolated
+  directly into that source text -- the same injection-surface pattern
+  already applied to `verify-release-tag.ps1`'s `-RefName` parameter in an
+  earlier round, now closed for the two remaining occurrences this audit
+  found in `dotnet-sbom-provenance.yml`'s `sbom` job (`github.event_name`/
+  `github.ref` in the "Determine verification depth" bash step, and
+  `steps.verify-depth.outputs.full` in the "Pack and verify the package"
+  PowerShell step).
 - `git diff --cached --check` (no whitespace errors) before committing.
