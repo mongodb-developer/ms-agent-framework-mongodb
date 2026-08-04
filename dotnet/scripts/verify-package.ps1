@@ -54,6 +54,7 @@ param(
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 . (Join-Path $PSScriptRoot "PackageAllowlist.ps1")
+. (Join-Path $PSScriptRoot "PackageMetadataAssertions.ps1")
 
 $DotnetRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $SrcProject = Join-Path $DotnetRoot "src/MongoDB.AgentFramework/MongoDB.AgentFramework.csproj"
@@ -76,18 +77,6 @@ function Write-Ok([string]$Message) {
 function Write-Failure([string]$Message) {
     Write-Host "[FAIL] $Message" -ForegroundColor Red
     $script:FailureCount++
-}
-
-function Invoke-Checked([string]$Description, [scriptblock]$Body) {
-    try {
-        & $Body
-        Write-Ok $Description
-        return $true
-    }
-    catch {
-        Write-Failure "$Description -- $($_.Exception.Message)"
-        return $false
-    }
 }
 
 # Clears an item at $Path if present. Ignores absence (a fresh checkout has no artifacts yet).
@@ -215,25 +204,19 @@ finally {
 [xml]$nuspec = $nuspecText
 $metadata = $nuspec.package.metadata
 
-$assertions = [ordered]@{
-    "id equals MongoDB.AgentFramework"        = { $metadata.id -eq "MongoDB.AgentFramework" }
-    "version is set"                          = { -not [string]::IsNullOrWhiteSpace($metadata.version) }
-    "authors is set"                          = { -not [string]::IsNullOrWhiteSpace($metadata.authors) }
-    "license expression is MIT"               = { $metadata.license.type -eq "expression" -and $metadata.license.'#text' -eq "MIT" }
-    "licenseUrl is set (legacy consumer fallback)" = { -not [string]::IsNullOrWhiteSpace($metadata.licenseUrl) }
-    "readme is set"                           = { -not [string]::IsNullOrWhiteSpace($metadata.readme) }
-    "projectUrl is set"                       = { -not [string]::IsNullOrWhiteSpace($metadata.projectUrl) }
-    "description is set"                      = { -not [string]::IsNullOrWhiteSpace($metadata.description) }
-    "releaseNotes is set"                     = { -not [string]::IsNullOrWhiteSpace($metadata.releaseNotes) }
-    "copyright is set"                        = { -not [string]::IsNullOrWhiteSpace($metadata.copyright) }
-    "tags is set"                             = { -not [string]::IsNullOrWhiteSpace($metadata.tags) }
-    "repository url is embedded (SourceLink)" = { -not [string]::IsNullOrWhiteSpace($metadata.repository.url) }
-    "repository commit is embedded (SourceLink)" = { -not [string]::IsNullOrWhiteSpace($metadata.repository.commit) }
-    "at least one per-TFM dependency group"   = { $metadata.dependencies.group.Count -ge 1 }
-}
+# Get-NuspecMetadataAssertions/Test-NuspecAssertion (dotnet/scripts/PackageMetadataAssertions.ps1) are the single
+# source of truth for both this real run and verify-package.metadata.tests.ps1's self-test, which proves each of
+# these assertions actually fails (not silently passes) against a deliberately wrong/missing fixture value.
+$assertions = Get-NuspecMetadataAssertions -Metadata $metadata
 
 foreach ($name in $assertions.Keys) {
-    Invoke-Checked $name $assertions[$name] | Out-Null
+    $assertionResult = Test-NuspecAssertion -Description $name -Body $assertions[$name]
+    if ($assertionResult.Passed) {
+        Write-Ok $assertionResult.Description
+    }
+    else {
+        Write-Failure "$($assertionResult.Description) -- $($assertionResult.Message)"
+    }
 }
 
 Write-Host ""

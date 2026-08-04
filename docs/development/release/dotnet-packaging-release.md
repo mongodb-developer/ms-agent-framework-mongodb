@@ -364,7 +364,10 @@ recorded output.
   cleanly without a live deployment).
 - `dotnet/scripts/verify-package.ps1 -Configuration Release` (pack; exact
   package-content allowlist with multiplicity for both `.nupkg` [11
-  entries] and `.snupkg` [7 entries]; nuspec metadata; double-pack
+  entries] and `.snupkg` [7 entries]; nuspec metadata asserted via
+  `Test-NuspecAssertion`/`Get-NuspecMetadataAssertions`
+  [`PackageMetadataAssertions.ps1`], which requires each assertion to
+  return a strict boolean rather than discarding its result; double-pack
   reproducibility with every real payload entry byte-identical; isolated
   consumer smoke test across all three shipped TFMs
   [net8.0/net9.0/net10.0], each constructing all twelve public-API
@@ -376,6 +379,16 @@ recorded output.
   correct classification [`Missing`/`Unexpected`/`MultiplicityMismatch`];
   two independently random `psmdcp` GUIDs both normalize and pass; a
   malformed non-GUID `psmdcp` filename fails -- all 17 passed).
+- `dotnet/scripts/verify-package.metadata.tests.ps1` (self-test: 24
+  assertions -- `Test-NuspecAssertion`'s contract for `$true`/`$false`
+  [without throwing, the shape of the original bug]/thrown/non-boolean/
+  `$null` results; every one of the 14 required nuspec assertions passes
+  against a fully valid fixture; 15 single-field-mutation fixtures each
+  prove *exactly and only* the corresponding named assertion fails -- all
+  24 passed. Reintroducing the original bug shape into
+  `PackageMetadataAssertions.ps1` [ignoring the scriptblock's return value]
+  makes this self-test fail with 19 assertion failures, confirming it is a
+  meaningful regression guard, not a tautological pass).
 - `dotnet/scripts/verify-agent-framework-compatibility.ps1 -Configuration
   Release` (restores `MongoDB.AgentFramework.Tests.csproj` -- which pulls in
   `MongoDB.AgentFramework.csproj` via `ProjectReference` -- and builds both
