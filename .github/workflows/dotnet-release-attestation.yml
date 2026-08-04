@@ -1,0 +1,240 @@
+name: .NET release provenance attestation
+
+# Requests a GitHub build-provenance attestation for a validated MongoDB.AgentFramework release artifact. This
+# is the ONLY workflow in this repository holding `id-token`/`attestations`/`artifact-metadata` write
+# permissions, and it is deliberately triggered EXCLUSIVELY by `workflow_run` -- never `push`, `workflow_dispatch`,
+# `release`, or any other event a pusher/operator/tag-creator can pick the reacting ref for.
+#
+# Why: an earlier revision of this repository's attestation workflow held these elevated permissions in the SAME
+# file as its `pull_request`/`push`/`workflow_dispatch`-triggered `sbom` job, and split eligibility validation
+# into a separate in-file job that checked out and ran its scripts from the repository's real `main` branch
+# (never `github.ref`) before the OIDC-permissioned job started. That fix was INSUFFICIENT: GitHub Actions
+# resolves and runs an ENTIRE workflow file's job graph -- every job's own `permissions:`/`needs:`/`if:`
+# definitions and step list, not merely the scripts a job happens to invoke -- using the exact file content
+# present at whatever ref triggered that specific run. For `push` (including a tag push) and `workflow_dispatch`,
+# that ref is the pushed tag's target commit or whatever branch/tag an operator selected at dispatch time --
+# content this repository does not control the review of before the run starts. A workflow file that both (a)
+# was triggered by one of those events and (b) held elevated permissions on ANY job could therefore have that
+# job's own permissions/needs/if wiring -- not just its called scripts -- silently rewritten by whoever controls
+# the triggering ref, completely defeating an in-file "trusted validator job" split regardless of how carefully
+# that job's own steps were written.
+#
+# `workflow_run` is the one trigger GitHub's own documentation guarantees always resolves and runs the reacting
+# workflow's file exactly as it exists on the repository's DEFAULT branch, regardless of what ref/event triggered
+# the upstream run it reacts to (GitHub Actions reference: the `workflow_run` event's table entry documents
+# `GITHUB_SHA`/`GITHUB_REF` as "Last commit on default branch"/"Default branch", and explicitly notes "This event
+# will only trigger a workflow run if the workflow file exists on the default branch" -- the same guarantee
+# `schedule`/`issues`/other ref-agnostic events carry, and which `push`/`workflow_dispatch`/`release` do NOT: the
+# `release` event's own table entry documents `GITHUB_SHA`/`GITHUB_REF` as "Last commit in the tagged
+# release"/"Tag ref of release", with no default-branch note at all -- i.e. `release: types: [published]` would
+# NOT have closed this gap, contrary to an earlier proposal, since it resolves the workflow file from the
+# RELEASED TAG's own commit, structurally identical in trust to a tag `push`). GitHub's "Secure use reference"
+# and the `workflow_run` event's own documentation describe this exact pattern -- an unprivileged workflow builds
+# in an untrusted context, a separate `workflow_run`-triggered workflow then takes privileged action -- as the
+# recommended way to grant elevated permissions without the fully-untrusted-ref exposure `pull_request_target`
+# and, per the above, `push`/`workflow_dispatch`/`release` all share to varying degrees.
+#
+# This workflow reacts to `.github/workflows/dotnet-sbom-provenance.yml` ("`.NET package SBOM (credential-free
+# verification)`") completing -- that upstream workflow itself holds NO elevated permissions on any job (see its
+# own header comment) and is safe to run against untrusted fork pull_request code for exactly that reason, since
+# a compromised/attacker-controlled copy of ITS job graph can, at most, cause an inert SBOM/package artifact
+# upload or a spurious `workflow_run` event -- never anything privileged. This workflow never trusts anything
+# that upstream run built or asserted:
+#
+#   - `validate-attestation-eligibility` (`permissions: contents: read` only) checks out this repository's `main`
+#     (redundant with, but explicit and auditable alongside, the `workflow_run` trigger's own default-branch
+#     guarantee) and reconstructs a candidate full ref from the upstream run's bare, GitHub-verified
+#     `head_branch`/`event`/`head_sha` fields (`dotnet/scripts/verify-workflow-run-attestation-ref.ps1`, backed by
+#     `Resolve-WorkflowRunAttestationRef`/`Test-AttestationRefEligible` in
+#     `dotnet/scripts/ReleaseVersionTag.ps1`) -- independently confirming, via this trusted checkout's OWN git
+#     history, that a claimed tag genuinely exists and points at the exact claimed commit (GitHub's
+#     `workflow_run` payload cannot otherwise distinguish "a tag named X" from "a branch named X" by name alone).
+#     A second step proves the claimed commit is real, ancestry-verified history of `origin/main`
+#     (`git merge-base --is-ancestor`) -- catching a tag pushed against a commit that was never actually merged.
+#     Manual attestation is restricted to `workflow_dispatch` of the upstream `sbom` workflow against EXACTLY
+#     `refs/heads/main` (never a tag), for the same reason documented on `Test-AttestationRefEligible`: there is
+#     no equivalent trusted tag/package-version match check for a manual dispatch.
+#   - `provenance-attestation` (`needs: validate-attestation-eligibility`) checks out the validated, ancestry-
+#     proven commit SHA (never anything from the upstream/triggering ref of the SBOM workflow, and never
+#     `github.sha`/`github.ref` of THIS workflow's own `workflow_run` context, which always describes `main`'s
+#     current tip, not the artifact's commit) and REBUILDS the package fresh with `verify-package.ps1` from that
+#     checkout -- it never trusts or downloads the upstream `sbom` job's own uploaded artifact, so the attested
+#     bytes are provably produced by this trusted, always-default-branch-sourced workflow from ancestry-verified
+#     content, not by a job whose own workflow-file trust this design no longer relies on. It independently
+#     re-verifies the tag/package-version match (for a tag-push-derived ref) before ever attesting, then requests
+#     a GitHub build-provenance attestation (`actions/attest-build-provenance`) over the freshly built artifact.
+#     The `dotnet-release-attestation` GitHub Environment (an owner-configured protection gate) remains a
+#     genuine, additional, independent layer of defense-in-depth, not this design's primary or sole gate.
+#
+# NuGet package signing (Authenticode-style code signing over the .nupkg itself, distinct from the SLSA-style
+# build attestation above) remains BLOCKED: it requires an owner-issued, organization-approved code-signing
+# certificate and a decision on trusted-signing infrastructure, both of which depend on
+# docs/decisions/0013-establish-project-and-publishing-governance.md, which is still `proposed` (unconfirmed) as
+# of this workflow's authoring. Inventing a certificate/secret here would fabricate an unconfirmed publishing
+# identity, which this repository's engineering workflow explicitly forbids. The signing step below is kept
+# workflow-ready (correct command, correct inputs) but permanently disabled (`if: false`) with this blocker
+# documented inline; see dotnet/README.md's Status section for the same blocker surfaced to package consumers.
+#
+# Supply-chain note: actions pinned exactly as in dotnet-security.yml/dotnet-quality.yml/dotnet-sbom-provenance.yml.
+on:
+  workflow_run:
+    workflows: [".NET package SBOM (credential-free verification)"]
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  validate-attestation-eligibility:
+    name: Validate attestation eligibility (trusted default-branch workflow; no OIDC permissions)
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      validated-sha: ${{ steps.record-sha.outputs.sha }}
+      is-tag-push: ${{ steps.record-sha.outputs.is-tag-push }}
+      tag-name: ${{ steps.record-sha.outputs.tag-name }}
+    steps:
+      # Explicit and auditable alongside (never a substitute for) this workflow's own `workflow_run` trigger,
+      # which GitHub guarantees already resolves this entire workflow's job graph from the default branch
+      # regardless of what triggered the upstream `sbom` run. `fetch-depth: 0` (full history, not the default
+      # shallow clone) makes `origin/main` and every tag object available locally for the checks below.
+      - name: Checkout trusted main
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: main
+          fetch-depth: 0
+
+      # `github.event.workflow_run.event`/`.head_branch`/`.head_sha` are the UPSTREAM sbom run's own
+      # GitHub-verified event metadata (never executable code -- an event-type string, a bare ref short name,
+      # and a commit SHA), passed through step-level `env:` values and never interpolated into script source, for
+      # the same injection rationale documented throughout this repository's release scripts. This step
+      # reconstructs a candidate full ref from those bare fields and independently verifies -- using ONLY this
+      # trusted `main` checkout's real git history, never anything from the upstream run's own ref -- that a
+      # claimed tag genuinely exists and matches the claimed commit, then applies the same
+      # Test-AttestationRefEligible gate the previous (now-decommissioned) in-file validator used.
+      - name: Validate upstream event/ref/commit is eligible
+        id: validate-ref
+        shell: pwsh
+        working-directory: dotnet
+        env:
+          UPSTREAM_EVENT_NAME: ${{ github.event.workflow_run.event }}
+          UPSTREAM_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          UPSTREAM_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          ./scripts/verify-workflow-run-attestation-ref.ps1 `
+            -UpstreamEventName $env:UPSTREAM_EVENT_NAME `
+            -UpstreamHeadBranch $env:UPSTREAM_HEAD_BRANCH `
+            -UpstreamHeadSha $env:UPSTREAM_HEAD_SHA `
+            -RepositoryRoot ${{ github.workspace }}
+
+          if ($env:UPSTREAM_EVENT_NAME -ceq 'push') {
+            echo "is-tag-push=true" >> $env:GITHUB_OUTPUT
+            echo "tag-name=$env:UPSTREAM_HEAD_BRANCH" >> $env:GITHUB_OUTPUT
+          } else {
+            echo "is-tag-push=false" >> $env:GITHUB_OUTPUT
+            echo "tag-name=" >> $env:GITHUB_OUTPUT
+          }
+
+      # Ancestry/commit validation: proves the actual upstream commit is reachable from origin/main's history,
+      # not merely that its ref NAME matched the expected shape above -- catching e.g. a `dotnet-v*` tag pushed
+      # against a commit that was never actually merged into `main`.
+      - name: Validate commit is reachable from origin/main (ancestry check)
+        shell: bash
+        env:
+          ATTESTATION_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          if ! git merge-base --is-ancestor "$ATTESTATION_SHA" origin/main; then
+            echo "::error::Commit $ATTESTATION_SHA is not an ancestor of origin/main; refusing to attest provenance for a commit that never reached the protected main branch."
+            exit 1
+          fi
+          echo "Commit $ATTESTATION_SHA is reachable from origin/main."
+
+      # Records the plain, already-GitHub-verified upstream commit SHA as this job's output, for
+      # `provenance-attestation` to check out and rebuild from below -- the ONLY commit that job is allowed to
+      # trust, never `github.sha`/`github.ref` of this workflow's own `workflow_run` context (which always
+      # describes `main`'s tip, not the artifact's commit).
+      - name: Record validated commit SHA
+        id: record-sha
+        shell: bash
+        env:
+          ATTESTATION_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          echo "sha=$ATTESTATION_SHA" >> "$GITHUB_OUTPUT"
+
+  provenance-attestation:
+    name: Rebuild and attest build provenance (validated release ref only)
+    needs: validate-attestation-eligibility
+    runs-on: ubuntu-latest
+    environment: dotnet-release-attestation
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      # Checks out the EXACT commit SHA validate-attestation-eligibility already validated -- never anything
+      # from the upstream sbom run's own ref, and never this workflow's own `github.sha`/`github.ref` (which
+      # describe `main`'s current tip under a `workflow_run` trigger, not the artifact's commit). This checked-out
+      # content is used purely as ordinary build/pack input for the steps below, never executed as THIS
+      # workflow's own job/script definitions -- those remain sourced from `main` throughout, per the
+      # `workflow_run` trigger's own guarantee. Because the ancestry check above already proved this exact SHA is
+      # reachable from `origin/main`, its content is, by definition, already-reviewed/merged history -- identical
+      # in trust to building any other ordinary, reviewed commit in this repository.
+      - name: Checkout the validated commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.validate-attestation-eligibility.outputs.validated-sha }}
+          persist-credentials: false
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+            10.0.x
+
+      # Rebuilds the package fresh from the validated checkout -- the full verify-package.ps1 verification
+      # (pack, exact-match allowlist, nuspec metadata, double-pack reproducibility, and the multi-TFM isolated
+      # consumer smoke test) always runs here, regardless of trigger depth, since this is the one build whose
+      # output actually gets attested.
+      - name: Pack and fully verify the package from the validated commit
+        shell: pwsh
+        working-directory: dotnet
+        run: ./scripts/verify-package.ps1 -Configuration Release
+
+      # Independently re-verifies the tag/package-version match from THIS trusted rebuild's own artifact, never
+      # trusting whatever the upstream (differently-triggered, no-OIDC) sbom job asserted about its own build.
+      - name: Verify tag matches the freshly rebuilt package version (tag-push-derived ref only)
+        if: needs.validate-attestation-eligibility.outputs.is-tag-push == 'true'
+        shell: pwsh
+        working-directory: dotnet
+        env:
+          RELEASE_TAG: ${{ needs.validate-attestation-eligibility.outputs.tag-name }}
+        run: |
+          $nupkg = Get-ChildItem artifacts/packages -Filter *.nupkg | Select-Object -First 1 -ExpandProperty FullName
+          ./scripts/verify-release-tag.ps1 -NupkgPath $nupkg -RefName $env:RELEASE_TAG -EnforceMatch
+
+      # SLSA-style build provenance over this workflow run's own (real, GitHub-issued) OIDC identity -- distinct
+      # from, and not a substitute for, the NuGet package signing documented as blocked below. Attests the
+      # freshly rebuilt artifact above, never anything the upstream sbom job produced or uploaded.
+      - name: Attest build provenance for the freshly rebuilt artifacts
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: |
+            dotnet/artifacts/packages/*.nupkg
+            dotnet/artifacts/packages/*.snupkg
+
+      # BLOCKED (see file header): no owner-issued NuGet code-signing certificate or ADR 0013 acceptance exists
+      # yet. This step is intentionally never executed (`if: false`); it documents the exact command a future,
+      # owner-approved signing secret would need, without inventing that secret or claiming a signature exists.
+      - name: "Sign NuGet package (blocked: no signing certificate/ADR 0013 acceptance yet)"
+        if: false
+        working-directory: dotnet
+        run: >
+          dotnet nuget sign artifacts/packages/*.nupkg
+          --certificate-path "${{ secrets.NUGET_SIGNING_CERTIFICATE_PATH }}"
+          --certificate-password "${{ secrets.NUGET_SIGNING_CERTIFICATE_PASSWORD }}"
+          --timestamper http://timestamp.digicert.com

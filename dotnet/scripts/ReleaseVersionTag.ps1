@@ -226,3 +226,72 @@ function Test-AttestationRefEligible {
         Reason   = "event '$EventName' is not an attestation-eligible trigger (only 'push' of a release tag or 'workflow_dispatch' are ever eligible) -- refusing to attest"
     }
 }
+
+<#
+.SYNOPSIS
+    Reconstructs a CANDIDATE full git ref (`refs/tags/<name>` or `refs/heads/<name>`) from a `workflow_run` event
+    payload's bare `head_branch`/`event` fields, for `dotnet-release-attestation.yml`'s privileged workflow to
+    feed into Test-AttestationRefEligible.
+
+.DESCRIPTION
+    `dotnet-sbom-provenance.yml` (the credential-free, no-OIDC workflow that packs/verifies/SBOMs the package on
+    every `pull_request`/`push`/`workflow_dispatch`) and `dotnet-release-attestation.yml` (the ONLY workflow
+    holding `id-token`/`attestations`/`artifact-metadata` permissions) are now two SEPARATE workflow files
+    specifically because GitHub Actions resolves and runs an ENTIRE workflow file's job graph -- every job's
+    `permissions:`/`needs:`/`if:`, not merely the scripts a job happens to invoke -- using the exact file content
+    present at whatever ref triggered that run. For `push`/`workflow_dispatch` (and, per GitHub's own documented
+    per-event reference table, `release` too -- its `GITHUB_REF`/`GITHUB_SHA` are documented as the tag ref/tagged
+    commit, with none of the "this event will only trigger a workflow run if the workflow file exists on the
+    default branch" language that events such as `schedule`/`issues`/`workflow_run` explicitly carry), that ref is
+    whatever an operator selected or pushed -- so a single workflow file that both held elevated OIDC/attestation
+    permissions AND was triggered by any of those events could have its own job DEFINITIONS (not just its called
+    scripts) silently rewritten by whoever controls that ref, regardless of how carefully any individual job's
+    steps were written. `workflow_run` is the one trigger GitHub's own documentation guarantees always resolves
+    and runs using the workflow file exactly as it exists on the repository's default branch, no matter which
+    ref/event triggered the UPSTREAM workflow run it reacts to -- this is also GitHub's own recommended pattern
+    for "build in an untrusted context, then act in a trusted context" (see GitHub's "Secure use reference" and
+    the `workflow_run` event documentation's built-in/completed-run example). `dotnet-release-attestation.yml`
+    therefore triggers ONLY on `workflow_run` of the `sbom`-only workflow's completion -- never `push`,
+    `workflow_dispatch`, or `release` -- so its OWN job graph can never be altered by anything an operator or tag
+    pusher controls.
+
+    The `workflow_run` webhook payload does not include a full `refs/...` ref for the run that triggered it --
+    only a bare `head_branch` (the branch OR tag's short name, with no `refs/heads/`/`refs/tags/` prefix -- GitHub
+    does not disambiguate the two by this field alone) and an `event` (the upstream run's own triggering event
+    name, e.g. "push", "workflow_dispatch", "pull_request"). This function reconstructs a CANDIDATE full ref
+    from those two bare fields, mirroring `dotnet-sbom-provenance.yml`'s own trigger shape (`push` only ever
+    means a tag push there, never a branch push other than `main`, and `workflow_dispatch` is the only other
+    ever-eligible event) -- but the caller (`verify-workflow-run-attestation-ref.ps1`) MUST still independently
+    confirm, via this repository's own real git history, that a `push`-reconstructed tag candidate genuinely
+    exists and points at the exact claimed commit before ever trusting it, since this function alone cannot
+    disambiguate "a tag named X" from "a branch named X" from the bare `head_branch` string.
+
+.PARAMETER UpstreamEventName
+    `github.event.workflow_run.event` -- the UPSTREAM run's own triggering event name.
+
+.PARAMETER UpstreamHeadBranch
+    `github.event.workflow_run.head_branch` -- the upstream run's bare branch/tag short name (no `refs/...`
+    prefix).
+
+.OUTPUTS
+    [string] `refs/tags/<UpstreamHeadBranch>` for a `push` upstream event, `refs/heads/<UpstreamHeadBranch>` for
+    a `workflow_dispatch` upstream event, or `$null` for any other upstream event (e.g. `pull_request`) -- which
+    the caller must treat as "never eligible", the same catch-all Test-AttestationRefEligible itself applies.
+#>
+function Resolve-WorkflowRunAttestationRef {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$UpstreamEventName,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$UpstreamHeadBranch
+    )
+
+    if ($UpstreamEventName -ceq 'push') {
+        return "refs/tags/$UpstreamHeadBranch"
+    }
+
+    if ($UpstreamEventName -ceq 'workflow_dispatch') {
+        return "refs/heads/$UpstreamHeadBranch"
+    }
+
+    return $null
+}

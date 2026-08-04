@@ -404,126 +404,135 @@ human-readable tag next to the pinned commit SHA):
   beyond this: every integration test already skips cleanly (xUnit
   `Skip = "..."`) when the environment variables are absent, which is
   exactly what a credential-free local contributor run still exercises.
-- **`dotnet-sbom-provenance.yml`** -- split into two trust-gated jobs:
-  - `sbom` runs on `pull_request`/push-to-`main`/push of a `dotnet-v*` tag/
-    `workflow_dispatch`, with only `contents: read`. It runs
-    `scripts/verify-package.ps1` (the same script `dotnet-quality.yml` runs)
-    to pack and verify the library -- never an independent, unverified
-    `dotnet pack` -- then generates an SPDX and a CycloneDX SBOM via
-    `anchore/sbom-action` over that exact, already-verified primary
-    `.nupkg`/`.snupkg`, prints a SHA256 checksum manifest, and uploads all of
-    the above as one workflow artifact. On a trusted `dotnet-v*` tag push or
-    a manual `workflow_dispatch`, it runs the script's FULL verification
-    (allowlist, nuspec metadata, double-pack reproducibility, and the
-    multi-TFM isolated consumer smoke test); for `pull_request`/push-to-
-    `main` it runs the faster pack+allowlist+metadata-only path, since
-    `dotnet-quality.yml` already runs the full script for those triggers on
-    both OS matrix legs, and this workflow is the only one of this
-    repository's .NET workflows that ever triggers on a tag push at all, so
-    it cannot assume any other workflow already fully verified a tag-pushed
-    artifact. It also asserts, for a trusted tag push only, that the packed
-    `.nuspec`'s `<version>` exactly matches `dotnet-v<version>` for the
-    triggering tag (`scripts/verify-release-tag.ps1`/
-    `scripts/ReleaseVersionTag.ps1`, self-tested in
-    `scripts/verify-release-tag.tests.ps1`) before anything is uploaded --
-    refusing to upload/attest a mismatched tag/version pair. A manual
-    `workflow_dispatch` instead only *records* the packed version (there is
-    no tag to validate against in that mode). Requires no secrets and never
-    requests elevated OIDC/attestation permissions, so it is safe to run
-    against untrusted fork pull requests.
-  - `validate-attestation-eligibility` (`needs: sbom`) is a **trusted-`main`
-    only, no-OIDC** gate that runs BEFORE the OIDC/attestation-permissioned job
-    ever starts, closing a workflow_dispatch trust-ordering gap: a
-    `workflow_dispatch` run lets its operator pick *any* existing ref, and if a
-    job already holding `id-token`/`attestations`/`artifact-metadata` write
-    permissions checked out and executed a validator script FROM that same
-    selected ref, whoever controls that ref could patch the validator (or
-    delete the ancestry check, or the workflow YAML itself) to always report
-    "eligible" -- forging the gate's own verdict while already holding
-    elevated permissions. This job avoids that entirely:
-    - Its `permissions:` block is `contents: read` only -- it never requests
-      `id-token`/`attestations`/`artifact-metadata`, so even a compromised or
-      forged verdict here cannot itself sign, attest, or write anything
-      sensitive.
-    - Its checkout step always pins `ref: main` (never `github.ref`, the
-      triggering/operator-selected ref) with `fetch-depth: 0`, so the
-      validator script it runs (`scripts/verify-attestation-ref.ps1`, backed
-      by the pure `Test-AttestationRefEligible` function in
-      `scripts/ReleaseVersionTag.ps1`) is always the repository's real,
-      protected `main` branch's own code -- never the possibly-tampered
-      content of whatever ref the operator selected. The full-history
-      (`fetch-depth: 0`) fetch still makes the triggering commit's git
-      objects available locally even though the working tree reflects `main`,
-      which is what the next step's ancestry check relies on.
-    - **Validate attestation ref is eligible** requires the triggering
-      event/ref pair to be either a `push` of a ref matching this
-      repository's exact `refs/tags/dotnet-v<version>` grammar, or a
-      `workflow_dispatch` targeting **exactly** `refs/heads/main` -- every
-      other event/ref combination (an arbitrary `workflow_dispatch`-selected
-      feature branch, a `workflow_dispatch` against an existing release tag,
-      a malformed or injection-shaped ref, a wrong event name, even differing
-      only by case) is rejected. Manual dispatch is deliberately restricted to
-      `main` only rather than also accepting a tag ref: unlike a real `push`
-      of a tag (gated by the `sbom` job's own "Verify tag matches package
-      version" step before this job even runs), a manual `workflow_dispatch`
-      against an *existing* tag has no equivalent trusted check that the
-      tag's claimed version matches the packed artifact's real version --
-      allowing e.g. a `dotnet-v1.2.3` tag pointing at a `main` ancestor whose
-      packed `.nuspec` is really `0.1.0-preview.1` to otherwise reach
-      attestation. Restricting manual dispatch to `main` (which has no
-      "package version" of its own to mismatch) closes that gap entirely
-      instead of requiring a second, parallel version-match check for this
-      path. The event name and ref are always passed to this script through
-      step-level `env:` values (`ATTESTATION_EVENT_NAME`/`ATTESTATION_REF`),
-      never interpolated directly into shell/PowerShell source, for the same
-      injection-surface reason documented on `verify-release-tag.ps1`.
-    - **Validate commit is reachable from origin/main (ancestry check)** then
-      additionally runs `git merge-base --is-ancestor` to prove the actual
-      triggering *commit* (`github.sha`, a real GitHub-resolved property of
-      the triggering event -- not attacker-forgeable free text, though the
-      operator can still choose *which* existing ref/commit to trigger
-      against) -- not merely a ref whose *name* happens to match the grammar
-      -- is real, verified ancestry of `main`, catching e.g. a `dotnet-v*` tag
-      pushed against a commit that was never actually merged.
-    - Its final step records that already-validated `github.sha` as this
-      job's `validated-sha` output -- the ONLY thing the downstream
-      attestation job is allowed to trust as "the commit to attest".
-  - `provenance-attestation` (`needs: [sbom, validate-attestation-eligibility]`)
-    now never checks out or executes ANY code sourced from the operator-
-    selected/triggering ref at all. Its checkout step (present only for
-    auditable context/logs -- `actions/attest-build-provenance` itself needs
-    no source checkout) targets
-    `ref: ${{ needs.validate-attestation-eligibility.outputs.validated-sha }}`
-    exclusively, never `github.ref`/`github.sha` directly, and no step in
-    this job ever executes any file from that checkout as a script/command.
-    It downloads that exact artifact (rather than re-packing, so the attested
-    bytes are provably the same ones the `sbom` job already verified,
-    tag/version-checked, SBOM'd, and checksummed) and requests a GitHub
-    build-provenance attestation via `actions/attest-build-provenance`
+- **`dotnet-sbom-provenance.yml`** (renamed
+  `.NET package SBOM (credential-free verification)`) -- runs on
+  `pull_request`/push-to-`main`/push of a `dotnet-v*` tag/`workflow_dispatch`,
+  with only `contents: read` on its single `sbom` job, and requests **no**
+  elevated OIDC/attestation permissions anywhere in the file, so it is safe
+  to run against untrusted fork pull requests, including a tag push, since
+  attestation authority no longer lives anywhere in this file at all (see the
+  architectural note below). It runs `scripts/verify-package.ps1` (the same
+  script `dotnet-quality.yml` runs) to pack and verify the library -- never
+  an independent, unverified `dotnet pack` -- then generates an SPDX and a
+  CycloneDX SBOM via `anchore/sbom-action` over that exact, already-verified
+  primary `.nupkg`/`.snupkg`, prints a SHA256 checksum manifest, and uploads
+  all of the above as one workflow artifact. On a `dotnet-v*` tag push or a
+  manual `workflow_dispatch`, it runs the script's FULL verification
+  (allowlist, nuspec metadata, double-pack reproducibility, and the
+  multi-TFM isolated consumer smoke test); for `pull_request`/push-to-`main`
+  it runs the faster pack+allowlist+metadata-only path, since
+  `dotnet-quality.yml` already runs the full script for those triggers on
+  both OS matrix legs. It also asserts, for a tag push, that the packed
+  `.nuspec`'s `<version>` exactly matches `dotnet-v<version>` for the
+  triggering tag (`scripts/verify-release-tag.ps1`/
+  `scripts/ReleaseVersionTag.ps1`) -- purely as an early, informational
+  signal for maintainers, since **this job's own uploaded artifact is never
+  itself the thing that gets attested**; see `dotnet-release-attestation.yml`
+  below, which independently re-derives and re-verifies this exact match from
+  its own trusted rebuild before ever attesting anything.
+
+- **`dotnet-release-attestation.yml`** (`.NET release provenance
+  attestation`) -- the ONLY workflow in this repository holding
+  `id-token`/`attestations`/`artifact-metadata` write permissions, and
+  deliberately triggered **exclusively** by `workflow_run` reacting to
+  `dotnet-sbom-provenance.yml` completing -- never `push`, `workflow_dispatch`,
+  `release`, or any other event whose reacting-workflow-file content an
+  operator/pusher/tag-creator can otherwise select.
+
+  **Why this is a separate file, and why `workflow_run` specifically:**
+  GitHub Actions resolves and runs an ENTIRE workflow file's job graph --
+  every job's own `permissions:`/`needs:`/`if:` definitions and step list,
+  not merely the scripts a job happens to invoke -- using the exact file
+  content present at whatever ref triggered that specific run. An earlier
+  revision of this repository's attestation workflow held its elevated
+  permissions in the SAME file as its `push`/`workflow_dispatch`-triggered
+  `sbom` job, with an in-file `validate-attestation-eligibility` job that
+  checked out and ran its scripts from the repository's real `main` branch
+  (never `github.ref`) before the OIDC-permissioned job started. That fix was
+  **insufficient**: the validator job's own `permissions:`/`needs:`/`if:`
+  wiring -- not merely the scripts it called -- was itself sourced from the
+  same untrusted `push`/`workflow_dispatch` ref, so whoever controlled that
+  ref could rewrite the job graph itself (e.g. remove the `needs:` gate
+  entirely, or grant itself the elevated permissions directly), completely
+  defeating the split regardless of how carefully any individual step was
+  written. `workflow_run` is the one trigger GitHub's own documentation
+  guarantees always resolves and runs the reacting workflow's file exactly
+  as it exists on the repository's *default branch*, regardless of what
+  ref/event triggered the upstream run it reacts to -- the standard
+  "unprivileged build, privileged act" pattern GitHub's own security-hardening
+  guidance recommends for exactly this situation. (`release: types:
+  [published]`, an initially-considered alternative, was rejected: GitHub's
+  own event-reference documentation does **not** give the `release` event the
+  same default-branch guarantee -- its `GITHUB_SHA`/`GITHUB_REF` are
+  documented as the tagged commit/tag ref, structurally identical in trust to
+  a tag `push`, so it would not have closed this gap.)
+
+  Because `dotnet-sbom-provenance.yml` itself holds no elevated permissions
+  on any job (see above), it is safe to let it run against a fully untrusted
+  fork `pull_request` -- a compromised/attacker-controlled copy of its job
+  graph can, at most, produce an inert SBOM/package upload or a spurious
+  `workflow_run` event, never anything privileged. `dotnet-release-attestation.yml`
+  never trusts anything that upstream run built or asserted:
+
+  - `validate-attestation-eligibility` (`permissions: contents: read` only)
+    checks out this repository's `main` (`fetch-depth: 0`, explicit and
+    auditable alongside -- never a substitute for -- the `workflow_run`
+    trigger's own default-branch guarantee) and reconstructs a candidate full
+    ref from the upstream run's bare, GitHub-verified
+    `head_branch`/`event`/`head_sha` fields
+    (`scripts/verify-workflow-run-attestation-ref.ps1`, backed by
+    `Resolve-WorkflowRunAttestationRef`/`Test-AttestationRefEligible` in
+    `scripts/ReleaseVersionTag.ps1`) -- independently confirming, via this
+    trusted checkout's own git history, that a claimed tag genuinely exists
+    and points at the exact claimed commit (GitHub's `workflow_run` payload
+    cannot otherwise distinguish "a tag named X" from "a branch named X" by
+    the bare `head_branch` name alone). A second step,
+    **Validate commit is reachable from origin/main (ancestry check)**, then
+    proves the claimed commit is real, ancestry-verified history of
+    `origin/main` (`git merge-base --is-ancestor`) using the upstream run's
+    `head_sha` -- catching a tag pushed against a commit that was never
+    actually merged. Manual attestation remains restricted to a
+    `workflow_dispatch` of the upstream `sbom` workflow against **exactly**
+    `refs/heads/main` (never a tag), for the same reason documented on
+    `Test-AttestationRefEligible`: there is no equivalent trusted tag/
+    package-version match check for a manual dispatch. The upstream event's
+    `event`/`head_branch`/`head_sha` fields are always passed to this script
+    through step-level `env:` values, never interpolated directly into
+    shell/PowerShell source, for the same injection-surface reason documented
+    on `verify-release-tag.ps1`. Its final step records the already-validated
+    `head_sha` as this job's `validated-sha` output -- the ONLY thing the
+    downstream attestation job is allowed to trust as "the commit to build
+    and attest".
+  - `provenance-attestation` (`needs: validate-attestation-eligibility`,
+    `environment: dotnet-release-attestation`) checks out the validated,
+    ancestry-proven commit SHA -- never anything from the upstream `sbom`
+    run's own ref, and never this workflow's own `github.sha`/`github.ref`
+    (which, under a `workflow_run` trigger, always describe `main`'s current
+    tip, not the artifact's commit) -- and **rebuilds the package fresh**
+    with `scripts/verify-package.ps1` from that checkout. It never downloads
+    or trusts the upstream `sbom` job's own uploaded artifact: because the
+    ancestry check above already proved this exact commit is reachable from
+    `origin/main`, its content is by definition already-reviewed/merged
+    history, so rebuilding from it is provably equivalent in trust to
+    building any other ordinary, reviewed commit in this repository. It then
+    independently re-verifies the tag/package-version match from this fresh
+    rebuild's own artifact (for a tag-push-derived ref) before requesting a
+    GitHub build-provenance attestation via `actions/attest-build-provenance`
     (`id-token: write`, `attestations: write`, `artifact-metadata: write`,
     `contents: read` -- the exact permissions that action's own documentation
-    requires, nothing broader). Its `if:` retains the same coarse prefilter as
-    before (a trusted push of a `dotnet-v*` tag, or `workflow_dispatch` with
-    `confirm_attestation: yes`), but this is now explicitly a cheap,
-    non-authoritative early exit -- the real, authoritative gate is the
-    `needs: validate-attestation-eligibility` dependency: GitHub Actions never
-    starts this job (regardless of its own `if:`) unless that upstream job
-    completed successfully, and that job is the only place the eligibility
-    and ancestry checks actually run, always from a trusted `main` checkout.
+    requires, nothing broader) over the freshly rebuilt `.nupkg`/`.snupkg`.
 
     The `dotnet-release-attestation` GitHub Environment (protection
-    rules/required reviewers an owner must configure) remains a genuine
-    SECOND, independent layer of defense-in-depth on top of these two
-    workflow-logic jobs -- it is not this job's sole or primary gate, and this
-    job must never be considered safe on the assumption that an Environment
-    with no protection rule configured is enough by itself. A fork's
-    `pull_request` event can never reach this job at all, since that event
-    type is not in its trigger list. It also contains the same **permanently
-    disabled** (`if: false`) NuGet package-signing step as before, documenting
-    the exact `dotnet nuget sign` invocation a future owner-approved signing
-    certificate would need, referencing placeholder secret names
-    (`NUGET_SIGNING_CERTIFICATE_PATH`/`_PASSWORD`) purely as documentation --
-    it never executes and never claims a certificate exists.
+    rules/required reviewers an owner must configure) remains a genuine,
+    independent layer of defense-in-depth on top of the `workflow_run`
+    trigger isolation and the trusted-`main`-first validator job -- it is
+    not this design's sole or primary gate. It also contains the same
+    **permanently disabled** (`if: false`) NuGet package-signing step as
+    before, documenting the exact `dotnet nuget sign` invocation a future
+    owner-approved signing certificate would need, referencing placeholder
+    secret names (`NUGET_SIGNING_CERTIFICATE_PATH`/`_PASSWORD`) purely as
+    documentation -- it never executes and never claims a certificate
+    exists.
 
 ## Versioning and tagging
 
@@ -534,11 +543,15 @@ been created by this work** -- tagging and publishing are explicitly
 excluded from this packaging-engineering slice pending ADR 0013 acceptance.
 When a `dotnet-v*` tag is eventually pushed, `dotnet-sbom-provenance.yml`'s
 `sbom` job asserts the packed `.nuspec`'s `<version>` exactly matches that
-tag (`scripts/verify-release-tag.ps1`) before any upload or attestation can
-proceed, so a tag/version mismatch fails the workflow rather than silently
-publishing/attesting the wrong artifact. Both steps that compare
-`github.ref_name` against the packed version pass it through a
-step-level `env: RELEASE_TAG: ${{ github.ref_name }}` and reference only
+tag (`scripts/verify-release-tag.ps1`) before its own SBOM/checksum upload,
+as an early, informational signal for maintainers -- a mismatch fails that
+job's own upload, but that job's artifact is never itself attested (see
+"CI workflows" above). The AUTHORITATIVE tag/version-match gate for
+attestation is `dotnet-release-attestation.yml`'s `provenance-attestation`
+job, which independently re-derives and re-verifies the same match from its
+own trusted, freshly rebuilt artifact before ever attesting anything. Both
+workflows' steps that compare a tag name against the packed version pass it
+through a step-level `env:` value (`RELEASE_TAG`) and reference only
 `$env:RELEASE_TAG` inside the PowerShell `run:` block -- never
 string-interpolating the ref directly into script text -- and
 `Test-ValidReleaseTagGrammar` (`ReleaseVersionTag.ps1`) additionally
@@ -561,7 +574,7 @@ packaging engineering itself:
    Nothing in this repository can invent these without owner action.
 2. **No signing certificate.** NuGet package (Authenticode-style) signing is
    distinct from the SLSA build-provenance attestation added by
-   `dotnet-sbom-provenance.yml`. The signing step is present in that
+   `dotnet-release-attestation.yml`. The signing step is present in that
    workflow's `provenance-attestation` job but permanently disabled
    (`if: false`) until an owner issues a certificate and the corresponding
    secrets.
@@ -583,26 +596,29 @@ packaging engineering itself:
    an out-of-scope gap for this packaging-only branch, not silently
    dropped.
 6. **`dotnet-release-attestation` GitHub Environment not yet configured.**
-   `dotnet-sbom-provenance.yml`'s `provenance-attestation` job references a
-   `dotnet-release-attestation` GitHub Environment as an owner-configurable
+   `dotnet-release-attestation.yml`'s `provenance-attestation` job references
+   a `dotnet-release-attestation` GitHub Environment as an owner-configurable
    protection gate (required reviewers/branch restrictions). This repository
    cannot create or configure that Environment's protection rules itself;
-   until an owner does, that particular layer is simply absent. This is no
-   longer a fail-open exposure, though: the separate, no-OIDC
-   `validate-attestation-eligibility` job's steps ("Validate attestation ref
-   is eligible"
-   (`scripts/verify-attestation-ref.ps1`/`Test-AttestationRefEligible`,
-   always run from a trusted `main` checkout -- never from the
-   operator-selected/triggering ref) and "Validate commit is reachable from
-   origin/main") independently require a real `dotnet-v*` release tag (on
-   `push`) or exactly `refs/heads/main` with ancestry-verified commit history
-   (on `workflow_dispatch`) before the OIDC-permissioned
+   until an owner does, that particular layer is simply absent. This is not a
+   fail-open exposure, though: the workflow-level trigger isolation (this
+   file's `on:` is exclusively `workflow_run`, so its entire job graph --
+   including this Environment reference and every job's `permissions:`/
+   `needs:`/`if:` wiring -- is always resolved from the repository's default
+   branch, never an operator-selected/triggering ref) and the separate,
+   no-OIDC `validate-attestation-eligibility` job's steps ("Validate upstream
+   event/ref/commit is eligible"
+   [`scripts/verify-workflow-run-attestation-ref.ps1`/
+   `Test-AttestationRefEligible`, always run from a trusted `main` checkout]
+   and "Validate commit is reachable from origin/main") independently require
+   a real `dotnet-v*` release tag or exactly `refs/heads/main` with
+   ancestry-verified commit history before the OIDC-permissioned
    `provenance-attestation` job is even allowed to start, regardless of
    whether the Environment has any protection configured. The Environment
-   remains a genuine, recommended SECOND layer of defense-in-depth (manual
-   reviewer approval) once an owner configures it; it was never intended to
-   be, and is no longer treated as, the *only* thing standing between an
-   arbitrary `workflow_dispatch`-selected ref and attestation.
+   remains a genuine, recommended additional layer of defense-in-depth
+   (manual reviewer approval) once an owner configures it; it was never
+   intended to be, and is not, the *only* thing standing between an
+   arbitrary triggering event and attestation.
 
 ## Validation performed
 
@@ -723,9 +739,30 @@ recorded output.
   have silently passed both the psmdcp and `_rels/.rels` content-difference
   cases above, proving the current implementation is a meaningful
   regression guard rather than normalization theater -- all 6 passed).
+- `dotnet/scripts/resolve-workflow-run-attestation-ref.tests.ps1` (new
+  pure-function self-test for `Resolve-WorkflowRunAttestationRef` in
+  `ReleaseVersionTag.ps1`: 8 assertions -- a `push` upstream event
+  reconstructs `refs/tags/<head_branch>`; a `workflow_dispatch` upstream
+  event reconstructs `refs/heads/<head_branch>` for both `main` and an
+  arbitrary branch [rejection of non-main branches is
+  `Test-AttestationRefEligible`'s job, not this function's]; `pull_request`,
+  an unrecognized event name, an empty event name, and a
+  wrong-case `PUSH` all produce no ref candidate at all -- all 8 passed).
+- `dotnet/scripts/verify-workflow-run-attestation-ref.tests.ps1` (new
+  integration-style self-test using a REAL scratch git repository, not
+  fixture strings, for `verify-workflow-run-attestation-ref.ps1`: 10
+  assertions -- a real tag pointing at the exact claimed commit is eligible;
+  the same real tag with a *different* claimed commit is rejected [the
+  upstream-run-claims-a-commit-the-tag-does-not-point-at mismatch]; a
+  nonexistent tag name is rejected; a real *branch* named `main` in the
+  scratch repo [not a tag] is rejected even though its bare name alone would
+  otherwise look tag-shaped -- proving the head_branch-is-ambiguous-with-a-
+  real-tag-name gap this script closes is not merely theoretical;
+  `workflow_dispatch` against `main` is eligible and against an arbitrary
+  branch is rejected; `pull_request` is rejected regardless of
+  head_branch/head_sha -- all 10 passed).
 - `dotnet/scripts/verify-attestation-ref.tests.ps1` (self-test for
-  `Test-AttestationRefEligible` in `ReleaseVersionTag.ps1`, updated this round
-  for the main-only manual-dispatch policy: ~23 assertions covering
+  `Test-AttestationRefEligible` in `ReleaseVersionTag.ps1`: ~23 assertions covering
   valid/malformed tag pushes; `workflow_dispatch` targeting `refs/heads/main`
   [eligible] vs. an arbitrary feature branch [the core fail-open regression
   this function closes -- NOT eligible]; `workflow_dispatch` targeting a
@@ -740,28 +777,36 @@ recorded output.
   [`PUSH`/`REFS/HEADS/main`/`refs/heads/MAIN` are all correctly rejected via
   `-ceq`, not silently matched by PowerShell's case-insensitive default
   `-eq`] -- all ~23 passed).
-- `dotnet/scripts/verify-workflow-attestation-structure.tests.ps1` (new
-  static/structural regression self-test, added this round, that inspects
-  the committed `dotnet-sbom-provenance.yml` text directly -- no live GitHub
-  Actions run and no new YAML-parsing dependency required -- proving:
-  `validate-attestation-eligibility` requests only `contents: read` [no
-  `id-token`/`attestations`/`artifact-metadata`]; its checkout pins
-  `ref: main` and never `github.ref`; `provenance-attestation` retains the
-  elevated permissions but contains no call to `verify-attestation-ref.ps1`
-  or `merge-base` and no unconditional `run:` step [only pinned actions and
-  the permanently-disabled sign step]; its `needs:` includes
-  `validate-attestation-eligibility`; and its checkout, if present, sources
-  only `needs.validate-attestation-eligibility.outputs.validated-sha`, never
-  `github.ref`/`github.sha` directly. Also includes a "malicious selected-ref
-  validator" fixture proving a forged validator COULD report a false
-  "eligible" verdict -- concretely justifying why the structural assertions
-  matter -- and a functional regression assertion that `workflow_dispatch`
-  against a real, validly-formed release tag is rejected. All assertions
-  passed against the current workflow; separately re-run (ad hoc, against a
-  scratch copy of the file, not committed) against the pre-split
-  `66e4b59` version of the workflow to confirm 8 of these assertions would
-  have FAILED there -- proving this is a meaningful regression guard rather
-  than a test that trivially always passes.
+- `dotnet/scripts/verify-workflow-attestation-structure.tests.ps1` (static/
+  structural regression self-test, rewritten this round for the two-file
+  `workflow_run`-triggered architecture, generically auditing **every**
+  workflow file under `.github/workflows/` -- no live GitHub Actions run and
+  no new YAML-parsing dependency required -- proving: (1) global audit: any
+  job across any workflow file requesting `id-token`/`attestations`/
+  `artifact-metadata` write permissions must live in a file whose ONLY
+  top-level trigger is `workflow_run` [currently only
+  `dotnet-release-attestation.yml` qualifies; every other workflow file has
+  no elevated-permission job and is unconstrained]; (2)
+  `dotnet-sbom-provenance.yml` has NO job anywhere with elevated permissions
+  and no longer defines the old `validate-attestation-eligibility`/
+  `provenance-attestation` jobs at all, and its `on:` excludes `release`;
+  (3) `dotnet-release-attestation.yml`'s `on:` is EXACTLY `workflow_run`
+  [no sibling `push`/`workflow_dispatch`/`release`/`pull_request` trigger]
+  referencing the exact upstream workflow name, its
+  `validate-attestation-eligibility` job requests only `contents: read` and
+  pins `ref: main`, its `provenance-attestation` job retains the elevated
+  permissions, `needs:` the validator job, checks out only the validator's
+  `validated-sha` output [never `github.ref`/`github.sha`/
+  `github.event.workflow_run.head_sha` directly], and rebuilds fresh via
+  `verify-package.ps1` rather than downloading the upstream `sbom` job's
+  artifact. Also includes a "malicious selected-ref validator" fixture
+  proving a forged validator COULD report a false "eligible" verdict --
+  concretely justifying why the structural assertions matter -- and a
+  functional regression assertion that `workflow_dispatch` against a real,
+  validly-formed release tag is rejected. All 27 assertions passed against
+  the current two-file design; a genuine bug in this rewrite itself was
+  caught and fixed during this round -- see "PowerShell single-element-list
+  flattening regression" below.
 - Explicit `dotnet build --configuration Release` of every one of the nine
   sample projects under `dotnet/samples/` individually (0 errors each), and
   separately via `dotnet-quality.yml`'s per-project loop step (`dotnet
@@ -776,21 +821,37 @@ recorded output.
   `.github/scripts/secret-scan.test.sh` (self-test: detects a planted AWS
   key fixture, respects the `SENTINEL-SECRET-` exclusion fixture, and
   reports no findings on a clean fixture -- all three scenarios passed).
-- `python -c "import yaml; yaml.safe_load(...)"` against all four
-  workflow files (`dotnet-quality.yml`, `dotnet-sbom-provenance.yml`,
-  `dotnet-integration.yml`, `dotnet-security.yml`) -- all parse cleanly, and
-  `dotnet-sbom-provenance.yml` shows the expected job names (`sbom`,
-  `validate-attestation-eligibility`, `provenance-attestation`) with the
-  expected `if:`/`permissions:`/`needs:`/`outputs:`/step list for each job.
+- `python -c "import yaml; yaml.safe_load(...)"` against all five workflow
+  files (`dotnet-quality.yml`, `dotnet-sbom-provenance.yml`,
+  `dotnet-release-attestation.yml`, `dotnet-integration.yml`,
+  `dotnet-security.yml`) -- all parse cleanly, and `dotnet-sbom-provenance.yml`
+  shows only its single `sbom` job, while `dotnet-release-attestation.yml`
+  shows exactly `validate-attestation-eligibility`/`provenance-attestation`
+  with the expected `if:`/`permissions:`/`needs:`/`outputs:`/step list for
+  each.
 - Manual grep audit of every `${{\s*(github\.|inputs\.|steps\.)` occurrence
-  across all four workflow files' `run:` step bodies, confirming each one is
+  across all five workflow files' `run:` step bodies, confirming each one is
   passed through a step-level `env:` value and referenced as
   `$NAME`/`$env:NAME` inside the shell/PowerShell source, never interpolated
   directly into that source text -- the same injection-surface pattern
   already applied to `verify-release-tag.ps1`'s `-RefName` parameter in an
-  earlier round, now closed for the two remaining occurrences this audit
-  found in `dotnet-sbom-provenance.yml`'s `sbom` job (`github.event_name`/
-  `github.ref` in the "Determine verification depth" bash step, and
-  `steps.verify-depth.outputs.full` in the "Pack and verify the package"
-  PowerShell step).
+  earlier round; `dotnet-release-attestation.yml`'s new
+  `github.event.workflow_run.event`/`.head_branch`/`.head_sha` occurrences
+  follow the identical pattern.
+- **PowerShell single-element-list flattening regression (caught and fixed
+  during this round's own rewrite):** `verify-workflow-attestation-structure.tests.ps1`'s
+  new `Get-WorkflowTriggerKeys` helper initially returned a bare
+  `System.Collections.Generic.List[string]` from `return $keys`; PowerShell's
+  default pipeline enumeration silently unwraps a single-element collection
+  to a bare scalar on return, which is invisible for workflows with 2+
+  triggers (e.g. `dotnet-sbom-provenance.yml`'s three) but corrupts the
+  result for `dotnet-release-attestation.yml`'s intentionally single
+  `workflow_run` trigger -- `.Count` still (correctly) reported `1` via
+  PowerShell's synthetic scalar adapter, but indexing `[0]` then silently
+  indexed into the *string's characters* instead of the list, causing a
+  false test failure that looked like a real defect. Fixed by returning
+  `, $keys` (the unary comma operator forces single-object emission of the
+  list itself); the self-test was re-run and all 27 assertions pass. This
+  is recorded here as a genuine defect this round's own tooling introduced
+  and then caught via its own execution, not merely a design note.
 - `git diff --cached --check` (no whitespace errors) before committing.

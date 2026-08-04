@@ -1,48 +1,58 @@
 #Requires -Version 7.0
 <#
 .SYNOPSIS
-    Structural/static regression self-test for .github/workflows/dotnet-sbom-provenance.yml's
-    attestation-job trust split -- proves, by direct inspection of the committed YAML text (no live GitHub
-    Actions run required), that the provenance-attestation job can never execute code sourced from an
-    operator-selected/triggering ref, and that a manual workflow_dispatch can never target a release tag.
+    Structural/static regression self-test proving this repository's privileged-permission/untrusted-trigger
+    class of bug stays closed, by direct inspection of every committed workflow file's YAML text (no live GitHub
+    Actions run required).
 
 .DESCRIPTION
-    Two defects this test guards against:
+    Background: GitHub Actions resolves and runs an ENTIRE workflow file's job graph -- every job's own
+    `permissions:`/`needs:`/`if:` definitions and step list, not merely the scripts a job happens to invoke --
+    using the exact file content present at whatever ref triggered that specific run. For `pull_request`/`push`/
+    `workflow_dispatch`/`release`, that ref can be an operator-selected branch/tag or a pushed ref/commit --
+    content this repository does not control the review of before the run starts. A prior revision of this
+    repository's attestation workflow held elevated `id-token`/`attestations`/`artifact-metadata` permissions in
+    the SAME file as its `push`/`workflow_dispatch`-triggered `sbom` job, with an in-file "trusted main checkout"
+    validator job -- INSUFFICIENT, because that validator job's own `permissions:`/`needs:`/`if:` wiring was
+    itself sourced from the same untrusted ref, so whoever controlled the triggering ref could rewrite the job
+    graph itself, not merely the scripts it called. The fix: split the elevated job into a WHOLLY SEPARATE file
+    (`dotnet-release-attestation.yml`) triggered exclusively by `workflow_run` -- the one event GitHub's own
+    documentation guarantees always resolves and runs the reacting workflow's file exactly as it exists on the
+    repository's default branch, regardless of what ref/event triggered the upstream run it reacts to. (`release`
+    does NOT carry this guarantee per GitHub's own event-reference documentation -- its `GITHUB_SHA`/`GITHUB_REF`
+    are the tagged commit/tag ref, structurally identical in trust to a tag `push` -- so `release: published` was
+    considered and rejected as an insufficient trigger for this purpose.)
 
-      A) A `workflow_dispatch` run checks out and executes the OPERATOR-SELECTED ref's own code. If a job that
-         already holds `id-token`/`attestations`/`artifact-metadata` write permissions checked out and ran a
-         validator script FROM that same selected ref, whoever controls that ref could patch the validator (or
-         delete the ancestry check, or the workflow YAML itself) to always report "eligible" -- forging this
-         gate's own verdict. This repository's fix moves all such validation into a separate
-         `validate-attestation-eligibility` job that (1) never requests OIDC/attestation permissions, so a
-         forged "pass" there cannot itself do anything sensitive, and (2) always checks out the repository's
-         real, protected `main` branch -- never `github.ref` -- before running any validator script, so the
-         code making the eligibility decision can never be the operator-selected ref's own (possibly
-         compromised) content. `provenance-attestation` itself never checks out or executes ANY selected-ref
-         script; it only downloads the already-built artifact and calls two pinned marketplace actions.
-      B) A manual `workflow_dispatch` targeting an EXISTING release tag has no equivalent trusted check that the
-         tag's claimed version matches the packed artifact's real version (unlike a real tag `push`, which the
-         `sbom` job's "Verify tag matches package version" step already gates). This repository's fix restricts
-         `workflow_dispatch` eligibility to EXACTLY `refs/heads/main`; a tag can only ever be attested via a real
-         tag `push`.
+    This test performs four kinds of assertions, generically across every file in .github/workflows/, not just
+    the two release-related files, so a FUTURE workflow that carelessly adds elevated permissions under an
+    untrusted trigger is caught by the same regression proof:
 
-    This test performs three kinds of assertions:
-      1. Structural (regex/text) assertions against the raw workflow YAML, proving the job split, permission
-         separation, and checkout targets are exactly as designed -- not merely "trust the doc comment".
-      2. A functional assertion (via Test-AttestationRefEligible, already self-tested in more depth by
-         verify-attestation-ref.tests.ps1) that a `workflow_dispatch` run targeting a real, validly-formed
-         release tag is rejected -- the tag/package-version-mismatch regression from issue B.
-      3. A "malicious selected-ref validator" regression proof: a fabricated, always-eligible fake
-         Test-AttestationRefEligible replacement function is defined locally and shown to report "eligible" for
-         an input that should never be eligible -- demonstrating concretely why part 1's structural assertions
-         matter: IF the provenance-attestation job executed a validator sourced from a compromised/selected ref,
-         that validator's own verdict could trivially be forged. This does not claim provenance-attestation ever
-         does this (the structural assertions above prove it does not); it proves the failure mode those
-         assertions close would otherwise be real, not merely theoretical.
+      1. Global audit (any current or future workflow): every job across every workflow file that requests
+         `id-token: write`, `attestations: write`, or `artifact-metadata: write` must live in a file whose ONLY
+         top-level trigger is `workflow_run` -- never `push`, `workflow_dispatch`, `release`, `pull_request`, or
+         `pull_request_target`. A file with zero elevated-permission jobs is unconstrained (any trigger is fine).
+      2. dotnet-sbom-provenance.yml specifically: asserts it has NO job anywhere with any of the three elevated
+         permissions, and that its `on:` does not include `release` (belt-and-suspenders on top of assertion 1,
+         which already covers it structurally).
+      3. dotnet-release-attestation.yml specifically: asserts its `on:` is EXACTLY `workflow_run` (no sibling
+         triggers) referencing the exact upstream workflow name; `validate-attestation-eligibility` requests only
+         `contents: read`; `provenance-attestation` requests the elevated permissions, `needs:` the validator job,
+         and checks out ONLY the validator's `validated-sha` output -- never `github.ref`/`github.sha`/
+         `github.event.workflow_run.head_sha` directly as its actual checkout ref (that field IS legitimately used
+         as plain env/string data by the validator job's own checks, just never as an unvalidated checkout ref in
+         the privileged job); and that it REBUILDS the package fresh rather than downloading the upstream sbom
+         job's own artifact.
+      4. Functional/regression proofs (unchanged from the prior single-file design, still valid against the new
+         file): a manual `workflow_dispatch` targeting a real, validly-formed release tag is rejected by
+         Test-AttestationRefEligible (tag/package-version-mismatch regression), and a "malicious selected-ref
+         validator" fake function is shown to be able to forge an "eligible" verdict -- demonstrating concretely
+         why assertion 1's trigger-isolation matters: IF a privileged job's validator were sourced from a
+         compromised/selected ref, its verdict could trivially be forged. This does not claim any current job
+         does this (assertions 1 and 3 prove none does); it proves the failure mode those assertions close would
+         otherwise be real, not merely theoretical.
 
-    This deliberately parses the workflow YAML with plain text/regex, not a YAML library, to avoid adding a new
-    parsing dependency to this repository purely for a self-test; every assertion only needs to find/not-find
-    specific lines within a known job's text span, which line-based block extraction is sufficient for.
+    This deliberately parses each workflow's YAML with plain text/regex, not a YAML library, to avoid adding a new
+    parsing dependency to this repository purely for a self-test.
 
     Run directly: pwsh dotnet/scripts/verify-workflow-attestation-structure.tests.ps1
     Exit code 0 = every assertion behaved as expected; exit code 1 = at least one assertion did not.
@@ -52,7 +62,10 @@ param()
 
 $ErrorActionPreference = "Stop"
 $RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "../..")
-$WorkflowPath = Join-Path $RepoRoot ".github/workflows/dotnet-sbom-provenance.yml"
+$WorkflowsDir = Join-Path $RepoRoot ".github/workflows"
+$SbomWorkflowPath = Join-Path $WorkflowsDir "dotnet-sbom-provenance.yml"
+$AttestationWorkflowPath = Join-Path $WorkflowsDir "dotnet-release-attestation.yml"
+$UpstreamWorkflowName = ".NET package SBOM (credential-free verification)"
 
 $script:AssertionFailures = 0
 
@@ -66,9 +79,9 @@ function Assert-True([bool]$Condition, [string]$Message) {
     }
 }
 
-# Extracts each top-level job's raw text block from the committed workflow YAML: a job header is a line
-# indented exactly two spaces directly under `jobs:` (e.g. "  sbom:"); the block continues until the next such
-# line or end of file.
+# Extracts each top-level job's raw text block from a committed workflow YAML: a job header is a line indented
+# exactly two spaces directly under `jobs:` (e.g. "  sbom:"); the block continues until the next such line, the
+# next top-level (zero-indent) key, or end of file.
 function Get-WorkflowJobBlocks([string]$Path) {
     $lines = Get-Content -Path $Path
     $jobsLineIndex = $null
@@ -107,95 +120,184 @@ function Get-WorkflowJobBlocks([string]$Path) {
     return $blocks
 }
 
-$jobBlocks = Get-WorkflowJobBlocks -Path $WorkflowPath
-Assert-True ($jobBlocks.Contains('sbom')) "Workflow defines a 'sbom' job"
-Assert-True ($jobBlocks.Contains('validate-attestation-eligibility')) "Workflow defines a 'validate-attestation-eligibility' job"
-Assert-True ($jobBlocks.Contains('provenance-attestation')) "Workflow defines a 'provenance-attestation' job"
+# Extracts the set of top-level trigger keys from a workflow's `on:` block (e.g. "push", "workflow_dispatch",
+# "workflow_run") -- the block starts at a bare `^on:\s*$` line and continues while subsequent lines are indented,
+# ending at the next zero-indent top-level key (e.g. `permissions:`, `jobs:`) or end of file. A trigger key is a
+# two-space-indented `key:` line directly under `on:`.
+function Get-WorkflowTriggerKeys([string]$Path) {
+    $lines = Get-Content -Path $Path
+    $onLineIndex = $null
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -cmatch '^on:\s*$') {
+            $onLineIndex = $i
+            break
+        }
+    }
+    if ($null -eq $onLineIndex) {
+        throw "No top-level 'on:' key found in $Path"
+    }
 
-$eligibilityBlock = $jobBlocks['validate-attestation-eligibility']
-$attestationBlock = $jobBlocks['provenance-attestation']
+    $keys = [System.Collections.Generic.List[string]]::new()
+    for ($i = $onLineIndex + 1; $i -lt $lines.Count; $i++) {
+        $line = $lines[$i]
+        if ($line -cmatch '^\S') {
+            # Zero-indent, non-blank line: the `on:` block has ended.
+            break
+        }
+        if ($line -cmatch '^  ([A-Za-z0-9_-]+):') {
+            $keys.Add($Matches[1])
+        }
+    }
+    # The unary comma forces PowerShell to emit $keys as a single List[string] object; without it, a
+    # single-trigger workflow (e.g. dotnet-release-attestation.yml's sole 'workflow_run') would have its
+    # one-element list silently flattened/unwrapped to a bare scalar string on return, breaking .Count/[0]
+    # usage at every call site (a real bug caught by this self-test's own assertion against that exact file).
+    return , $keys
+}
 
-# --- Issue A: permission separation --------------------------------------------------------------------------
+# Returns $true if any job block's `permissions:` sub-block requests at least one of the three
+# attestation-adjacent elevated permissions this repository treats as privileged.
+function Test-JobBlockHasElevatedPermissions([string]$JobBlock) {
+    return (
+        $JobBlock -match 'id-token:\s*write' -or
+        $JobBlock -match 'attestations:\s*write' -or
+        $JobBlock -match 'artifact-metadata:\s*write'
+    )
+}
+
+# --- Assertion 1: global audit across every workflow file in the repository ------------------------------------
+# A future workflow that carelessly adds elevated permissions under an untrusted trigger must fail this
+# regression proof, not just the two files this test also inspects in detail below.
+$allWorkflowFiles = Get-ChildItem -Path $WorkflowsDir -Filter "*.yml" | Sort-Object Name
+Assert-True ($allWorkflowFiles.Count -ge 5) "Found at least 5 workflow files under .github/workflows (sanity check on the glob) -- found $($allWorkflowFiles.Count)"
+
+foreach ($workflowFile in $allWorkflowFiles) {
+    $jobBlocks = Get-WorkflowJobBlocks -Path $workflowFile.FullName
+    $triggerKeys = Get-WorkflowTriggerKeys -Path $workflowFile.FullName
+    $hasElevatedJob = $false
+    foreach ($jobName in $jobBlocks.Keys) {
+        if (Test-JobBlockHasElevatedPermissions $jobBlocks[$jobName]) {
+            $hasElevatedJob = $true
+        }
+    }
+
+    if ($hasElevatedJob) {
+        $disallowedTriggers = $triggerKeys | Where-Object { $_ -ne 'workflow_run' }
+        Assert-True (
+            $triggerKeys.Count -gt 0 -and $disallowedTriggers.Count -eq 0
+        ) "$($workflowFile.Name) has a job with id-token/attestations/artifact-metadata permissions, so its ONLY top-level trigger must be workflow_run -- found triggers: $($triggerKeys -join ', ')"
+    }
+    else {
+        Assert-True $true "$($workflowFile.Name) has no job with elevated id-token/attestations/artifact-metadata permissions (no trigger restriction required)"
+    }
+}
+
+# --- Assertion 2: dotnet-sbom-provenance.yml is fully unprivileged ----------------------------------------------
+$sbomJobBlocks = Get-WorkflowJobBlocks -Path $SbomWorkflowPath
+$sbomTriggerKeys = Get-WorkflowTriggerKeys -Path $SbomWorkflowPath
+Assert-True ($sbomJobBlocks.Contains('sbom')) "dotnet-sbom-provenance.yml defines a 'sbom' job"
 Assert-True (
-    $eligibilityBlock -notmatch 'id-token:\s*write'
-) "validate-attestation-eligibility does not request id-token: write"
+    -not ($sbomJobBlocks.Contains('validate-attestation-eligibility'))
+) "dotnet-sbom-provenance.yml no longer defines 'validate-attestation-eligibility' (moved to dotnet-release-attestation.yml)"
 Assert-True (
-    $eligibilityBlock -notmatch 'attestations:\s*write'
-) "validate-attestation-eligibility does not request attestations: write"
+    -not ($sbomJobBlocks.Contains('provenance-attestation'))
+) "dotnet-sbom-provenance.yml no longer defines 'provenance-attestation' (moved to dotnet-release-attestation.yml)"
+
+$sbomHasAnyElevatedJob = $false
+foreach ($jobName in $sbomJobBlocks.Keys) {
+    if (Test-JobBlockHasElevatedPermissions $sbomJobBlocks[$jobName]) {
+        $sbomHasAnyElevatedJob = $true
+    }
+}
+Assert-True (-not $sbomHasAnyElevatedJob) "dotnet-sbom-provenance.yml has NO job anywhere with id-token/attestations/artifact-metadata permissions"
 Assert-True (
+    $sbomTriggerKeys -notcontains 'release'
+) "dotnet-sbom-provenance.yml's 'on:' does not include 'release' (release does not guarantee default-branch workflow sourcing per GitHub's own docs, so it must never gain elevated permissions even indirectly)"
+Assert-True (
+    $sbomTriggerKeys -contains 'pull_request' -and $sbomTriggerKeys -contains 'push' -and $sbomTriggerKeys -contains 'workflow_dispatch'
+) "dotnet-sbom-provenance.yml keeps its pull_request/push/workflow_dispatch triggers (safe now that it holds no elevated permissions anywhere)"
+
+# --- Assertion 3: dotnet-release-attestation.yml's trigger isolation and job wiring -----------------------------
+Assert-True (Test-Path $AttestationWorkflowPath) "dotnet-release-attestation.yml exists"
+
+$attestationTriggerKeys = Get-WorkflowTriggerKeys -Path $AttestationWorkflowPath
+Assert-True (
+    $attestationTriggerKeys.Count -eq 1 -and $attestationTriggerKeys[0] -ceq 'workflow_run'
+) "dotnet-release-attestation.yml's 'on:' is EXACTLY workflow_run (no push/workflow_dispatch/release/pull_request sibling trigger) -- found: $($attestationTriggerKeys -join ', ')"
+
+$attestationWorkflowText = Get-Content -Path $AttestationWorkflowPath -Raw
+Assert-True (
+    $attestationWorkflowText -match [regex]::Escape('workflows: [".NET package SBOM (credential-free verification)"]')
+) "dotnet-release-attestation.yml's workflow_run trigger references the exact upstream workflow name '$UpstreamWorkflowName'"
+
+$releaseJobBlocks = Get-WorkflowJobBlocks -Path $AttestationWorkflowPath
+Assert-True ($releaseJobBlocks.Contains('validate-attestation-eligibility')) "dotnet-release-attestation.yml defines a 'validate-attestation-eligibility' job"
+Assert-True ($releaseJobBlocks.Contains('provenance-attestation')) "dotnet-release-attestation.yml defines a 'provenance-attestation' job"
+
+$eligibilityBlock = $releaseJobBlocks['validate-attestation-eligibility']
+$attestationBlock = $releaseJobBlocks['provenance-attestation']
+
+Assert-True (
+    $eligibilityBlock -notmatch 'id-token:\s*write' -and
+    $eligibilityBlock -notmatch 'attestations:\s*write' -and
     $eligibilityBlock -notmatch 'artifact-metadata:\s*write'
-) "validate-attestation-eligibility does not request artifact-metadata: write"
+) "validate-attestation-eligibility does not request id-token/attestations/artifact-metadata permissions"
 Assert-True (
     $eligibilityBlock -match 'contents:\s*read'
 ) "validate-attestation-eligibility requests only contents: read"
 
-Assert-True (
-    $attestationBlock -match 'id-token:\s*write' -and
-    $attestationBlock -match 'attestations:\s*write' -and
-    $attestationBlock -match 'artifact-metadata:\s*write'
-) "provenance-attestation retains the elevated id-token/attestations/artifact-metadata permissions"
+Assert-True (Test-JobBlockHasElevatedPermissions $attestationBlock) "provenance-attestation retains the elevated id-token/attestations/artifact-metadata permissions"
 
-# --- Issue A: trusted-main-first checkout --------------------------------------------------------------------
+# Trusted-main-first checkout in the validator job.
 Assert-True (
     $eligibilityBlock -match 'ref:\s*main\b'
-) "validate-attestation-eligibility's checkout step pins 'ref: main' (never the triggering/operator-selected ref)"
-Assert-True (
-    $eligibilityBlock -cnotmatch '(?m)^\s*ref:\s*\$\{\{\s*github\.ref'
-) "validate-attestation-eligibility's checkout step never checks out '`${{ github.ref }}'/the triggering ref directly"
+) "validate-attestation-eligibility's checkout step pins 'ref: main'"
 
-# --- Issue A: provenance-attestation never runs a validator sourced from a checked-out (selected) ref ---------
+# needs/output wiring: provenance-attestation must depend on the validator and check out ONLY its output.
 Assert-True (
-    $attestationBlock -notmatch 'verify-attestation-ref\.ps1'
-) "provenance-attestation never invokes verify-attestation-ref.ps1 itself (validation happens only in the trusted-main job)"
-Assert-True (
-    $attestationBlock -notmatch 'merge-base'
-) "provenance-attestation never re-runs the ancestry check itself (it only happens in the trusted-main job)"
-
-# Every step in provenance-attestation must be either a pinned marketplace action ('uses:') or the
-# permanently-disabled ('if: false') sign step -- i.e. no unconditional 'run:' script/command step exists in
-# this OIDC-permissioned job at all, so there is no executable-script surface for a compromised checkout to
-# reach even if one were added carelessly in the future.
-$stepBlocksPattern = '(?ms)^\s*- name:.*?(?=^\s*- name:|\z)'
-$attestationSteps = [regex]::Matches($attestationBlock, $stepBlocksPattern) | ForEach-Object { $_.Value }
-Assert-True ($attestationSteps.Count -gt 0) "provenance-attestation has at least one step (sanity check on the block-splitting regex)"
-$unconditionalRunSteps = $attestationSteps | Where-Object { $_ -match '(?m)^\s*run:' -and $_ -notmatch 'if:\s*false' }
-Assert-True (
-    $unconditionalRunSteps.Count -eq 0
-) "provenance-attestation has no unconditional 'run:' script step (only pinned actions and the permanently-disabled sign step) -- got $($unconditionalRunSteps.Count) unexpected run step(s)"
-
-# --- Issue A: needs/output wiring ------------------------------------------------------------------------------
-Assert-True (
-    $attestationBlock -match [regex]::Escape('needs: [sbom, validate-attestation-eligibility]')
-) "provenance-attestation's 'needs:' includes both sbom and validate-attestation-eligibility"
+    $attestationBlock -match [regex]::Escape('needs: validate-attestation-eligibility')
+) "provenance-attestation's 'needs:' includes validate-attestation-eligibility"
 Assert-True (
     $attestationBlock -match [regex]::Escape('needs.validate-attestation-eligibility.outputs.validated-sha')
-) "provenance-attestation's checkout uses the trusted job's validated-sha output, never github.ref/github.sha directly"
+) "provenance-attestation's checkout uses the trusted job's validated-sha output"
 Assert-True (
     $attestationBlock -notmatch '\bref:\s*\$\{\{\s*github\.(ref|sha)\b'
-) "provenance-attestation never checks out github.ref/github.sha directly (only the validated-sha output)"
+) "provenance-attestation never checks out github.ref/github.sha directly"
+Assert-True (
+    $attestationBlock -notmatch '\bref:\s*\$\{\{\s*github\.event\.workflow_run\.head_sha'
+) "provenance-attestation never checks out github.event.workflow_run.head_sha directly (only the validated-sha output, after ancestry verification)"
 
-# --- Malicious selected-ref validator regression proof ---------------------------------------------------------
-# Demonstrates concretely why the structural assertions above matter: if a validator function WERE sourced from
-# a compromised/selected ref, its own verdict could trivially be forged. This block does not claim
-# provenance-attestation ever does this (the assertions above prove it does not) -- it proves the failure mode
-# those assertions close would otherwise be real, not merely theoretical.
+# provenance-attestation must REBUILD fresh -- it must never download the upstream sbom job's own artifact.
+Assert-True (
+    $attestationBlock -notmatch 'download-artifact'
+) "provenance-attestation never downloads the upstream sbom job's artifact (it rebuilds fresh from the validated commit instead)"
+Assert-True (
+    $attestationBlock -match 'verify-package\.ps1'
+) "provenance-attestation rebuilds the package via verify-package.ps1 from the validated checkout"
+
+# --- Malicious selected-ref validator regression proof -----------------------------------------------------------
+# Demonstrates concretely why trigger isolation (assertion 1) and trusted-main-first checkout (assertion 3)
+# matter: if a validator function WERE sourced from a compromised/selected ref, its own verdict could trivially
+# be forged. This block does not claim any current job does this (the assertions above prove none does) -- it
+# proves the failure mode those assertions close would otherwise be real, not merely theoretical.
 function Test-MaliciousAttestationRefEligible {
     param([string]$EventName, [string]$Ref)
     # A compromised validator sourced from the attacker's own selected ref could simply always report eligible,
-    # regardless of the real input -- exactly the risk the trusted-main-checkout structural assertions close.
+    # regardless of the real input -- exactly the risk the workflow_run-trigger-isolation and trusted-main-first
+    # checkout assertions above close.
     return [pscustomobject]@{ Eligible = $true; Reason = "forged: always eligible" }
 }
 $forged = Test-MaliciousAttestationRefEligible -EventName "workflow_dispatch" -Ref "refs/heads/feature/malicious-branch"
 Assert-True (
     $forged.Eligible
-) "Regression proof: a validator sourced from a compromised/selected ref COULD forge an 'eligible' verdict for an otherwise-ineligible ref -- this is exactly the class of bug the trusted-main-checkout structural assertions above close"
+) "Regression proof: a validator sourced from a compromised/selected ref COULD forge an 'eligible' verdict for an otherwise-ineligible ref -- exactly the class of bug the trigger-isolation and trusted-main-checkout structural assertions above close"
 
-# --- Issue B: functional regression -- manual dispatch of a real, validly-formed tag is rejected ----------------
+# --- Functional regression: manual dispatch of a real, validly-formed tag is rejected ----------------------------
 . (Join-Path $PSScriptRoot "ReleaseVersionTag.ps1")
 $tagDispatchResult = Test-AttestationRefEligible -EventName "workflow_dispatch" -Ref "refs/tags/dotnet-v1.2.3"
 Assert-True (
     -not $tagDispatchResult.Eligible
-) "Regression proof (issue B): workflow_dispatch targeting a real, validly-formed release tag is rejected -- manual dispatch is main-only, so a tag whose NAME claims one version while the packed artifact actually contains a different one can never reach attestation via this path"
+) "Regression proof: workflow_dispatch targeting a real, validly-formed release tag is rejected -- manual dispatch is main-only, so a tag whose NAME claims one version while the packed artifact actually contains a different one can never reach attestation via this path"
 
 Write-Host ""
 if ($script:AssertionFailures -gt 0) {

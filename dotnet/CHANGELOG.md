@@ -49,10 +49,15 @@ establish a public API compatibility baseline in the SemVer sense -- see
   feature area from the packed `.nupkg`.
 - SHA-pinned CI workflows: `dotnet-quality.yml` (restore/format/build/test/
   pack/package-smoke/sample builds), `dotnet-integration.yml` (credentialed
-  MongoDB integration test categories, gated, never on `pull_request`), and
-  `dotnet-sbom-provenance.yml` (SPDX + CycloneDX SBOM, GitHub build-
-  provenance attestation, checksum manifest, documented-but-disabled NuGet
-  signing step).
+  MongoDB integration test categories, gated, never on `pull_request`),
+  `dotnet-sbom-provenance.yml` (credential-free SPDX + CycloneDX SBOM,
+  checksum manifest; holds no elevated permissions and is safe against
+  untrusted fork pull requests), and `dotnet-release-attestation.yml`
+  (GitHub build-provenance attestation, triggered exclusively by
+  `workflow_run` reacting to `dotnet-sbom-provenance.yml` so its privileged
+  job graph is always sourced from the default branch; rebuilds and
+  re-verifies the package fresh from an independently ancestry-validated
+  commit before attesting; documented-but-disabled NuGet signing step).
 
 ### Known limitations
 
