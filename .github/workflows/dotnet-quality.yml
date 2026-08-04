@@ -80,9 +80,23 @@ jobs:
         working-directory: dotnet
         run: ./scripts/verify-package.ps1 -Configuration Release
 
+      # `dotnet build` only ever accepts one project or solution argument (MSB1008: "Only one project can
+      # be specified" if given several csproj paths on one command line), so every sample must be built in its
+      # own invocation. This loop discovers every directory under samples/ instead of hardcoding a project list,
+      # so a future new/removed/renamed sample can never silently drift out of sync with this check.
       - name: Build all sample projects
+        shell: pwsh
         working-directory: dotnet
-        run: dotnet build samples/IngestionSamples/IngestionSamples.csproj samples/MemoryQuickstart/MemoryQuickstart.csproj samples/HistoryQuickstart/HistoryQuickstart.csproj samples/RAGQuickstart/RAGQuickstart.csproj samples/ParentDocumentRAGQuickstart/ParentDocumentRAGQuickstart.csproj samples/IncrementalIngestionQuickstart/IncrementalIngestionQuickstart.csproj samples/IndexManagementQuickstart/IndexManagementQuickstart.csproj samples/SessionPersistenceQuickstart/SessionPersistenceQuickstart.csproj samples/WorkflowCheckpointResumeQuickstart/WorkflowCheckpointResumeQuickstart.csproj --configuration Release --no-restore
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $samples = Get-ChildItem -Path samples -Directory | Select-Object -ExpandProperty Name
+          if ($samples.Count -eq 0) { throw 'No sample projects found under samples/.' }
+          foreach ($sample in $samples) {
+            Write-Output "== Building sample: $sample =="
+            dotnet build "samples/$sample/$sample.csproj" --configuration Release --no-restore
+            if ($LASTEXITCODE -ne 0) { throw "Sample '$sample' failed to build (exit code $LASTEXITCODE)." }
+          }
+          Write-Output "All $($samples.Count) sample projects built successfully."
 
       - name: Upload packed artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
