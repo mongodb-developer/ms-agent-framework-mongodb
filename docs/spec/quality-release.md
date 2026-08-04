@@ -65,6 +65,10 @@ them. Scheduled jobs SHOULD catch upstream Agent Framework, driver, and MongoDB 
 
 ## Release engineering and supply-chain requirements
 
+The operational branch, version, tag, compatibility, environment, and promotion model is
+defined in
+[Version control and release strategy](../development/release/version-control-and-release-strategy.md).
+
 ### Package build and provenance
 
 - Build release artifacts in CI from a protected tag that resolves to the reviewed commit.
