@@ -69,11 +69,24 @@ jobs:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
+      # Proves the scanner itself still detects a real secret shape and still respects its documented
+      # SENTINEL-SECRET- test-fixture exclusion, using disposable scratch git repos so no secret-shaped
+      # content is ever committed to this repository. See .github/scripts/secret-scan.test.sh.
+      - name: Self-test the secret-scan script
+        shell: bash
+        run: bash .github/scripts/secret-scan.test.sh
+
       # No third-party binary is downloaded or executed here; see .github/scripts/secret-scan.sh for the
       # pattern set and its documented limitations (working-tree-only, pattern-based, no entropy analysis).
+      # Invoked as `bash <script>` rather than relying on the script's own executable bit: `actions/checkout`
+      # preserves whatever mode bit was recorded in the tree, but that bit is not guaranteed to survive every
+      # possible checkout path (for example a Windows-authored commit, or a fork/mirror that normalizes
+      # permissions), so a direct `.github/scripts/secret-scan.sh` invocation could fail with "Permission
+      # denied" for a reason unrelated to the scan itself. Explicitly invoking the interpreter removes that
+      # dependency entirely.
       - name: Scan repository for common secret patterns
         shell: bash
-        run: .github/scripts/secret-scan.sh
+        run: bash .github/scripts/secret-scan.sh
 
   codeql:
     name: CodeQL code scanning (C#)
