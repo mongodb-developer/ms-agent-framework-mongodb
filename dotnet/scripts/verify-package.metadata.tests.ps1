@@ -72,6 +72,22 @@ Assert-True (-not $nullResult.Passed) "A `$null return value is reported as Pass
 # ---------------------------------------------------------------------------------------------------------------
 # Part 2: a fully valid metadata fixture must pass every required assertion.
 # ---------------------------------------------------------------------------------------------------------------
+function New-ValidNuspecDependencyGroupFixture([string]$TargetFramework) {
+    # Mirrors the exact, identical-across-TFMs dependency set MongoDB.AgentFramework.csproj's single
+    # PackageReference ItemGroup produces (see PackageMetadataAssertions.ps1's
+    # $script:ExpectedNuspecDependenciesByPackageId comment).
+    return [pscustomobject]@{
+        targetFramework = $TargetFramework
+        dependency      = @(
+            [pscustomobject]@{ id = "Microsoft.Agents.AI.Abstractions"; version = "[1.13.0, 1.17.0)" }
+            [pscustomobject]@{ id = "Microsoft.Agents.AI.Workflows"; version = "[1.13.0, 1.17.0)" }
+            [pscustomobject]@{ id = "Microsoft.Extensions.AI.Abstractions"; version = "[10.7.0, 11.0.0)" }
+            [pscustomobject]@{ id = "Microsoft.Extensions.Logging.Abstractions"; version = "[10.0.9, 11.0.0)" }
+            [pscustomobject]@{ id = "MongoDB.Driver"; version = "[3.10.0, 4.0.0)" }
+        )
+    }
+}
+
 function New-ValidNuspecMetadataFixture {
     # A fresh object graph every call, so mutating one test's fixture can never leak into another's via a shared
     # reference to a nested object (license/repository/dependencies).
@@ -88,7 +104,13 @@ function New-ValidNuspecMetadataFixture {
         copyright    = "Copyright (c) MongoDB, Inc."
         tags         = "mongodb agent-framework ai"
         repository   = [pscustomobject]@{ url = "https://github.com/mongo/ms-agent-framework-mongodb"; commit = "abc123def456"; branch = "main" }
-        dependencies = [pscustomobject]@{ group = @([pscustomobject]@{ targetFramework = "net10.0" }) }
+        dependencies = [pscustomobject]@{
+            group = @(
+                (New-ValidNuspecDependencyGroupFixture "net8.0")
+                (New-ValidNuspecDependencyGroupFixture "net9.0")
+                (New-ValidNuspecDependencyGroupFixture "net10.0")
+            )
+        }
     }
 }
 
@@ -117,7 +139,11 @@ $expectedAssertionNames = @(
     "tags is set"
     "repository url is embedded (SourceLink)"
     "repository commit is embedded (SourceLink)"
-    "at least one per-TFM dependency group"
+    "dependency groups are exactly net8.0, net9.0, and net10.0 (no more, no less)"
+    "net8.0 dependency group has exactly the expected package ids and version ranges"
+    "net9.0 dependency group has exactly the expected package ids and version ranges"
+    "net10.0 dependency group has exactly the expected package ids and version ranges"
+    "no analyzer/source-link/build-only packages leak into the nuspec dependency list"
 )
 
 Assert-True ((($validResults.Keys | Sort-Object) -join '|') -eq (($expectedAssertionNames | Sort-Object) -join '|')) `
@@ -160,7 +186,74 @@ Test-SingleFieldMutation "Missing copyright" "copyright is set" { param($m) $m.c
 Test-SingleFieldMutation "Missing tags" "tags is set" { param($m) $m.tags = "" }
 Test-SingleFieldMutation "Missing repository url" "repository url is embedded (SourceLink)" { param($m) $m.repository.url = "" }
 Test-SingleFieldMutation "Missing repository commit" "repository commit is embedded (SourceLink)" { param($m) $m.repository.commit = "" }
-Test-SingleFieldMutation "Zero dependency groups" "at least one per-TFM dependency group" { param($m) $m.dependencies.group = @() }
+
+# ---------------------------------------------------------------------------------------------------------------
+# Part 3b: dependency-group mutations. Unlike the single-field mutations above, some of these deliberately affect
+# more than one named assertion at once (e.g. dropping an entire TFM group both breaks the "exactly net8.0/
+# net9.0/net10.0" set-check AND that TFM's own "has exactly the expected package ids/ranges" check, since the
+# group simply is not there to check). Test-DependencyMutation below asserts the full *set* of failing assertion
+# names, not just one, and asserts every assertion NOT in that set still passes.
+# ---------------------------------------------------------------------------------------------------------------
+function Test-DependencyMutation([string]$MutationLabel, [string[]]$ExpectedFailingAssertions, [scriptblock]$Mutate) {
+    $fixture = New-ValidNuspecMetadataFixture
+    & $Mutate $fixture
+
+    $results = Test-AllAssertions $fixture
+    $failingNames = @($results.Keys | Where-Object { -not $results[$_].Passed }) | Sort-Object
+    $expectedSorted = @($ExpectedFailingAssertions) | Sort-Object
+
+    Assert-True ((($failingNames -join '|') -eq ($expectedSorted -join '|'))) `
+        "$MutationLabel -- exactly and only [$($expectedSorted -join '; ')] fails (got: $($failingNames -join '; '))"
+}
+
+Test-DependencyMutation "Zero dependency groups" @(
+    "dependency groups are exactly net8.0, net9.0, and net10.0 (no more, no less)"
+    "net8.0 dependency group has exactly the expected package ids and version ranges"
+    "net9.0 dependency group has exactly the expected package ids and version ranges"
+    "net10.0 dependency group has exactly the expected package ids and version ranges"
+) { param($m) $m.dependencies.group = @() }
+
+Test-DependencyMutation "Missing net10.0 group entirely" @(
+    "dependency groups are exactly net8.0, net9.0, and net10.0 (no more, no less)"
+    "net10.0 dependency group has exactly the expected package ids and version ranges"
+) { param($m) $m.dependencies.group = @($m.dependencies.group | Where-Object { $_.targetFramework -ne "net10.0" }) }
+
+Test-DependencyMutation "Extra unexpected net7.0 group added" @(
+    "dependency groups are exactly net8.0, net9.0, and net10.0 (no more, no less)"
+) { param($m) $m.dependencies.group = @($m.dependencies.group) + (New-ValidNuspecDependencyGroupFixture "net7.0") }
+
+Test-DependencyMutation "net9.0 group missing MongoDB.Driver" @(
+    "net9.0 dependency group has exactly the expected package ids and version ranges"
+) {
+    param($m)
+    $net9 = $m.dependencies.group | Where-Object { $_.targetFramework -eq "net9.0" }
+    $net9.dependency = @($net9.dependency | Where-Object { $_.id -ne "MongoDB.Driver" })
+}
+
+Test-DependencyMutation "net9.0 group has an extra, unexpected package id" @(
+    "net9.0 dependency group has exactly the expected package ids and version ranges"
+) {
+    param($m)
+    $net9 = $m.dependencies.group | Where-Object { $_.targetFramework -eq "net9.0" }
+    $net9.dependency = @($net9.dependency) + [pscustomobject]@{ id = "Some.Unexpected.Package"; version = "[1.0.0, 2.0.0)" }
+}
+
+Test-DependencyMutation "net8.0 group has a wrong version range for MongoDB.Driver" @(
+    "net8.0 dependency group has exactly the expected package ids and version ranges"
+) {
+    param($m)
+    $net8 = $m.dependencies.group | Where-Object { $_.targetFramework -eq "net8.0" }
+    ($net8.dependency | Where-Object { $_.id -eq "MongoDB.Driver" }).version = "[9.9.9, 10.0.0)"
+}
+
+Test-DependencyMutation "An analyzer package leaks into the net10.0 group's dependency list" @(
+    "net10.0 dependency group has exactly the expected package ids and version ranges"
+    "no analyzer/source-link/build-only packages leak into the nuspec dependency list"
+) {
+    param($m)
+    $net10 = $m.dependencies.group | Where-Object { $_.targetFramework -eq "net10.0" }
+    $net10.dependency = @($net10.dependency) + [pscustomobject]@{ id = "Microsoft.CodeAnalysis.PublicApiAnalyzers"; version = "[5.6.0, 6.0.0)" }
+}
 
 # ---------------------------------------------------------------------------------------------------------------
 Write-Host ""

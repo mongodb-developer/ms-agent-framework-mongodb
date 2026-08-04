@@ -104,6 +104,21 @@ This packaging slice did not widen or narrow any previously verified range;
 it only made sure the ranges are what actually ship in the `.nuspec`
 dependency groups (asserted by `verify-package.ps1`, step 3).
 
+Step 3's nuspec-metadata assertions are exact, not merely "at least one
+dependency exists": `PackageMetadataAssertions.ps1` asserts the packed
+`.nuspec` has *exactly* three dependency groups -- `net8.0`, `net9.0`, and
+`net10.0`, no more and no fewer -- and that each group has *exactly* the
+five expected direct package ids and version ranges
+(`Microsoft.Agents.AI.Abstractions`, `Microsoft.Agents.AI.Workflows`,
+`Microsoft.Extensions.AI.Abstractions`, `Microsoft.Extensions.Logging.Abstractions`,
+`MongoDB.Driver`), and that no analyzer or source-link package (which are
+referenced with `PrivateAssets="all"` and correctly never flow into the
+nuspec) leaks into any group's dependency list. A wrong/missing/extra
+dependency group, a wrong/missing/extra package id within a group, or a
+wrong version range all fail this check individually and by name; see
+`dotnet/scripts/verify-package.metadata.tests.ps1` for the fixtures proving
+each failure mode.
+
 Both Agent Framework `PackageReference` entries in
 `MongoDB.AgentFramework.csproj` (and the matching explicit reference in the
 test project) are expressed via a `$(AgentFrameworkVersion)` MSBuild
@@ -404,15 +419,19 @@ recorded output.
   correct classification [`Missing`/`Unexpected`/`MultiplicityMismatch`];
   two independently random `psmdcp` GUIDs both normalize and pass; a
   malformed non-GUID `psmdcp` filename fails -- all 17 passed).
-- `dotnet/scripts/verify-package.metadata.tests.ps1` (self-test: 24
+- `dotnet/scripts/verify-package.metadata.tests.ps1` (self-test: 33+
   assertions -- `Test-NuspecAssertion`'s contract for `$true`/`$false`
   [without throwing, the shape of the original bug]/thrown/non-boolean/
-  `$null` results; every one of the 14 required nuspec assertions passes
-  against a fully valid fixture; 15 single-field-mutation fixtures each
-  prove *exactly and only* the corresponding named assertion fails -- all
-  24 passed. Reintroducing the original bug shape into
-  `PackageMetadataAssertions.ps1` [ignoring the scriptblock's return value]
-  makes this self-test fail with 19 assertion failures, confirming it is a
+  `$null` results; every one of the 18 required nuspec assertions passes
+  against a fully valid fixture (including the exact-dependency-group/
+  package/version-range/analyzer-absence assertions); single-field and
+  dependency-mutation fixtures each prove *exactly and only* the
+  corresponding named assertion(s) fail -- including zero dependency
+  groups, a missing `net10.0` group, an extra unexpected `net7.0` group, a
+  missing/extra package id within a group, a wrong version range, and an
+  analyzer package leaking into a group -- all passed. Reintroducing the
+  original bug shape into `PackageMetadataAssertions.ps1` [ignoring the
+  scriptblock's return value] makes this self-test fail, confirming it is a
   meaningful regression guard, not a tautological pass).
 - `dotnet/scripts/verify-release-tag.tests.ps1` (self-test: 14 assertions --
   pure tag/version comparison for exact match, mismatch, pre-release
