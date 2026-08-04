@@ -17,16 +17,36 @@ single `<Version>` in
 `dotnet/src/MongoDB.AgentFramework/MongoDB.AgentFramework.csproj`, update
 `dotnet/tests/PackageSmokeTest/PackageSmokeTest.csproj` to consume that version,
 and update `dotnet/CHANGELOG.md`. Run the rehearsal below and merge a reviewed
-pull request to `main`. A push or merge alone never publishes.
+pull request to `main`.
 
-From the Actions UI, select **.NET release coordinator**, choose `main`, enter
-`RELEASE`, and dispatch it. The workflow reads the manifest version, requires a
-valid SemVer, verifies its commit is reachable from `origin/main`, rejects an
-existing immutable tag, and creates the annotated `dotnet-v<version>` tag.
-Only GitHub Actions creates release tags.
+Every push to the staging branch automatically starts these independent
+readiness surfaces:
+
+| Workflow/status check(s) | Required evidence |
+| --- | --- |
+| `dotnet-quality (ubuntu-latest)`, `dotnet-quality (windows-latest)` | format, analyzers, build, every credential-free test project with unique TRX, package/reproducibility/consumer smoke, samples |
+| `.NET manifest release readiness` | stable aggregate that depends on both quality matrix legs and every dynamic `dotnet-agent-framework-compat (<version>)` row; canonical manifest/tag/package agreement and absence of the expected remote tag |
+| `.NET dependency vulnerability audit`, `Repository secret scan`, `CodeQL code scanning (C#)` | dependency, secret, and CodeQL security checks |
+| `SBOM (credential-free)` | package checks, checksums, SPDX and CycloneDX SBOM |
+| `integration-memory`, `integration-history`, `integration-rag-vector`, `integration-rag-search`, `integration-rag-hybrid`, `integration-index-management`, `integration-persistence` | protected-environment credentialed integration categories; may wait for approval |
+
+Configure branch protection for `build/dotnet-packaging-release` to require all
+applicable statuses above. The integration environment must restrict this
+branch and supply `MONGODB_URI` and `MONGODB_DATABASE`; declining approval is
+not equivalent to passing integration readiness.
+
+After a reviewed manifest change reaches `main`, **.NET release coordinator**
+starts automatically because its push trigger is path-filtered to
+`dotnet/src/MongoDB.AgentFramework/MongoDB.AgentFramework.csproj`. A Python-only
+manifest change cannot start it. The coordinator canonicalizes the version with
+`NuGet.Versioning`, verifies the immutable event SHA against freshly fetched
+`origin/main`, and creates `dotnet-v<version>`. Only GitHub Actions creates
+release tags. If the exact tag already targets that exact SHA, a rerun accepts
+it and safely redispatches; a tag at any other SHA fails and is never moved.
+For recovery, manually dispatch the workflow from `main` with `RELEASE`.
 
 GitHub suppresses workflow recursion for a tag created with `GITHUB_TOKEN`.
-The coordinator captures the fixed `workflow_dispatch` `github.sha`, checks out
+The coordinator captures the fixed push or `workflow_dispatch` `github.sha`, checks out
 and tags that exact commit, freshly fetches `origin/main`, proves the SHA is
 reachable, and dispatches the credential-free SBOM workflow on the exact tag;
 it never retargets to a later mutable `main` HEAD and does not wait for a
@@ -107,6 +127,8 @@ publication operation.
 - **Before tag creation:** fix the build branch, rerun the rehearsal, and merge.
 - **Coordinator rejects a version/tag:** do not move or delete a release tag.
   Correct the manifest/changelog on a branch, increment the version, and merge.
+- **Coordinator rerun after tag creation:** rerun the same SHA. Exact-tag
+  idempotency redispatches the credential-free chain; it never retags.
 - **SBOM, tests, compatibility, or attestation fails:** no publication job can
   run. Fix forward with a new version; retain failed run evidence.
 - **Environment approval rejected or configuration missing:** nothing is
@@ -119,5 +141,8 @@ publication operation.
   create the GitHub Release from the retained `dotnet-release-bundle` artifact
   under an audited maintainer procedure. Do not republish different bytes.
 
-No documented command in this page publishes locally. Publication exists only
-in the explicit `main` release chain after protected-environment approval.
+No documented command in this page publishes locally. Automatic release
+coordination can produce all credential-free evidence when governance variables
+are unset, but NuGet publication and GitHub Release creation remain skipped.
+They occur only after ADR 0013 acceptance, explicit governance enablement, and
+protected-environment approval.

@@ -1,6 +1,11 @@
 name: .NET release coordinator
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - dotnet/src/MongoDB.AgentFramework/MongoDB.AgentFramework.csproj
   workflow_dispatch:
     inputs:
       confirm_release:
@@ -11,9 +16,16 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: dotnet-release-${{ github.sha }}
+  cancel-in-progress: false
+
 jobs:
   create-tag-and-dispatch:
-    if: github.ref == 'refs/heads/main' && inputs.confirm_release == 'RELEASE'
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' && inputs.confirm_release == 'RELEASE'))
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -39,22 +51,25 @@ jobs:
           if ($headSha -cne $sha) { throw "Checkout resolved '$headSha', expected workflow SHA '$sha'." }
           git merge-base --is-ancestor $sha origin/main
           if ($LASTEXITCODE -ne 0) { throw "Release commit $sha is not reachable from origin/main." }
+          . ./dotnet/scripts/ReleaseReadiness.ps1
           [xml]$project = Get-Content dotnet/src/MongoDB.AgentFramework/MongoDB.AgentFramework.csproj -Raw
-          $version = [string]$project.Project.PropertyGroup.Version
-          $sdk = (& dotnet --list-sdks | Select-Object -Last 1)
-          if ($sdk -notmatch '^(?<version>[^\s]+)\s+\[(?<path>.+)\]$') { throw 'Unable to locate NuGet.Versioning.' }
-          Add-Type -Path (Join-Path $Matches.path "$($Matches.version)/NuGet.Versioning.dll")
-          $parsed = [NuGet.Versioning.NuGetVersion]::Parse($version)
-          $canonical = $parsed.ToNormalizedString()
-          if ($canonical -cne $version) {
-            throw "Manifest version '$version' is not canonical NuGet SemVer ('$canonical')."
-          }
-          $tag = "dotnet-v$canonical"
+          $version = [string]$project.SelectSingleNode('/Project/PropertyGroup/Version').InnerText
+          $canonical = Get-CanonicalNuGetVersion $version
+          $tag = Get-CanonicalDotNetReleaseTag $canonical
+          $existingTagSha = ''
           git show-ref --verify --quiet "refs/tags/$tag"
-          if ($LASTEXITCODE -eq 0) { throw "Tag '$tag' already exists; versions are immutable." }
+          if ($LASTEXITCODE -eq 0) {
+            $existingTagSha = (git rev-list -n 1 "refs/tags/$tag").Trim()
+          }
+          $disposition = Get-ReleaseTagDisposition -ExpectedSha $sha -ExistingTagSha $existingTagSha
+          if ($disposition -ceq 'conflict') {
+            throw "Immutable tag '$tag' targets '$existingTagSha', not exact release SHA '$sha'."
+          }
           "tag=$tag" | Add-Content $env:GITHUB_OUTPUT
           "sha=$sha" | Add-Content $env:GITHUB_OUTPUT
+          "disposition=$disposition" | Add-Content $env:GITHUB_OUTPUT
       - name: Create and push annotated release tag
+        if: steps.release.outputs.disposition == 'create'
         env:
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
         run: |
@@ -62,6 +77,9 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -a "$RELEASE_TAG" "${{ steps.release.outputs.sha }}" -m "Release MongoDB.AgentFramework ${RELEASE_TAG#dotnet-v}"
           git push origin "refs/tags/$RELEASE_TAG"
+      - name: Accept existing immutable tag at exact release SHA
+        if: steps.release.outputs.disposition == 'already-exact'
+        run: echo "Tag ${{ steps.release.outputs.tag }} already targets exact SHA ${{ steps.release.outputs.sha }}; continuing idempotent dispatch."
       - name: Dispatch credential-free release build for the immutable release SHA
         env:
           GH_TOKEN: ${{ github.token }}

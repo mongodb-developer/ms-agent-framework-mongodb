@@ -7,6 +7,11 @@
 For local non-publishing builds, dynamic Agent Framework compatibility reports,
 version promotion, and protected release configuration, see the
 [.NET release operations guide](../docs/development/release/dotnet-release-operations.md).
+Every push to `build/dotnet-packaging-release` automatically runs the complete
+credential-free readiness/security/SBOM surface and requests protected
+integration approval. A .NET manifest change merged to `main` automatically
+coordinates immutable tagging and credential-free release evidence, but cannot
+publish while the governance approval described below remains unset.
 
 The package version is a **pre-1.0 preview** (`0.1.0-preview.*`). The public
 API surface, package metadata, symbols/SourceLink, and packaging pipeline are

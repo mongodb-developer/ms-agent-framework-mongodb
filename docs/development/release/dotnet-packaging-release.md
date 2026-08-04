@@ -355,12 +355,20 @@ every construction succeeds.
 
 ## CI workflows
 
-Three new, SHA-pinned workflows follow the existing
+Every build-branch push starts quality, security (dependency/secret/CodeQL),
+credential-free SBOM, and protected integration workflows. Compatibility is
+not duplicated in a second workflow because the quality graph already runs the
+complete dynamic latest/previous gate and uploads per-version TRX/JSON/Markdown.
+Branch protection should require their statuses, including the explicit
+manifest-readiness status described below.
+
+The SHA-pinned workflows follow the existing
 `.github/workflows/dotnet-security.yml` pinning convention (comment with the
 human-readable tag next to the pinned commit SHA):
 
-- **`dotnet-quality.yml`** -- runs on `pull_request`, push to `main`, and
-  `workflow_dispatch`; matrix over `ubuntu-latest`/`windows-latest` (the
+- **`dotnet-quality.yml`** -- runs on `pull_request`, pushes to `main` and
+  `build/dotnet-packaging-release`, and `workflow_dispatch`; matrix over
+  `ubuntu-latest`/`windows-latest` (the
   meaningful OS axis, since multi-targeting `net8.0`/`net9.0`/`net10.0`
   already covers every TFM within one build). Steps: checkout, setup .NET
   8/9/10 SDKs, restore, `dotnet format --verify-no-changes`, `dotnet build`
@@ -372,9 +380,15 @@ human-readable tag next to the pinned commit SHA):
   build` only ever accepts a single project/solution argument, so a single
   multi-path invocation is not possible), and artifact upload of the packed
   `.nupkg`/`.snupkg`. Requires no secrets, so it is safe to run against
-  untrusted fork pull requests.
+  untrusted fork pull requests. Build-branch pushes additionally expose
+  `.NET manifest release readiness`, which waits for both package quality and
+  dynamic compatibility, then uses `verify-build-release-readiness.ps1` to
+  canonicalize the manifest with `NuGet.Versioning`, verify the packed
+  package's expected `dotnet-v<version>`, and reject a conflicting remote tag.
+  The helper has no tag or publication operation.
 - **`dotnet-agent-framework-compat`** (a job within `dotnet-quality.yml`,
-  matrixed over `agent-framework-version: ["1.13.0", "1.16.0"]`) -- see
+  matrixed over the dynamically resolved latest and immediately previous
+  common listed stable versions) -- see
   [.NET Agent Framework compatibility matrix](dotnet-agent-framework-compatibility-matrix.md).
   Requires no secrets.
 - **`dotnet-integration.yml`** -- runs the credentialed `integration-*` test
@@ -385,8 +399,9 @@ human-readable tag next to the pinned commit SHA):
   `[Trait("Category", "...")]` in
   `dotnet/tests/MongoDB.AgentFramework.Tests`. Gated behind a
   `dotnet-integration` GitHub Environment supplying `MONGODB_URI`/
-  `MONGODB_DATABASE` secrets, and triggers **only** on push to `main`,
-  `schedule`, and `workflow_dispatch` -- never on `pull_request` -- so
+  `MONGODB_DATABASE` secrets, and triggers **only** on pushes to `main` and
+  `build/dotnet-packaging-release`, `schedule`, and `workflow_dispatch` --
+  never on `pull_request` -- so
   untrusted fork code can never see credentialed secrets. Because a
   job-level `if:` cannot reference `secrets.*`, an absent secret cannot be
   used to skip the job out of existence (which would report a
@@ -406,7 +421,8 @@ human-readable tag next to the pinned commit SHA):
   exactly what a credential-free local contributor run still exercises.
 - **`dotnet-sbom-provenance.yml`** (renamed
   `.NET package SBOM (credential-free verification)`) -- runs on
-  `pull_request`/push-to-`main`/push of a `dotnet-v*` tag/`workflow_dispatch`,
+  `pull_request`/push-to-`main`/push-to-`build/dotnet-packaging-release`/
+  push of a `dotnet-v*` tag/`workflow_dispatch`,
   with only `contents: read` on its single `sbom` job, and requests **no**
   elevated OIDC/attestation permissions anywhere in the file, so it is safe
   to run against untrusted fork pull requests, including a tag push, since
@@ -579,10 +595,15 @@ human-readable tag next to the pinned commit SHA):
 
 The package version is `0.1.0-preview.1`. Per `packages.md`/
 `compatibility-migration.md`, the tag convention is `dotnet-v<version>` (for
-example `dotnet-v0.1.0-preview.1`). The explicit-main
-`.github/workflows/dotnet-release.yml` coordinator validates the manifest and
-main reachability, creates the annotated tag through Actions, and explicitly
-dispatches the credential-free release build. This explicit dispatch is
+example `dotnet-v0.1.0-preview.1`). The
+`.github/workflows/dotnet-release.yml` coordinator starts automatically only
+when the .NET package manifest changes on `main`; manual `RELEASE` dispatch is
+the recovery path. It binds checkout/tag/dispatch to the immutable event SHA,
+validates canonical NuGet SemVer and fresh `origin/main` reachability, creates
+the annotated tag through Actions, and explicitly dispatches the
+credential-free release build. An exact-tag/exact-SHA rerun is accepted and
+redispatched; an existing tag at another SHA is an immutable conflict. This
+explicit dispatch is
 required because a tag created with `GITHUB_TOKEN` does not recursively trigger
 a tag-push workflow. Publication then remains inside the default-branch-sourced
 `workflow_run` trust graph and requires the environment named by

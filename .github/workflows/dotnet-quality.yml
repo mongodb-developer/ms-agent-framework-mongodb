@@ -25,6 +25,7 @@ on:
   push:
     branches:
       - main
+      - build/dotnet-packaging-release
   workflow_dispatch:
 
 permissions:
@@ -73,9 +74,21 @@ jobs:
       # Every project in the solution sets TreatWarningsAsErrors, so a clean exit code here already proves zero
       # warnings; Search-capable-deployment integration tests (Trait Category integration-*) skip cleanly (not
       # fail) without MONGODB_URI/MONGODB_DATABASE, exactly as they do for a local contributor without credentials.
-      - name: Unit tests (Release, all projects)
+      - name: Unit tests (Release, every credential-free project with unique TRX)
+        shell: pwsh
         working-directory: dotnet
-        run: dotnet test MongoDB.AgentFramework.slnx --configuration Release --no-build --logger "console;verbosity=normal"
+        run: >
+          ./scripts/invoke-test-projects-with-trx.ps1 -Configuration Release -NoBuild
+          -ResultsDirectory "artifacts/quality-test-results/${{ runner.os }}"
+
+      - name: Upload quality TRX evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dotnet-quality-trx-${{ runner.os }}
+          path: dotnet/artifacts/quality-test-results/${{ runner.os }}/*.trx
+          if-no-files-found: error
+          retention-days: 14
 
       # Pack, package-content allowlist, reproducibility (double-pack comparison), and the clean isolated NuGet
       # consumer smoke test (tests/PackageSmokeTest) all live in one script so local and CI runs exercise
@@ -182,5 +195,40 @@ jobs:
         with:
           name: agent-framework-compat-${{ matrix.agent-framework-version }}
           path: dotnet/artifacts/agent-framework-compat-results/*
+          if-no-files-found: error
+          retention-days: 14
+
+  dotnet-manifest-readiness:
+    name: .NET manifest release readiness
+    if: github.event_name == 'push' && github.ref == 'refs/heads/build/dotnet-packaging-release'
+    needs: [dotnet-quality, dotnet-agent-framework-compat]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Check out exact build-branch commit
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Set up .NET SDKs
+        uses: actions/setup-dotnet@d4c94342e560b34958eacfc5d055d21461ed1c5d # v5.0.0
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+            10.0.x
+
+      - name: Validate manifest, package, and remote tag readiness
+        shell: pwsh
+        run: ./dotnet/scripts/verify-build-release-readiness.ps1
+
+      - name: Upload manifest readiness report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dotnet-build-release-readiness-${{ github.sha }}
+          path: dotnet/artifacts/build-release-readiness/
           if-no-files-found: error
           retention-days: 14

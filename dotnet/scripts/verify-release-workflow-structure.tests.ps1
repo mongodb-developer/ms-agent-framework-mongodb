@@ -3,6 +3,7 @@ $ErrorActionPreference = 'Stop'
 $root = Resolve-Path (Join-Path $PSScriptRoot '../..')
 $coordinator = Get-Content (Join-Path $root '.github/workflows/dotnet-release.yml') -Raw
 $attestation = Get-Content (Join-Path $root '.github/workflows/dotnet-release-attestation.yml') -Raw
+$readiness = Get-Content (Join-Path $root 'dotnet/scripts/ReleaseReadiness.ps1') -Raw
 $failures = 0
 function Assert-Text([bool]$Condition, [string]$Message) {
     if ($Condition) { Write-Host "[ OK ] $Message" -ForegroundColor Green }
@@ -13,8 +14,14 @@ Assert-Text ($coordinator -match "github\.ref == 'refs/heads/main'") 'Coordinato
 Assert-Text ($coordinator -match 'git merge-base --is-ancestor') 'Coordinator verifies main reachability'
 Assert-Text ($coordinator -match 'ref: \$\{\{ github\.sha \}\}') 'Coordinator checks out immutable workflow_dispatch SHA'
 Assert-Text ($coordinator -match '\$headSha -cne \$sha') 'Coordinator verifies checkout exactly equals workflow SHA'
-Assert-Text ($coordinator -match 'NuGet\.Versioning\.NuGetVersion.*Parse') 'Coordinator parses manifest version with NuGet.Versioning'
-Assert-Text ($coordinator -match '\$canonical -cne \$version') 'Coordinator rejects noncanonical NuGet versions'
+Assert-Text (
+    $coordinator -match 'Get-CanonicalNuGetVersion' -and
+    $readiness -match 'NuGet\.Versioning\.NuGetVersion\]::Parse'
+) 'Coordinator parses manifest version with NuGet.Versioning'
+Assert-Text (
+    $coordinator -match 'Get-CanonicalNuGetVersion' -and
+    $readiness -match '\$canonical -cne \$Version'
+) 'Coordinator rejects noncanonical NuGet versions'
 Assert-Text ($coordinator -match 'git tag -a') 'Only Actions creates the annotated tag'
 Assert-Text ($coordinator -match 'git tag -a "\$RELEASE_TAG" "\$\{\{ steps\.release\.outputs\.sha \}\}"') 'Tag targets immutable workflow SHA explicitly'
 Assert-Text ($coordinator -match 'gh workflow run dotnet-sbom-provenance\.yml --ref "\$RELEASE_TAG"') 'Coordinator dispatches exact tag instead of mutable main'

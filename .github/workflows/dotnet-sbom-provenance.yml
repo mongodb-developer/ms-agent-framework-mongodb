@@ -49,6 +49,7 @@ on:
   push:
     branches:
       - main
+      - build/dotnet-packaging-release
     tags:
       - "dotnet-v*"
   workflow_dispatch:
