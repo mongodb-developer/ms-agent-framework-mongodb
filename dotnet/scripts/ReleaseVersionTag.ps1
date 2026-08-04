@@ -139,11 +139,21 @@ function Test-ValidReleaseTagGrammar {
         tags:` trigger filter, but is re-validated here explicitly rather than assumed, since `startsWith(...)`
         checks elsewhere in the workflow are prefix-only and would also accept a ref like
         `refs/tags/dotnet-v1.2.3-actually-a-different-branch` or one containing `$()`/quote/semicolon shell
-        metacharacters that happens to still start with the expected prefix.
-      - A `workflow_dispatch` event is only ever eligible for EITHER `refs/heads/main` (the one branch this
-        repository's ordinary branch-protection rules are expected to guard) OR a `refs/tags/dotnet-v<version>`
-        ref matching the same release-tag grammar -- never an arbitrary feature/topic branch, regardless of
-        what the operator selected in the manual dispatch form.
+        metacharacters that happens to still start with the expected prefix. A trusted push of such a tag is
+        additionally gated, before this function is even reached, by the `sbom` job's own "Verify tag matches
+        package version" step, which fails the whole run if the packed `.nuspec`'s `<version>` does not exactly
+        equal the pushed tag's version.
+      - A `workflow_dispatch` event is only ever eligible for EXACTLY `refs/heads/main` (the one branch this
+        repository's ordinary branch-protection rules are expected to guard) -- NEVER a release tag, even one
+        with otherwise-valid grammar, and never an arbitrary feature/topic branch. Manual dispatch is
+        deliberately restricted to `main` only rather than also accepting a tag ref, because there is no
+        equivalent trusted tag/package-version match check performed for a manual dispatch the way there is for
+        a `push` (the "Verify tag matches package version" step above only ever runs `if: github.event_name ==
+        'push'`): allowing `workflow_dispatch` against an arbitrary existing tag would let an operator attest a
+        tag whose name claims one version (e.g. `dotnet-v1.2.3`) while the packed artifact actually contains a
+        different one (e.g. `0.1.0-preview.1`), with nothing in this function or the workflow catching that
+        mismatch. Restricting manual attestation to `main` only is the simplest policy that avoids this gap
+        entirely, since `main` has no "package version" of its own to mismatch against.
       - Every other event (`pull_request`, or anything else) is never eligible; a fork pull_request can never
         reach this function with a `push`/`workflow_dispatch` event name in the first place, since this job's
         own `if:` condition already restricts to those two events, but this function still fails closed on
@@ -199,16 +209,15 @@ function Test-AttestationRefEligible {
             }
         }
 
-        if ($Ref -cmatch $releaseTagRefPattern) {
-            return [pscustomobject]@{
-                Eligible = $true
-                Reason   = "workflow_dispatch targeting ref '$Ref', which matches the required 'refs/tags/dotnet-v<version>' release-tag grammar"
-            }
-        }
-
+        # Deliberately NOT eligible even for a ref that matches the release-tag grammar: unlike a `push` of a
+        # tag (gated by the `sbom` job's "Verify tag matches package version" step before this function is ever
+        # reached), a manual `workflow_dispatch` against an existing tag has no equivalent trusted check that the
+        # tag's claimed version actually matches the packed artifact's real version. Restricting manual dispatch
+        # to `main` only closes that gap entirely rather than requiring a second, parallel version-match check
+        # for this path.
         return [pscustomobject]@{
             Eligible = $false
-            Reason   = "workflow_dispatch targeting ref '$Ref', which is neither 'refs/heads/main' nor a valid 'refs/tags/dotnet-v<version>' release tag -- refusing to attest for an arbitrary selected ref"
+            Reason   = "workflow_dispatch targeting ref '$Ref', which is not 'refs/heads/main' -- manual dispatch is restricted to main only (even a validly-formed release tag is refused here, since a manual run has no trusted tag/package-version match check) -- refusing to attest for an arbitrary selected ref"
         }
     }
 
