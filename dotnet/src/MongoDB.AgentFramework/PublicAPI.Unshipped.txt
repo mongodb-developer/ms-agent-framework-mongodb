@@ -1,0 +1,620 @@
+#nullable enable
+const MongoDB.AgentFramework.MongoDBAgentSessionStore.FrameworkSerializationVersion = 1 -> int
+const MongoDB.AgentFramework.MongoDBAgentSessionStore.SchemaVersion = 1 -> int
+const MongoDB.AgentFramework.MongoDBChatHistoryProvider.FrameworkSerializationVersion = 1 -> int
+const MongoDB.AgentFramework.MongoDBChatHistoryProvider.SchemaVersion = 2 -> int
+const MongoDB.AgentFramework.MongoDBCheckpointStore.SchemaVersion = 1 -> int
+const MongoDB.AgentFramework.MongoDBCheckpointStoreOptions.MinimumContinuationTokenSigningKeyLength = 32 -> int
+const MongoDB.AgentFramework.MongoDBRAGFilter.MaxLogicalOperands = 50 -> int
+const MongoDB.AgentFramework.MongoDBRAGFilter.MaxMembershipValues = 200 -> int
+const MongoDB.AgentFramework.MongoDBRAGFilter.MaxNestingDepth = 6 -> int
+const MongoDB.AgentFramework.MongoDBRAGProviderOptions.MaxMetadataFieldNames = 50 -> int
+const MongoDB.AgentFramework.MongoDBRAGProviderOptions.MaxNumCandidates = 10000 -> int
+const MongoDB.AgentFramework.MongoDBRAGProviderOptions.MaxSearchTextFieldNames = 20 -> int
+const MongoDB.AgentFramework.MongoDBRAGProviderOptions.MaxTopK = 1000 -> int
+MongoDB.AgentFramework.MongoDBAgentSessionPage
+MongoDB.AgentFramework.MongoDBAgentSessionPage.<Clone>$() -> MongoDB.AgentFramework.MongoDBAgentSessionPage!
+MongoDB.AgentFramework.MongoDBAgentSessionPage.ContinuationToken.get -> string?
+MongoDB.AgentFramework.MongoDBAgentSessionPage.ContinuationToken.init -> void
+MongoDB.AgentFramework.MongoDBAgentSessionPage.Equals(MongoDB.AgentFramework.MongoDBAgentSessionPage? other) -> bool
+MongoDB.AgentFramework.MongoDBAgentSessionPage.Items.get -> System.Collections.Generic.IReadOnlyList<MongoDB.AgentFramework.MongoDBAgentSessionSummary!>!
+MongoDB.AgentFramework.MongoDBAgentSessionPage.Items.init -> void
+MongoDB.AgentFramework.MongoDBAgentSessionPage.MongoDBAgentSessionPage() -> void
+MongoDB.AgentFramework.MongoDBAgentSessionRecord
+MongoDB.AgentFramework.MongoDBAgentSessionRecord.<Clone>$() -> MongoDB.AgentFramework.MongoDBAgentSessionRecord!
+MongoDB.AgentFramework.MongoDBAgentSessionRecord.CreatedAt.get -> System.DateTimeOffset
+MongoDB.AgentFramework.MongoDBAgentSessionRecord.CreatedAt.init -> void
+MongoDB.AgentFramework.MongoDBAgentSessionRecord.Equals(MongoDB.AgentFramework.MongoDBAgentSessionRecord? other) -> bool
+MongoDB.AgentFramework.MongoDBAgentSessionRecord.ExpiresAt.get -> System.DateTimeOffset?
+MongoDB.AgentFramework.MongoDBAgentSessionRecord.ExpiresAt.init -> void
+MongoDB.AgentFramework.MongoDBAgentSessionRecord.MongoDBAgentSessionRecord() -> void
+MongoDB.AgentFramework.MongoDBAgentSessionRecord.Session.get -> Microsoft.Agents.AI.AgentSession!
+MongoDB.AgentFramework.MongoDBAgentSessionRecord.Session.init -> void
+MongoDB.AgentFramework.MongoDBAgentSessionRecord.SessionId.get -> string!
+MongoDB.AgentFramework.MongoDBAgentSessionRecord.SessionId.init -> void
+MongoDB.AgentFramework.MongoDBAgentSessionRecord.UpdatedAt.get -> System.DateTimeOffset
+MongoDB.AgentFramework.MongoDBAgentSessionRecord.UpdatedAt.init -> void
+MongoDB.AgentFramework.MongoDBAgentSessionRecord.Version.get -> string!
+MongoDB.AgentFramework.MongoDBAgentSessionRecord.Version.init -> void
+MongoDB.AgentFramework.MongoDBAgentSessionStore
+MongoDB.AgentFramework.MongoDBAgentSessionStore.CreateAsync(string! sessionId, Microsoft.Agents.AI.AgentSession! session, Microsoft.Agents.AI.AIAgent! agent, System.DateTimeOffset? expiresAt = null, System.Text.Json.JsonSerializerOptions? serializerOptions = null, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<MongoDB.AgentFramework.MongoDBAgentSessionRecord!>!
+MongoDB.AgentFramework.MongoDBAgentSessionStore.DeleteAsync(string! sessionId, string? expectedVersion = null, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<bool>!
+MongoDB.AgentFramework.MongoDBAgentSessionStore.DisposeAsync() -> System.Threading.Tasks.ValueTask
+MongoDB.AgentFramework.MongoDBAgentSessionStore.EnsureIndexesAsync(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<System.Collections.Generic.IReadOnlyList<string!>!>!
+MongoDB.AgentFramework.MongoDBAgentSessionStore.GetAsync(string! sessionId, Microsoft.Agents.AI.AIAgent! agent, System.Text.Json.JsonSerializerOptions? serializerOptions = null, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<MongoDB.AgentFramework.MongoDBAgentSessionRecord?>!
+MongoDB.AgentFramework.MongoDBAgentSessionStore.ListAsync(int limit, string? continuationToken = null, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<MongoDB.AgentFramework.MongoDBAgentSessionPage!>!
+MongoDB.AgentFramework.MongoDBAgentSessionStore.MongoDBAgentSessionStore(MongoDB.Driver.IMongoClient! client, string! databaseName, string! collectionName, MongoDB.AgentFramework.MongoDBAgentSessionStoreOptions! options) -> void
+MongoDB.AgentFramework.MongoDBAgentSessionStore.MongoDBAgentSessionStore(MongoDB.Driver.IMongoClient! client, string! databaseName, string! collectionName, MongoDB.AgentFramework.MongoDBAgentSessionStoreOptions! options, Microsoft.Extensions.Logging.ILogger<MongoDB.AgentFramework.MongoDBAgentSessionStore!>? logger) -> void
+MongoDB.AgentFramework.MongoDBAgentSessionStore.MongoDBAgentSessionStore(MongoDB.Driver.IMongoCollection<MongoDB.Bson.BsonDocument!>! collection, MongoDB.AgentFramework.MongoDBAgentSessionStoreOptions! options) -> void
+MongoDB.AgentFramework.MongoDBAgentSessionStore.MongoDBAgentSessionStore(MongoDB.Driver.IMongoCollection<MongoDB.Bson.BsonDocument!>! collection, MongoDB.AgentFramework.MongoDBAgentSessionStoreOptions! options, Microsoft.Extensions.Logging.ILogger<MongoDB.AgentFramework.MongoDBAgentSessionStore!>? logger) -> void
+MongoDB.AgentFramework.MongoDBAgentSessionStore.MongoDBAgentSessionStore(MongoDB.Driver.IMongoDatabase! database, string! collectionName, MongoDB.AgentFramework.MongoDBAgentSessionStoreOptions! options) -> void
+MongoDB.AgentFramework.MongoDBAgentSessionStore.MongoDBAgentSessionStore(MongoDB.Driver.IMongoDatabase! database, string! collectionName, MongoDB.AgentFramework.MongoDBAgentSessionStoreOptions! options, Microsoft.Extensions.Logging.ILogger<MongoDB.AgentFramework.MongoDBAgentSessionStore!>? logger) -> void
+MongoDB.AgentFramework.MongoDBAgentSessionStore.MongoDBAgentSessionStore(string! connectionString, string! databaseName, string! collectionName, MongoDB.AgentFramework.MongoDBAgentSessionStoreOptions! options) -> void
+MongoDB.AgentFramework.MongoDBAgentSessionStore.MongoDBAgentSessionStore(string! connectionString, string! databaseName, string! collectionName, MongoDB.AgentFramework.MongoDBAgentSessionStoreOptions! options, Microsoft.Extensions.Logging.ILogger<MongoDB.AgentFramework.MongoDBAgentSessionStore!>? logger) -> void
+MongoDB.AgentFramework.MongoDBAgentSessionStore.OwnsClient.get -> bool
+MongoDB.AgentFramework.MongoDBAgentSessionStore.SetAsync(string! sessionId, Microsoft.Agents.AI.AgentSession! session, Microsoft.Agents.AI.AIAgent! agent, string? expectedVersion = null, System.DateTimeOffset? expiresAt = null, System.Text.Json.JsonSerializerOptions? serializerOptions = null, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<MongoDB.AgentFramework.MongoDBAgentSessionRecord!>!
+MongoDB.AgentFramework.MongoDBAgentSessionStore.ValidateIndexesAsync(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task!
+MongoDB.AgentFramework.MongoDBAgentSessionStoreOptions
+MongoDB.AgentFramework.MongoDBAgentSessionStoreOptions.<Clone>$() -> MongoDB.AgentFramework.MongoDBAgentSessionStoreOptions!
+MongoDB.AgentFramework.MongoDBAgentSessionStoreOptions.AgentId.get -> string!
+MongoDB.AgentFramework.MongoDBAgentSessionStoreOptions.AgentId.init -> void
+MongoDB.AgentFramework.MongoDBAgentSessionStoreOptions.ApplicationId.get -> string!
+MongoDB.AgentFramework.MongoDBAgentSessionStoreOptions.ApplicationId.init -> void
+MongoDB.AgentFramework.MongoDBAgentSessionStoreOptions.DefaultExpiration.get -> System.TimeSpan?
+MongoDB.AgentFramework.MongoDBAgentSessionStoreOptions.DefaultExpiration.init -> void
+MongoDB.AgentFramework.MongoDBAgentSessionStoreOptions.Equals(MongoDB.AgentFramework.MongoDBAgentSessionStoreOptions? other) -> bool
+MongoDB.AgentFramework.MongoDBAgentSessionStoreOptions.MongoDBAgentSessionStoreOptions() -> void
+MongoDB.AgentFramework.MongoDBAgentSessionStoreOptions.PersistenceTimeout.get -> System.TimeSpan?
+MongoDB.AgentFramework.MongoDBAgentSessionStoreOptions.PersistenceTimeout.init -> void
+MongoDB.AgentFramework.MongoDBAgentSessionStoreOptions.RetrievalTimeout.get -> System.TimeSpan?
+MongoDB.AgentFramework.MongoDBAgentSessionStoreOptions.RetrievalTimeout.init -> void
+MongoDB.AgentFramework.MongoDBAgentSessionStoreOptions.TenantId.get -> string?
+MongoDB.AgentFramework.MongoDBAgentSessionStoreOptions.TenantId.init -> void
+MongoDB.AgentFramework.MongoDBAgentSessionStoreOptions.UserId.get -> string?
+MongoDB.AgentFramework.MongoDBAgentSessionStoreOptions.UserId.init -> void
+MongoDB.AgentFramework.MongoDBAgentSessionStoreOptions.Validate() -> void
+MongoDB.AgentFramework.MongoDBAgentSessionSummary
+MongoDB.AgentFramework.MongoDBAgentSessionSummary.<Clone>$() -> MongoDB.AgentFramework.MongoDBAgentSessionSummary!
+MongoDB.AgentFramework.MongoDBAgentSessionSummary.CreatedAt.get -> System.DateTimeOffset
+MongoDB.AgentFramework.MongoDBAgentSessionSummary.CreatedAt.init -> void
+MongoDB.AgentFramework.MongoDBAgentSessionSummary.Equals(MongoDB.AgentFramework.MongoDBAgentSessionSummary? other) -> bool
+MongoDB.AgentFramework.MongoDBAgentSessionSummary.ExpiresAt.get -> System.DateTimeOffset?
+MongoDB.AgentFramework.MongoDBAgentSessionSummary.ExpiresAt.init -> void
+MongoDB.AgentFramework.MongoDBAgentSessionSummary.MongoDBAgentSessionSummary() -> void
+MongoDB.AgentFramework.MongoDBAgentSessionSummary.SessionId.get -> string!
+MongoDB.AgentFramework.MongoDBAgentSessionSummary.SessionId.init -> void
+MongoDB.AgentFramework.MongoDBAgentSessionSummary.UpdatedAt.get -> System.DateTimeOffset
+MongoDB.AgentFramework.MongoDBAgentSessionSummary.UpdatedAt.init -> void
+MongoDB.AgentFramework.MongoDBAgentSessionSummary.Version.get -> string!
+MongoDB.AgentFramework.MongoDBAgentSessionSummary.Version.init -> void
+MongoDB.AgentFramework.MongoDBCapabilityException
+MongoDB.AgentFramework.MongoDBCapabilityException.MongoDBCapabilityException(string! message) -> void
+MongoDB.AgentFramework.MongoDBCapabilityException.MongoDBCapabilityException(string! message, System.Exception! innerException) -> void
+MongoDB.AgentFramework.MongoDBChatHistoryProvider
+MongoDB.AgentFramework.MongoDBChatHistoryProvider.ClearMessagesAsync(string! sessionId, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<long>!
+MongoDB.AgentFramework.MongoDBChatHistoryProvider.DisposeAsync() -> System.Threading.Tasks.ValueTask
+MongoDB.AgentFramework.MongoDBChatHistoryProvider.EnsureIndexesAsync(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<System.Collections.Generic.IReadOnlyList<string!>!>!
+MongoDB.AgentFramework.MongoDBChatHistoryProvider.GetMessagesAsync(string! sessionId, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.ChatMessage!>!>!
+MongoDB.AgentFramework.MongoDBChatHistoryProvider.MongoDBChatHistoryProvider(MongoDB.Driver.IMongoClient! client, string! databaseName, string! collectionName, MongoDB.AgentFramework.MongoDBChatHistoryProviderOptions! options) -> void
+MongoDB.AgentFramework.MongoDBChatHistoryProvider.MongoDBChatHistoryProvider(MongoDB.Driver.IMongoClient! client, string! databaseName, string! collectionName, MongoDB.AgentFramework.MongoDBChatHistoryProviderOptions! options, Microsoft.Extensions.Logging.ILogger<MongoDB.AgentFramework.MongoDBChatHistoryProvider!>? logger) -> void
+MongoDB.AgentFramework.MongoDBChatHistoryProvider.MongoDBChatHistoryProvider(MongoDB.Driver.IMongoCollection<MongoDB.Bson.BsonDocument!>! collection, MongoDB.AgentFramework.MongoDBChatHistoryProviderOptions! options) -> void
+MongoDB.AgentFramework.MongoDBChatHistoryProvider.MongoDBChatHistoryProvider(MongoDB.Driver.IMongoCollection<MongoDB.Bson.BsonDocument!>! collection, MongoDB.AgentFramework.MongoDBChatHistoryProviderOptions! options, Microsoft.Extensions.Logging.ILogger<MongoDB.AgentFramework.MongoDBChatHistoryProvider!>? logger) -> void
+MongoDB.AgentFramework.MongoDBChatHistoryProvider.MongoDBChatHistoryProvider(MongoDB.Driver.IMongoDatabase! database, string! collectionName, MongoDB.AgentFramework.MongoDBChatHistoryProviderOptions! options) -> void
+MongoDB.AgentFramework.MongoDBChatHistoryProvider.MongoDBChatHistoryProvider(MongoDB.Driver.IMongoDatabase! database, string! collectionName, MongoDB.AgentFramework.MongoDBChatHistoryProviderOptions! options, Microsoft.Extensions.Logging.ILogger<MongoDB.AgentFramework.MongoDBChatHistoryProvider!>? logger) -> void
+MongoDB.AgentFramework.MongoDBChatHistoryProvider.MongoDBChatHistoryProvider(string! connectionString, string! databaseName, string! collectionName, MongoDB.AgentFramework.MongoDBChatHistoryProviderOptions! options) -> void
+MongoDB.AgentFramework.MongoDBChatHistoryProvider.MongoDBChatHistoryProvider(string! connectionString, string! databaseName, string! collectionName, MongoDB.AgentFramework.MongoDBChatHistoryProviderOptions! options, Microsoft.Extensions.Logging.ILogger<MongoDB.AgentFramework.MongoDBChatHistoryProvider!>? logger) -> void
+MongoDB.AgentFramework.MongoDBChatHistoryProvider.OwnsClient.get -> bool
+MongoDB.AgentFramework.MongoDBChatHistoryProvider.SaveMessagesAsync(string! sessionId, System.Collections.Generic.IEnumerable<Microsoft.Extensions.AI.ChatMessage!>! messages, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task!
+MongoDB.AgentFramework.MongoDBChatHistoryProvider.ValidateIndexesAsync(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task!
+MongoDB.AgentFramework.MongoDBChatHistoryProviderOptions
+MongoDB.AgentFramework.MongoDBChatHistoryProviderOptions.<Clone>$() -> MongoDB.AgentFramework.MongoDBChatHistoryProviderOptions!
+MongoDB.AgentFramework.MongoDBChatHistoryProviderOptions.AgentId.get -> string!
+MongoDB.AgentFramework.MongoDBChatHistoryProviderOptions.AgentId.init -> void
+MongoDB.AgentFramework.MongoDBChatHistoryProviderOptions.ApplicationId.get -> string!
+MongoDB.AgentFramework.MongoDBChatHistoryProviderOptions.ApplicationId.init -> void
+MongoDB.AgentFramework.MongoDBChatHistoryProviderOptions.Equals(MongoDB.AgentFramework.MongoDBChatHistoryProviderOptions? other) -> bool
+MongoDB.AgentFramework.MongoDBChatHistoryProviderOptions.MaxAge.get -> System.TimeSpan?
+MongoDB.AgentFramework.MongoDBChatHistoryProviderOptions.MaxAge.init -> void
+MongoDB.AgentFramework.MongoDBChatHistoryProviderOptions.MaxMessages.get -> int
+MongoDB.AgentFramework.MongoDBChatHistoryProviderOptions.MaxMessages.init -> void
+MongoDB.AgentFramework.MongoDBChatHistoryProviderOptions.MongoDBChatHistoryProviderOptions() -> void
+MongoDB.AgentFramework.MongoDBChatHistoryProviderOptions.PersistenceTimeout.get -> System.TimeSpan?
+MongoDB.AgentFramework.MongoDBChatHistoryProviderOptions.PersistenceTimeout.init -> void
+MongoDB.AgentFramework.MongoDBChatHistoryProviderOptions.ProvideOutputMessageFilter.get -> System.Func<System.Collections.Generic.IEnumerable<Microsoft.Extensions.AI.ChatMessage!>!, System.Collections.Generic.IEnumerable<Microsoft.Extensions.AI.ChatMessage!>!>?
+MongoDB.AgentFramework.MongoDBChatHistoryProviderOptions.ProvideOutputMessageFilter.init -> void
+MongoDB.AgentFramework.MongoDBChatHistoryProviderOptions.Retention.get -> System.TimeSpan?
+MongoDB.AgentFramework.MongoDBChatHistoryProviderOptions.Retention.init -> void
+MongoDB.AgentFramework.MongoDBChatHistoryProviderOptions.RetrievalTimeout.get -> System.TimeSpan?
+MongoDB.AgentFramework.MongoDBChatHistoryProviderOptions.RetrievalTimeout.init -> void
+MongoDB.AgentFramework.MongoDBChatHistoryProviderOptions.SessionId.get -> string!
+MongoDB.AgentFramework.MongoDBChatHistoryProviderOptions.SessionId.init -> void
+MongoDB.AgentFramework.MongoDBChatHistoryProviderOptions.StoreInputRequestMessageFilter.get -> System.Func<System.Collections.Generic.IEnumerable<Microsoft.Extensions.AI.ChatMessage!>!, System.Collections.Generic.IEnumerable<Microsoft.Extensions.AI.ChatMessage!>!>?
+MongoDB.AgentFramework.MongoDBChatHistoryProviderOptions.StoreInputRequestMessageFilter.init -> void
+MongoDB.AgentFramework.MongoDBChatHistoryProviderOptions.StoreInputResponseMessageFilter.get -> System.Func<System.Collections.Generic.IEnumerable<Microsoft.Extensions.AI.ChatMessage!>!, System.Collections.Generic.IEnumerable<Microsoft.Extensions.AI.ChatMessage!>!>?
+MongoDB.AgentFramework.MongoDBChatHistoryProviderOptions.StoreInputResponseMessageFilter.init -> void
+MongoDB.AgentFramework.MongoDBChatHistoryProviderOptions.TenantId.get -> string?
+MongoDB.AgentFramework.MongoDBChatHistoryProviderOptions.TenantId.init -> void
+MongoDB.AgentFramework.MongoDBChatHistoryProviderOptions.Validate() -> void
+MongoDB.AgentFramework.MongoDBCheckpointPage
+MongoDB.AgentFramework.MongoDBCheckpointPage.<Clone>$() -> MongoDB.AgentFramework.MongoDBCheckpointPage!
+MongoDB.AgentFramework.MongoDBCheckpointPage.ContinuationToken.get -> string?
+MongoDB.AgentFramework.MongoDBCheckpointPage.ContinuationToken.init -> void
+MongoDB.AgentFramework.MongoDBCheckpointPage.Equals(MongoDB.AgentFramework.MongoDBCheckpointPage? other) -> bool
+MongoDB.AgentFramework.MongoDBCheckpointPage.Items.get -> System.Collections.Generic.IReadOnlyList<MongoDB.AgentFramework.MongoDBCheckpointSummary!>!
+MongoDB.AgentFramework.MongoDBCheckpointPage.Items.init -> void
+MongoDB.AgentFramework.MongoDBCheckpointPage.MongoDBCheckpointPage() -> void
+MongoDB.AgentFramework.MongoDBCheckpointRecord
+MongoDB.AgentFramework.MongoDBCheckpointRecord.<Clone>$() -> MongoDB.AgentFramework.MongoDBCheckpointRecord!
+MongoDB.AgentFramework.MongoDBCheckpointRecord.CheckpointId.get -> string!
+MongoDB.AgentFramework.MongoDBCheckpointRecord.CheckpointId.init -> void
+MongoDB.AgentFramework.MongoDBCheckpointRecord.CreatedAt.get -> System.DateTimeOffset
+MongoDB.AgentFramework.MongoDBCheckpointRecord.CreatedAt.init -> void
+MongoDB.AgentFramework.MongoDBCheckpointRecord.Equals(MongoDB.AgentFramework.MongoDBCheckpointRecord? other) -> bool
+MongoDB.AgentFramework.MongoDBCheckpointRecord.ExpiresAt.get -> System.DateTimeOffset?
+MongoDB.AgentFramework.MongoDBCheckpointRecord.ExpiresAt.init -> void
+MongoDB.AgentFramework.MongoDBCheckpointRecord.MongoDBCheckpointRecord() -> void
+MongoDB.AgentFramework.MongoDBCheckpointRecord.ParentCheckpointId.get -> string?
+MongoDB.AgentFramework.MongoDBCheckpointRecord.ParentCheckpointId.init -> void
+MongoDB.AgentFramework.MongoDBCheckpointRecord.Payload.get -> System.Text.Json.JsonElement
+MongoDB.AgentFramework.MongoDBCheckpointRecord.Payload.init -> void
+MongoDB.AgentFramework.MongoDBCheckpointRecord.Sequence.get -> long
+MongoDB.AgentFramework.MongoDBCheckpointRecord.Sequence.init -> void
+MongoDB.AgentFramework.MongoDBCheckpointRecord.SessionId.get -> string!
+MongoDB.AgentFramework.MongoDBCheckpointRecord.SessionId.init -> void
+MongoDB.AgentFramework.MongoDBCheckpointStore
+MongoDB.AgentFramework.MongoDBCheckpointStore.DeleteCheckpointAsync(string! sessionId, string! checkpointId, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<bool>!
+MongoDB.AgentFramework.MongoDBCheckpointStore.DisposeAsync() -> System.Threading.Tasks.ValueTask
+MongoDB.AgentFramework.MongoDBCheckpointStore.EnsureIndexesAsync(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<System.Collections.Generic.IReadOnlyList<string!>!>!
+MongoDB.AgentFramework.MongoDBCheckpointStore.GetLatestCheckpointAsync(string! sessionId, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<MongoDB.AgentFramework.MongoDBCheckpointRecord?>!
+MongoDB.AgentFramework.MongoDBCheckpointStore.ListCheckpointsAsync(string! sessionId, int limit, string? continuationToken = null, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<MongoDB.AgentFramework.MongoDBCheckpointPage!>!
+MongoDB.AgentFramework.MongoDBCheckpointStore.LoadCheckpointAsync(string! sessionId, string! checkpointId, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<MongoDB.AgentFramework.MongoDBCheckpointRecord?>!
+MongoDB.AgentFramework.MongoDBCheckpointStore.MongoDBCheckpointStore(MongoDB.Driver.IMongoClient! client, string! databaseName, string! collectionName, MongoDB.AgentFramework.MongoDBCheckpointStoreOptions! options) -> void
+MongoDB.AgentFramework.MongoDBCheckpointStore.MongoDBCheckpointStore(MongoDB.Driver.IMongoClient! client, string! databaseName, string! collectionName, MongoDB.AgentFramework.MongoDBCheckpointStoreOptions! options, Microsoft.Extensions.Logging.ILogger<MongoDB.AgentFramework.MongoDBCheckpointStore!>? logger) -> void
+MongoDB.AgentFramework.MongoDBCheckpointStore.MongoDBCheckpointStore(MongoDB.Driver.IMongoCollection<MongoDB.Bson.BsonDocument!>! collection, MongoDB.AgentFramework.MongoDBCheckpointStoreOptions! options) -> void
+MongoDB.AgentFramework.MongoDBCheckpointStore.MongoDBCheckpointStore(MongoDB.Driver.IMongoCollection<MongoDB.Bson.BsonDocument!>! collection, MongoDB.AgentFramework.MongoDBCheckpointStoreOptions! options, Microsoft.Extensions.Logging.ILogger<MongoDB.AgentFramework.MongoDBCheckpointStore!>? logger) -> void
+MongoDB.AgentFramework.MongoDBCheckpointStore.MongoDBCheckpointStore(MongoDB.Driver.IMongoDatabase! database, string! collectionName, MongoDB.AgentFramework.MongoDBCheckpointStoreOptions! options) -> void
+MongoDB.AgentFramework.MongoDBCheckpointStore.MongoDBCheckpointStore(MongoDB.Driver.IMongoDatabase! database, string! collectionName, MongoDB.AgentFramework.MongoDBCheckpointStoreOptions! options, Microsoft.Extensions.Logging.ILogger<MongoDB.AgentFramework.MongoDBCheckpointStore!>? logger) -> void
+MongoDB.AgentFramework.MongoDBCheckpointStore.MongoDBCheckpointStore(string! connectionString, string! databaseName, string! collectionName, MongoDB.AgentFramework.MongoDBCheckpointStoreOptions! options) -> void
+MongoDB.AgentFramework.MongoDBCheckpointStore.MongoDBCheckpointStore(string! connectionString, string! databaseName, string! collectionName, MongoDB.AgentFramework.MongoDBCheckpointStoreOptions! options, Microsoft.Extensions.Logging.ILogger<MongoDB.AgentFramework.MongoDBCheckpointStore!>? logger) -> void
+MongoDB.AgentFramework.MongoDBCheckpointStore.OwnsClient.get -> bool
+MongoDB.AgentFramework.MongoDBCheckpointStore.SaveCheckpointAsync(string! sessionId, string! checkpointId, System.Text.Json.JsonElement payload, string? parentCheckpointId = null, System.DateTimeOffset? expiresAt = null, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<MongoDB.AgentFramework.MongoDBCheckpointRecord!>!
+MongoDB.AgentFramework.MongoDBCheckpointStore.ValidateIndexesAsync(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task!
+MongoDB.AgentFramework.MongoDBCheckpointStoreOptions
+MongoDB.AgentFramework.MongoDBCheckpointStoreOptions.<Clone>$() -> MongoDB.AgentFramework.MongoDBCheckpointStoreOptions!
+MongoDB.AgentFramework.MongoDBCheckpointStoreOptions.ContinuationTokenSigningKey.get -> byte[]!
+MongoDB.AgentFramework.MongoDBCheckpointStoreOptions.ContinuationTokenSigningKey.init -> void
+MongoDB.AgentFramework.MongoDBCheckpointStoreOptions.DefaultExpiration.get -> System.TimeSpan?
+MongoDB.AgentFramework.MongoDBCheckpointStoreOptions.DefaultExpiration.init -> void
+MongoDB.AgentFramework.MongoDBCheckpointStoreOptions.Equals(MongoDB.AgentFramework.MongoDBCheckpointStoreOptions? other) -> bool
+MongoDB.AgentFramework.MongoDBCheckpointStoreOptions.MongoDBCheckpointStoreOptions() -> void
+MongoDB.AgentFramework.MongoDBCheckpointStoreOptions.PersistenceTimeout.get -> System.TimeSpan?
+MongoDB.AgentFramework.MongoDBCheckpointStoreOptions.PersistenceTimeout.init -> void
+MongoDB.AgentFramework.MongoDBCheckpointStoreOptions.RetrievalTimeout.get -> System.TimeSpan?
+MongoDB.AgentFramework.MongoDBCheckpointStoreOptions.RetrievalTimeout.init -> void
+MongoDB.AgentFramework.MongoDBCheckpointStoreOptions.TenantId.get -> string?
+MongoDB.AgentFramework.MongoDBCheckpointStoreOptions.TenantId.init -> void
+MongoDB.AgentFramework.MongoDBCheckpointStoreOptions.Validate() -> void
+MongoDB.AgentFramework.MongoDBCheckpointStoreOptions.WorkflowId.get -> string!
+MongoDB.AgentFramework.MongoDBCheckpointStoreOptions.WorkflowId.init -> void
+MongoDB.AgentFramework.MongoDBCheckpointSummary
+MongoDB.AgentFramework.MongoDBCheckpointSummary.<Clone>$() -> MongoDB.AgentFramework.MongoDBCheckpointSummary!
+MongoDB.AgentFramework.MongoDBCheckpointSummary.CheckpointId.get -> string!
+MongoDB.AgentFramework.MongoDBCheckpointSummary.CheckpointId.init -> void
+MongoDB.AgentFramework.MongoDBCheckpointSummary.CreatedAt.get -> System.DateTimeOffset
+MongoDB.AgentFramework.MongoDBCheckpointSummary.CreatedAt.init -> void
+MongoDB.AgentFramework.MongoDBCheckpointSummary.Equals(MongoDB.AgentFramework.MongoDBCheckpointSummary? other) -> bool
+MongoDB.AgentFramework.MongoDBCheckpointSummary.ExpiresAt.get -> System.DateTimeOffset?
+MongoDB.AgentFramework.MongoDBCheckpointSummary.ExpiresAt.init -> void
+MongoDB.AgentFramework.MongoDBCheckpointSummary.MongoDBCheckpointSummary() -> void
+MongoDB.AgentFramework.MongoDBCheckpointSummary.ParentCheckpointId.get -> string?
+MongoDB.AgentFramework.MongoDBCheckpointSummary.ParentCheckpointId.init -> void
+MongoDB.AgentFramework.MongoDBCheckpointSummary.Sequence.get -> long
+MongoDB.AgentFramework.MongoDBCheckpointSummary.Sequence.init -> void
+MongoDB.AgentFramework.MongoDBCheckpointSummary.SessionId.get -> string!
+MongoDB.AgentFramework.MongoDBCheckpointSummary.SessionId.init -> void
+MongoDB.AgentFramework.MongoDBConcurrencyException
+MongoDB.AgentFramework.MongoDBConcurrencyException.MongoDBConcurrencyException(string! message) -> void
+MongoDB.AgentFramework.MongoDBConcurrencyException.MongoDBConcurrencyException(string! message, System.Exception! innerException) -> void
+MongoDB.AgentFramework.MongoDBConfigurationException
+MongoDB.AgentFramework.MongoDBConfigurationException.MongoDBConfigurationException(string! message) -> void
+MongoDB.AgentFramework.MongoDBConfigurationException.MongoDBConfigurationException(string! message, System.Exception! innerException) -> void
+MongoDB.AgentFramework.MongoDBEmbeddingException
+MongoDB.AgentFramework.MongoDBEmbeddingException.MongoDBEmbeddingException(string! message) -> void
+MongoDB.AgentFramework.MongoDBEmbeddingException.MongoDBEmbeddingException(string! message, System.Exception! innerException) -> void
+MongoDB.AgentFramework.MongoDBIndexAlreadyExistsException
+MongoDB.AgentFramework.MongoDBIndexAlreadyExistsException.MongoDBIndexAlreadyExistsException(string! message) -> void
+MongoDB.AgentFramework.MongoDBIndexAlreadyExistsException.MongoDBIndexAlreadyExistsException(string! message, System.Exception! innerException) -> void
+MongoDB.AgentFramework.MongoDBIndexComparison
+MongoDB.AgentFramework.MongoDBIndexComparison.<Clone>$() -> MongoDB.AgentFramework.MongoDBIndexComparison!
+MongoDB.AgentFramework.MongoDBIndexComparison.CompatibleDifferences.get -> System.Collections.Generic.IReadOnlyList<string!>!
+MongoDB.AgentFramework.MongoDBIndexComparison.Equals(MongoDB.AgentFramework.MongoDBIndexComparison? other) -> bool
+MongoDB.AgentFramework.MongoDBIndexComparison.IsCompatible.get -> bool
+MongoDB.AgentFramework.MongoDBIndexComparison.Mismatches.get -> System.Collections.Generic.IReadOnlyList<string!>!
+MongoDB.AgentFramework.MongoDBIndexComparison.MongoDBIndexComparison(System.Collections.Generic.IReadOnlyList<string!>! mismatches, System.Collections.Generic.IReadOnlyList<string!>? compatibleDifferences = null) -> void
+MongoDB.AgentFramework.MongoDBIndexException
+MongoDB.AgentFramework.MongoDBIndexException.MongoDBIndexException(string! message) -> void
+MongoDB.AgentFramework.MongoDBIndexException.MongoDBIndexException(string! message, System.Exception! innerException) -> void
+MongoDB.AgentFramework.MongoDBIndexFailedException
+MongoDB.AgentFramework.MongoDBIndexFailedException.MongoDBIndexFailedException(string! message) -> void
+MongoDB.AgentFramework.MongoDBIndexInfo
+MongoDB.AgentFramework.MongoDBIndexInfo.<Clone>$() -> MongoDB.AgentFramework.MongoDBIndexInfo!
+MongoDB.AgentFramework.MongoDBIndexInfo.Equals(MongoDB.AgentFramework.MongoDBIndexInfo? other) -> bool
+MongoDB.AgentFramework.MongoDBIndexInfo.MongoDBIndexInfo(string! name, string! type, MongoDB.AgentFramework.MongoDBIndexStatus status, bool queryable, string! rawStatus, MongoDB.Bson.BsonDocument? rawDefinition = null) -> void
+MongoDB.AgentFramework.MongoDBIndexInfo.Name.get -> string!
+MongoDB.AgentFramework.MongoDBIndexInfo.Queryable.get -> bool
+MongoDB.AgentFramework.MongoDBIndexInfo.RawDefinition.get -> MongoDB.Bson.BsonDocument!
+MongoDB.AgentFramework.MongoDBIndexInfo.RawStatus.get -> string!
+MongoDB.AgentFramework.MongoDBIndexInfo.Status.get -> MongoDB.AgentFramework.MongoDBIndexStatus
+MongoDB.AgentFramework.MongoDBIndexInfo.Type.get -> string!
+MongoDB.AgentFramework.MongoDBIndexMismatchException
+MongoDB.AgentFramework.MongoDBIndexMismatchException.MongoDBIndexMismatchException(string! message) -> void
+MongoDB.AgentFramework.MongoDBIndexMissingException
+MongoDB.AgentFramework.MongoDBIndexMissingException.MongoDBIndexMissingException(string! message) -> void
+MongoDB.AgentFramework.MongoDBIndexNotReadyException
+MongoDB.AgentFramework.MongoDBIndexNotReadyException.MongoDBIndexNotReadyException(string! message) -> void
+MongoDB.AgentFramework.MongoDBIndexPrivilegeException
+MongoDB.AgentFramework.MongoDBIndexPrivilegeException.MongoDBIndexPrivilegeException(string! message) -> void
+MongoDB.AgentFramework.MongoDBIndexPrivilegeException.MongoDBIndexPrivilegeException(string! message, System.Exception! innerException) -> void
+MongoDB.AgentFramework.MongoDBIndexStatus
+MongoDB.AgentFramework.MongoDBIndexStatus.Building = 1 -> MongoDB.AgentFramework.MongoDBIndexStatus
+MongoDB.AgentFramework.MongoDBIndexStatus.Failed = 4 -> MongoDB.AgentFramework.MongoDBIndexStatus
+MongoDB.AgentFramework.MongoDBIndexStatus.Missing = 0 -> MongoDB.AgentFramework.MongoDBIndexStatus
+MongoDB.AgentFramework.MongoDBIndexStatus.Ready = 3 -> MongoDB.AgentFramework.MongoDBIndexStatus
+MongoDB.AgentFramework.MongoDBIndexStatus.ReadyNotQueryable = 2 -> MongoDB.AgentFramework.MongoDBIndexStatus
+MongoDB.AgentFramework.MongoDBIntegrationException
+MongoDB.AgentFramework.MongoDBIntegrationException.MongoDBIntegrationException(string! message) -> void
+MongoDB.AgentFramework.MongoDBIntegrationException.MongoDBIntegrationException(string! message, System.Exception! innerException) -> void
+MongoDB.AgentFramework.MongoDBMappingException
+MongoDB.AgentFramework.MongoDBMappingException.MongoDBMappingException(string! message) -> void
+MongoDB.AgentFramework.MongoDBMappingException.MongoDBMappingException(string! message, System.Exception! innerException) -> void
+MongoDB.AgentFramework.MongoDBMemoryIndexManager
+MongoDB.AgentFramework.MongoDBMemoryIndexManager.CreateIndexAsync(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<MongoDB.AgentFramework.MongoDBIndexInfo!>!
+MongoDB.AgentFramework.MongoDBMemoryIndexManager.Definition.get -> MongoDB.AgentFramework.MongoDBVectorSearchIndexDefinition!
+MongoDB.AgentFramework.MongoDBMemoryIndexManager.DisposeAsync() -> System.Threading.Tasks.ValueTask
+MongoDB.AgentFramework.MongoDBMemoryIndexManager.DropIndexAsync(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task!
+MongoDB.AgentFramework.MongoDBMemoryIndexManager.EnsureIndexAsync(bool waitUntilReady = false, System.TimeSpan? timeout = null, System.TimeSpan? pollInterval = null, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<MongoDB.AgentFramework.MongoDBIndexInfo!>!
+MongoDB.AgentFramework.MongoDBMemoryIndexManager.GetIndexAsync(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<MongoDB.AgentFramework.MongoDBIndexInfo?>!
+MongoDB.AgentFramework.MongoDBMemoryIndexManager.ListIndexesAsync(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<System.Collections.Generic.IReadOnlyList<MongoDB.AgentFramework.MongoDBIndexInfo!>!>!
+MongoDB.AgentFramework.MongoDBMemoryIndexManager.MongoDBMemoryIndexManager(MongoDB.Driver.IMongoClient! client, string! databaseName, string! collectionName, MongoDB.AgentFramework.MongoDBVectorSearchIndexDefinition! definition) -> void
+MongoDB.AgentFramework.MongoDBMemoryIndexManager.MongoDBMemoryIndexManager(MongoDB.Driver.IMongoClient! client, string! databaseName, string! collectionName, MongoDB.AgentFramework.MongoDBVectorSearchIndexDefinition! definition, Microsoft.Extensions.Logging.ILogger<MongoDB.AgentFramework.MongoDBMemoryIndexManager!>? logger) -> void
+MongoDB.AgentFramework.MongoDBMemoryIndexManager.MongoDBMemoryIndexManager(MongoDB.Driver.IMongoCollection<MongoDB.Bson.BsonDocument!>! collection, MongoDB.AgentFramework.MongoDBVectorSearchIndexDefinition! definition) -> void
+MongoDB.AgentFramework.MongoDBMemoryIndexManager.MongoDBMemoryIndexManager(MongoDB.Driver.IMongoCollection<MongoDB.Bson.BsonDocument!>! collection, MongoDB.AgentFramework.MongoDBVectorSearchIndexDefinition! definition, Microsoft.Extensions.Logging.ILogger<MongoDB.AgentFramework.MongoDBMemoryIndexManager!>? logger) -> void
+MongoDB.AgentFramework.MongoDBMemoryIndexManager.MongoDBMemoryIndexManager(MongoDB.Driver.IMongoDatabase! database, string! collectionName, MongoDB.AgentFramework.MongoDBVectorSearchIndexDefinition! definition) -> void
+MongoDB.AgentFramework.MongoDBMemoryIndexManager.MongoDBMemoryIndexManager(MongoDB.Driver.IMongoDatabase! database, string! collectionName, MongoDB.AgentFramework.MongoDBVectorSearchIndexDefinition! definition, Microsoft.Extensions.Logging.ILogger<MongoDB.AgentFramework.MongoDBMemoryIndexManager!>? logger) -> void
+MongoDB.AgentFramework.MongoDBMemoryIndexManager.MongoDBMemoryIndexManager(string! connectionString, string! databaseName, string! collectionName, MongoDB.AgentFramework.MongoDBVectorSearchIndexDefinition! definition) -> void
+MongoDB.AgentFramework.MongoDBMemoryIndexManager.MongoDBMemoryIndexManager(string! connectionString, string! databaseName, string! collectionName, MongoDB.AgentFramework.MongoDBVectorSearchIndexDefinition! definition, Microsoft.Extensions.Logging.ILogger<MongoDB.AgentFramework.MongoDBMemoryIndexManager!>? logger) -> void
+MongoDB.AgentFramework.MongoDBMemoryIndexManager.OwnsClient.get -> bool
+MongoDB.AgentFramework.MongoDBMemoryIndexManager.UpdateIndexAsync(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task!
+MongoDB.AgentFramework.MongoDBMemoryIndexManager.ValidateIndexAsync(bool requireReady = true, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<MongoDB.AgentFramework.MongoDBIndexComparison!>!
+MongoDB.AgentFramework.MongoDBMemoryIndexManager.WaitUntilReadyAsync(System.TimeSpan? timeout = null, System.TimeSpan? pollInterval = null, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<MongoDB.AgentFramework.MongoDBIndexInfo!>!
+MongoDB.AgentFramework.MongoDBMemoryMetadata
+MongoDB.AgentFramework.MongoDBMemoryMetadata.<Clone>$() -> MongoDB.AgentFramework.MongoDBMemoryMetadata!
+MongoDB.AgentFramework.MongoDBMemoryMetadata.AgentId.get -> string?
+MongoDB.AgentFramework.MongoDBMemoryMetadata.AgentId.init -> void
+MongoDB.AgentFramework.MongoDBMemoryMetadata.ApplicationId.get -> string?
+MongoDB.AgentFramework.MongoDBMemoryMetadata.ApplicationId.init -> void
+MongoDB.AgentFramework.MongoDBMemoryMetadata.CreatedAt.get -> System.DateTimeOffset
+MongoDB.AgentFramework.MongoDBMemoryMetadata.CreatedAt.init -> void
+MongoDB.AgentFramework.MongoDBMemoryMetadata.Deconstruct(out string! MemoryId, out string! Role, out System.DateTimeOffset CreatedAt, out string? ApplicationId, out string? AgentId, out string? UserId, out string? SessionId, out System.DateTimeOffset? ExpiresAt) -> void
+MongoDB.AgentFramework.MongoDBMemoryMetadata.Equals(MongoDB.AgentFramework.MongoDBMemoryMetadata? other) -> bool
+MongoDB.AgentFramework.MongoDBMemoryMetadata.ExpiresAt.get -> System.DateTimeOffset?
+MongoDB.AgentFramework.MongoDBMemoryMetadata.ExpiresAt.init -> void
+MongoDB.AgentFramework.MongoDBMemoryMetadata.MemoryId.get -> string!
+MongoDB.AgentFramework.MongoDBMemoryMetadata.MemoryId.init -> void
+MongoDB.AgentFramework.MongoDBMemoryMetadata.MongoDBMemoryMetadata(string! MemoryId, string! Role, System.DateTimeOffset CreatedAt, string? ApplicationId, string? AgentId, string? UserId, string? SessionId, System.DateTimeOffset? ExpiresAt) -> void
+MongoDB.AgentFramework.MongoDBMemoryMetadata.Role.get -> string!
+MongoDB.AgentFramework.MongoDBMemoryMetadata.Role.init -> void
+MongoDB.AgentFramework.MongoDBMemoryMetadata.SessionId.get -> string?
+MongoDB.AgentFramework.MongoDBMemoryMetadata.SessionId.init -> void
+MongoDB.AgentFramework.MongoDBMemoryMetadata.UserId.get -> string?
+MongoDB.AgentFramework.MongoDBMemoryMetadata.UserId.init -> void
+MongoDB.AgentFramework.MongoDBMemoryMetadataPage
+MongoDB.AgentFramework.MongoDBMemoryMetadataPage.<Clone>$() -> MongoDB.AgentFramework.MongoDBMemoryMetadataPage!
+MongoDB.AgentFramework.MongoDBMemoryMetadataPage.Deconstruct(out System.Collections.Generic.IReadOnlyList<MongoDB.AgentFramework.MongoDBMemoryMetadata!>! Items, out string? NextCursor) -> void
+MongoDB.AgentFramework.MongoDBMemoryMetadataPage.Equals(MongoDB.AgentFramework.MongoDBMemoryMetadataPage? other) -> bool
+MongoDB.AgentFramework.MongoDBMemoryMetadataPage.Items.get -> System.Collections.Generic.IReadOnlyList<MongoDB.AgentFramework.MongoDBMemoryMetadata!>!
+MongoDB.AgentFramework.MongoDBMemoryMetadataPage.Items.init -> void
+MongoDB.AgentFramework.MongoDBMemoryMetadataPage.MongoDBMemoryMetadataPage(System.Collections.Generic.IReadOnlyList<MongoDB.AgentFramework.MongoDBMemoryMetadata!>! Items, string? NextCursor) -> void
+MongoDB.AgentFramework.MongoDBMemoryMetadataPage.NextCursor.get -> string?
+MongoDB.AgentFramework.MongoDBMemoryMetadataPage.NextCursor.init -> void
+MongoDB.AgentFramework.MongoDBMemoryProvider
+MongoDB.AgentFramework.MongoDBMemoryProvider.ClearSessionAsync(string! sessionId, MongoDB.AgentFramework.MongoDBMemoryScope! scope, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<long>!
+MongoDB.AgentFramework.MongoDBMemoryProvider.ClearUserAsync(MongoDB.AgentFramework.MongoDBMemoryScope! scope, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<long>!
+MongoDB.AgentFramework.MongoDBMemoryProvider.DeleteByIdAsync(string! memoryId, MongoDB.AgentFramework.MongoDBMemoryScope! scope, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<long>!
+MongoDB.AgentFramework.MongoDBMemoryProvider.DisposeAsync() -> System.Threading.Tasks.ValueTask
+MongoDB.AgentFramework.MongoDBMemoryProvider.EnsureVectorSearchIndexAsync(bool waitUntilReady = false, System.TimeSpan? timeout = null, System.TimeSpan? pollInterval = null, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<string!>!
+MongoDB.AgentFramework.MongoDBMemoryProvider.ListAsync(MongoDB.AgentFramework.MongoDBMemoryScope! scope, int pageSize = 50, string? cursor = null, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<MongoDB.AgentFramework.MongoDBMemoryMetadataPage!>!
+MongoDB.AgentFramework.MongoDBMemoryProvider.MongoDBMemoryProvider(MongoDB.Driver.IMongoClient! client, string! databaseName, string! collectionName, Microsoft.Extensions.AI.IEmbeddingGenerator<string!, Microsoft.Extensions.AI.Embedding<float>!>! embeddingGenerator, int vectorDimensions, System.Func<Microsoft.Agents.AI.AgentSession?, MongoDB.AgentFramework.MongoDBMemoryProvider.State!>! stateFactory, MongoDB.AgentFramework.MongoDBMemoryProviderOptions? options = null, Microsoft.Extensions.Logging.ILogger<MongoDB.AgentFramework.MongoDBMemoryProvider!>? logger = null) -> void
+MongoDB.AgentFramework.MongoDBMemoryProvider.MongoDBMemoryProvider(MongoDB.Driver.IMongoCollection<MongoDB.Bson.BsonDocument!>! collection, Microsoft.Extensions.AI.IEmbeddingGenerator<string!, Microsoft.Extensions.AI.Embedding<float>!>! embeddingGenerator, int vectorDimensions, System.Func<Microsoft.Agents.AI.AgentSession?, MongoDB.AgentFramework.MongoDBMemoryProvider.State!>! stateFactory, MongoDB.AgentFramework.MongoDBMemoryProviderOptions? options = null, Microsoft.Extensions.Logging.ILogger<MongoDB.AgentFramework.MongoDBMemoryProvider!>? logger = null) -> void
+MongoDB.AgentFramework.MongoDBMemoryProvider.MongoDBMemoryProvider(MongoDB.Driver.IMongoDatabase! database, string! collectionName, Microsoft.Extensions.AI.IEmbeddingGenerator<string!, Microsoft.Extensions.AI.Embedding<float>!>! embeddingGenerator, int vectorDimensions, System.Func<Microsoft.Agents.AI.AgentSession?, MongoDB.AgentFramework.MongoDBMemoryProvider.State!>! stateFactory, MongoDB.AgentFramework.MongoDBMemoryProviderOptions? options = null, Microsoft.Extensions.Logging.ILogger<MongoDB.AgentFramework.MongoDBMemoryProvider!>? logger = null) -> void
+MongoDB.AgentFramework.MongoDBMemoryProvider.MongoDBMemoryProvider(string! connectionString, string! databaseName, string! collectionName, Microsoft.Extensions.AI.IEmbeddingGenerator<string!, Microsoft.Extensions.AI.Embedding<float>!>! embeddingGenerator, int vectorDimensions, System.Func<Microsoft.Agents.AI.AgentSession?, MongoDB.AgentFramework.MongoDBMemoryProvider.State!>! stateFactory, MongoDB.AgentFramework.MongoDBMemoryProviderOptions? options = null, Microsoft.Extensions.Logging.ILogger<MongoDB.AgentFramework.MongoDBMemoryProvider!>? logger = null) -> void
+MongoDB.AgentFramework.MongoDBMemoryProvider.OwnsClient.get -> bool
+MongoDB.AgentFramework.MongoDBMemoryProvider.SearchAsync(string! query, MongoDB.AgentFramework.MongoDBMemoryScope! scope, int? maxResults = null, bool? exact = null, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<System.Collections.Generic.IReadOnlyList<MongoDB.AgentFramework.MongoDBMemorySearchResult!>!>!
+MongoDB.AgentFramework.MongoDBMemoryProvider.State
+MongoDB.AgentFramework.MongoDBMemoryProvider.State.SearchScope.get -> MongoDB.AgentFramework.MongoDBMemoryScope!
+MongoDB.AgentFramework.MongoDBMemoryProvider.State.State(MongoDB.AgentFramework.MongoDBMemoryScope! searchScope, MongoDB.AgentFramework.MongoDBMemoryScope? storageScope = null) -> void
+MongoDB.AgentFramework.MongoDBMemoryProvider.State.StorageScope.get -> MongoDB.AgentFramework.MongoDBMemoryScope!
+MongoDB.AgentFramework.MongoDBMemoryProvider.StoreAsync(System.Collections.Generic.IEnumerable<Microsoft.Extensions.AI.ChatMessage!>! messages, MongoDB.AgentFramework.MongoDBMemoryScope! scope, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<int>!
+MongoDB.AgentFramework.MongoDBMemoryProvider.ValidateVectorSearchIndexAsync(bool requireReady = true, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task!
+MongoDB.AgentFramework.MongoDBMemoryProviderOptions
+MongoDB.AgentFramework.MongoDBMemoryProviderOptions.ContextPrompt.get -> string!
+MongoDB.AgentFramework.MongoDBMemoryProviderOptions.ContextPrompt.set -> void
+MongoDB.AgentFramework.MongoDBMemoryProviderOptions.Exact.get -> bool
+MongoDB.AgentFramework.MongoDBMemoryProviderOptions.Exact.set -> void
+MongoDB.AgentFramework.MongoDBMemoryProviderOptions.IndexName.get -> string!
+MongoDB.AgentFramework.MongoDBMemoryProviderOptions.IndexName.set -> void
+MongoDB.AgentFramework.MongoDBMemoryProviderOptions.MaxResults.get -> int
+MongoDB.AgentFramework.MongoDBMemoryProviderOptions.MaxResults.set -> void
+MongoDB.AgentFramework.MongoDBMemoryProviderOptions.MongoDBMemoryProviderOptions() -> void
+MongoDB.AgentFramework.MongoDBMemoryProviderOptions.NumCandidates.get -> int
+MongoDB.AgentFramework.MongoDBMemoryProviderOptions.NumCandidates.set -> void
+MongoDB.AgentFramework.MongoDBMemoryProviderOptions.PersistenceFailFast.get -> bool
+MongoDB.AgentFramework.MongoDBMemoryProviderOptions.PersistenceFailFast.set -> void
+MongoDB.AgentFramework.MongoDBMemoryProviderOptions.PersistenceTimeout.get -> System.TimeSpan?
+MongoDB.AgentFramework.MongoDBMemoryProviderOptions.PersistenceTimeout.set -> void
+MongoDB.AgentFramework.MongoDBMemoryProviderOptions.Retention.get -> System.TimeSpan?
+MongoDB.AgentFramework.MongoDBMemoryProviderOptions.Retention.set -> void
+MongoDB.AgentFramework.MongoDBMemoryProviderOptions.RetrievalTimeout.get -> System.TimeSpan?
+MongoDB.AgentFramework.MongoDBMemoryProviderOptions.RetrievalTimeout.set -> void
+MongoDB.AgentFramework.MongoDBMemoryProviderOptions.Similarity.get -> string!
+MongoDB.AgentFramework.MongoDBMemoryProviderOptions.Similarity.set -> void
+MongoDB.AgentFramework.MongoDBMemoryProviderOptions.Validate() -> void
+MongoDB.AgentFramework.MongoDBMemoryProviderOptions.VectorFieldName.get -> string!
+MongoDB.AgentFramework.MongoDBMemoryProviderOptions.VectorFieldName.set -> void
+MongoDB.AgentFramework.MongoDBMemoryScope
+MongoDB.AgentFramework.MongoDBMemoryScope.AgentId.get -> string?
+MongoDB.AgentFramework.MongoDBMemoryScope.ApplicationId.get -> string?
+MongoDB.AgentFramework.MongoDBMemoryScope.MongoDBMemoryScope(string? applicationId = null, string? agentId = null, string? userId = null, string? sessionId = null) -> void
+MongoDB.AgentFramework.MongoDBMemoryScope.SessionId.get -> string?
+MongoDB.AgentFramework.MongoDBMemoryScope.UserId.get -> string?
+MongoDB.AgentFramework.MongoDBMemoryScope.WithSession(string? sessionId) -> MongoDB.AgentFramework.MongoDBMemoryScope!
+MongoDB.AgentFramework.MongoDBMemorySearchResult
+MongoDB.AgentFramework.MongoDBMemorySearchResult.<Clone>$() -> MongoDB.AgentFramework.MongoDBMemorySearchResult!
+MongoDB.AgentFramework.MongoDBMemorySearchResult.Deconstruct(out string! MemoryId, out Microsoft.Extensions.AI.ChatMessage! Message, out double Score, out string? SessionId) -> void
+MongoDB.AgentFramework.MongoDBMemorySearchResult.Equals(MongoDB.AgentFramework.MongoDBMemorySearchResult? other) -> bool
+MongoDB.AgentFramework.MongoDBMemorySearchResult.MemoryId.get -> string!
+MongoDB.AgentFramework.MongoDBMemorySearchResult.MemoryId.init -> void
+MongoDB.AgentFramework.MongoDBMemorySearchResult.Message.get -> Microsoft.Extensions.AI.ChatMessage!
+MongoDB.AgentFramework.MongoDBMemorySearchResult.Message.init -> void
+MongoDB.AgentFramework.MongoDBMemorySearchResult.MongoDBMemorySearchResult(string! MemoryId, Microsoft.Extensions.AI.ChatMessage! Message, double Score, string? SessionId) -> void
+MongoDB.AgentFramework.MongoDBMemorySearchResult.Score.get -> double
+MongoDB.AgentFramework.MongoDBMemorySearchResult.Score.init -> void
+MongoDB.AgentFramework.MongoDBMemorySearchResult.SessionId.get -> string?
+MongoDB.AgentFramework.MongoDBMemorySearchResult.SessionId.init -> void
+MongoDB.AgentFramework.MongoDBPersistenceException
+MongoDB.AgentFramework.MongoDBPersistenceException.MongoDBPersistenceException(string! message) -> void
+MongoDB.AgentFramework.MongoDBPersistenceException.MongoDBPersistenceException(string! message, System.Exception! innerException) -> void
+MongoDB.AgentFramework.MongoDBRAGContextProvider
+MongoDB.AgentFramework.MongoDBRAGContextProvider.MongoDBRAGContextProvider(MongoDB.AgentFramework.MongoDBRAGProvider! provider, MongoDB.AgentFramework.MongoDBRAGContextProviderOptions? options = null, Microsoft.Extensions.Logging.ILogger<MongoDB.AgentFramework.MongoDBRAGContextProvider!>? logger = null) -> void
+MongoDB.AgentFramework.MongoDBRAGContextProviderOptions
+MongoDB.AgentFramework.MongoDBRAGContextProviderOptions.Instructions.get -> string!
+MongoDB.AgentFramework.MongoDBRAGContextProviderOptions.Instructions.set -> void
+MongoDB.AgentFramework.MongoDBRAGContextProviderOptions.MaxRecentMessages.get -> int?
+MongoDB.AgentFramework.MongoDBRAGContextProviderOptions.MaxRecentMessages.set -> void
+MongoDB.AgentFramework.MongoDBRAGContextProviderOptions.MongoDBRAGContextProviderOptions() -> void
+MongoDB.AgentFramework.MongoDBRAGContextProviderOptions.Validate() -> void
+MongoDB.AgentFramework.MongoDBRAGFilter
+MongoDB.AgentFramework.MongoDBRAGIndexManager
+MongoDB.AgentFramework.MongoDBRAGIndexManager.CreateHybridAsync(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task!
+MongoDB.AgentFramework.MongoDBRAGIndexManager.CreateSearchIndexAsync(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<MongoDB.AgentFramework.MongoDBIndexInfo!>!
+MongoDB.AgentFramework.MongoDBRAGIndexManager.CreateVectorSearchIndexAsync(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<MongoDB.AgentFramework.MongoDBIndexInfo!>!
+MongoDB.AgentFramework.MongoDBRAGIndexManager.DisposeAsync() -> System.Threading.Tasks.ValueTask
+MongoDB.AgentFramework.MongoDBRAGIndexManager.DropSearchIndexAsync(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task!
+MongoDB.AgentFramework.MongoDBRAGIndexManager.DropVectorSearchIndexAsync(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task!
+MongoDB.AgentFramework.MongoDBRAGIndexManager.EnsureHybridAsync(bool waitUntilReady = false, System.TimeSpan? timeout = null, System.TimeSpan? pollInterval = null, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task!
+MongoDB.AgentFramework.MongoDBRAGIndexManager.EnsureSearchIndexAsync(bool waitUntilReady = false, System.TimeSpan? timeout = null, System.TimeSpan? pollInterval = null, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<MongoDB.AgentFramework.MongoDBIndexInfo!>!
+MongoDB.AgentFramework.MongoDBRAGIndexManager.EnsureVectorSearchIndexAsync(bool waitUntilReady = false, System.TimeSpan? timeout = null, System.TimeSpan? pollInterval = null, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<MongoDB.AgentFramework.MongoDBIndexInfo!>!
+MongoDB.AgentFramework.MongoDBRAGIndexManager.GetSearchIndexAsync(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<MongoDB.AgentFramework.MongoDBIndexInfo?>!
+MongoDB.AgentFramework.MongoDBRAGIndexManager.GetVectorSearchIndexAsync(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<MongoDB.AgentFramework.MongoDBIndexInfo?>!
+MongoDB.AgentFramework.MongoDBRAGIndexManager.ListIndexesAsync(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<System.Collections.Generic.IReadOnlyList<MongoDB.AgentFramework.MongoDBIndexInfo!>!>!
+MongoDB.AgentFramework.MongoDBRAGIndexManager.MongoDBRAGIndexManager(MongoDB.Driver.IMongoClient! client, string! databaseName, string! collectionName, MongoDB.AgentFramework.MongoDBVectorSearchIndexDefinition? vectorDefinition = null, MongoDB.AgentFramework.MongoDBSearchIndexDefinition? searchDefinition = null) -> void
+MongoDB.AgentFramework.MongoDBRAGIndexManager.MongoDBRAGIndexManager(MongoDB.Driver.IMongoClient! client, string! databaseName, string! collectionName, MongoDB.AgentFramework.MongoDBVectorSearchIndexDefinition? vectorDefinition, MongoDB.AgentFramework.MongoDBSearchIndexDefinition? searchDefinition, Microsoft.Extensions.Logging.ILogger<MongoDB.AgentFramework.MongoDBRAGIndexManager!>? logger) -> void
+MongoDB.AgentFramework.MongoDBRAGIndexManager.MongoDBRAGIndexManager(MongoDB.Driver.IMongoCollection<MongoDB.Bson.BsonDocument!>! collection, MongoDB.AgentFramework.MongoDBVectorSearchIndexDefinition? vectorDefinition = null, MongoDB.AgentFramework.MongoDBSearchIndexDefinition? searchDefinition = null) -> void
+MongoDB.AgentFramework.MongoDBRAGIndexManager.MongoDBRAGIndexManager(MongoDB.Driver.IMongoCollection<MongoDB.Bson.BsonDocument!>! collection, MongoDB.AgentFramework.MongoDBVectorSearchIndexDefinition? vectorDefinition, MongoDB.AgentFramework.MongoDBSearchIndexDefinition? searchDefinition, Microsoft.Extensions.Logging.ILogger<MongoDB.AgentFramework.MongoDBRAGIndexManager!>? logger) -> void
+MongoDB.AgentFramework.MongoDBRAGIndexManager.MongoDBRAGIndexManager(MongoDB.Driver.IMongoDatabase! database, string! collectionName, MongoDB.AgentFramework.MongoDBVectorSearchIndexDefinition? vectorDefinition = null, MongoDB.AgentFramework.MongoDBSearchIndexDefinition? searchDefinition = null) -> void
+MongoDB.AgentFramework.MongoDBRAGIndexManager.MongoDBRAGIndexManager(MongoDB.Driver.IMongoDatabase! database, string! collectionName, MongoDB.AgentFramework.MongoDBVectorSearchIndexDefinition? vectorDefinition, MongoDB.AgentFramework.MongoDBSearchIndexDefinition? searchDefinition, Microsoft.Extensions.Logging.ILogger<MongoDB.AgentFramework.MongoDBRAGIndexManager!>? logger) -> void
+MongoDB.AgentFramework.MongoDBRAGIndexManager.MongoDBRAGIndexManager(string! connectionString, string! databaseName, string! collectionName, MongoDB.AgentFramework.MongoDBVectorSearchIndexDefinition? vectorDefinition = null, MongoDB.AgentFramework.MongoDBSearchIndexDefinition? searchDefinition = null) -> void
+MongoDB.AgentFramework.MongoDBRAGIndexManager.MongoDBRAGIndexManager(string! connectionString, string! databaseName, string! collectionName, MongoDB.AgentFramework.MongoDBVectorSearchIndexDefinition? vectorDefinition, MongoDB.AgentFramework.MongoDBSearchIndexDefinition? searchDefinition, Microsoft.Extensions.Logging.ILogger<MongoDB.AgentFramework.MongoDBRAGIndexManager!>? logger) -> void
+MongoDB.AgentFramework.MongoDBRAGIndexManager.OwnsClient.get -> bool
+MongoDB.AgentFramework.MongoDBRAGIndexManager.SearchDefinition.get -> MongoDB.AgentFramework.MongoDBSearchIndexDefinition?
+MongoDB.AgentFramework.MongoDBRAGIndexManager.UpdateSearchIndexAsync(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task!
+MongoDB.AgentFramework.MongoDBRAGIndexManager.UpdateVectorSearchIndexAsync(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task!
+MongoDB.AgentFramework.MongoDBRAGIndexManager.ValidateHybridAsync(bool requireReady = true, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task!
+MongoDB.AgentFramework.MongoDBRAGIndexManager.ValidateSearchIndexAsync(bool requireReady = true, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<MongoDB.AgentFramework.MongoDBIndexComparison!>!
+MongoDB.AgentFramework.MongoDBRAGIndexManager.ValidateVectorSearchIndexAsync(bool requireReady = true, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<MongoDB.AgentFramework.MongoDBIndexComparison!>!
+MongoDB.AgentFramework.MongoDBRAGIndexManager.VectorDefinition.get -> MongoDB.AgentFramework.MongoDBVectorSearchIndexDefinition?
+MongoDB.AgentFramework.MongoDBRAGIndexManager.WaitUntilSearchIndexReadyAsync(System.TimeSpan? timeout = null, System.TimeSpan? pollInterval = null, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<MongoDB.AgentFramework.MongoDBIndexInfo!>!
+MongoDB.AgentFramework.MongoDBRAGIndexManager.WaitUntilVectorSearchIndexReadyAsync(System.TimeSpan? timeout = null, System.TimeSpan? pollInterval = null, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<MongoDB.AgentFramework.MongoDBIndexInfo!>!
+MongoDB.AgentFramework.MongoDBRAGProvider
+MongoDB.AgentFramework.MongoDBRAGProvider.DisposeAsync() -> System.Threading.Tasks.ValueTask
+MongoDB.AgentFramework.MongoDBRAGProvider.MongoDBRAGProvider(MongoDB.Driver.IMongoClient! client, string! databaseName, string! collectionName, Microsoft.Extensions.AI.IEmbeddingGenerator<string!, Microsoft.Extensions.AI.Embedding<float>!>! embeddingGenerator, int vectorDimensions, MongoDB.AgentFramework.MongoDBRAGProviderOptions! options, Microsoft.Extensions.Logging.ILogger<MongoDB.AgentFramework.MongoDBRAGProvider!>? logger = null) -> void
+MongoDB.AgentFramework.MongoDBRAGProvider.MongoDBRAGProvider(MongoDB.Driver.IMongoClient! client, string! databaseName, string! collectionName, MongoDB.AgentFramework.MongoDBRAGProviderOptions! options, Microsoft.Extensions.Logging.ILogger<MongoDB.AgentFramework.MongoDBRAGProvider!>? logger = null) -> void
+MongoDB.AgentFramework.MongoDBRAGProvider.MongoDBRAGProvider(MongoDB.Driver.IMongoCollection<MongoDB.Bson.BsonDocument!>! collection, Microsoft.Extensions.AI.IEmbeddingGenerator<string!, Microsoft.Extensions.AI.Embedding<float>!>! embeddingGenerator, int vectorDimensions, MongoDB.AgentFramework.MongoDBRAGProviderOptions! options, Microsoft.Extensions.Logging.ILogger<MongoDB.AgentFramework.MongoDBRAGProvider!>? logger = null) -> void
+MongoDB.AgentFramework.MongoDBRAGProvider.MongoDBRAGProvider(MongoDB.Driver.IMongoCollection<MongoDB.Bson.BsonDocument!>! collection, MongoDB.AgentFramework.MongoDBRAGProviderOptions! options, Microsoft.Extensions.Logging.ILogger<MongoDB.AgentFramework.MongoDBRAGProvider!>? logger = null) -> void
+MongoDB.AgentFramework.MongoDBRAGProvider.MongoDBRAGProvider(MongoDB.Driver.IMongoDatabase! database, string! collectionName, Microsoft.Extensions.AI.IEmbeddingGenerator<string!, Microsoft.Extensions.AI.Embedding<float>!>! embeddingGenerator, int vectorDimensions, MongoDB.AgentFramework.MongoDBRAGProviderOptions! options, Microsoft.Extensions.Logging.ILogger<MongoDB.AgentFramework.MongoDBRAGProvider!>? logger = null) -> void
+MongoDB.AgentFramework.MongoDBRAGProvider.MongoDBRAGProvider(MongoDB.Driver.IMongoDatabase! database, string! collectionName, MongoDB.AgentFramework.MongoDBRAGProviderOptions! options, Microsoft.Extensions.Logging.ILogger<MongoDB.AgentFramework.MongoDBRAGProvider!>? logger = null) -> void
+MongoDB.AgentFramework.MongoDBRAGProvider.MongoDBRAGProvider(string! connectionString, string! databaseName, string! collectionName, Microsoft.Extensions.AI.IEmbeddingGenerator<string!, Microsoft.Extensions.AI.Embedding<float>!>! embeddingGenerator, int vectorDimensions, MongoDB.AgentFramework.MongoDBRAGProviderOptions! options, Microsoft.Extensions.Logging.ILogger<MongoDB.AgentFramework.MongoDBRAGProvider!>? logger = null) -> void
+MongoDB.AgentFramework.MongoDBRAGProvider.MongoDBRAGProvider(string! connectionString, string! databaseName, string! collectionName, MongoDB.AgentFramework.MongoDBRAGProviderOptions! options, Microsoft.Extensions.Logging.ILogger<MongoDB.AgentFramework.MongoDBRAGProvider!>? logger = null) -> void
+MongoDB.AgentFramework.MongoDBRAGProvider.OwnsClient.get -> bool
+MongoDB.AgentFramework.MongoDBRAGProvider.SearchAsync(string! query, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<System.Collections.Generic.IReadOnlyList<MongoDB.AgentFramework.MongoDBRAGResult!>!>!
+MongoDB.AgentFramework.MongoDBRAGProvider.ValidateHybridSearchCapabilityAsync(bool requireReady = true, bool refresh = false, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task!
+MongoDB.AgentFramework.MongoDBRAGProvider.ValidateSearchIndexAsync(bool requireReady = true, bool refresh = false, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task!
+MongoDB.AgentFramework.MongoDBRAGProviderOptions
+MongoDB.AgentFramework.MongoDBRAGProviderOptions.ChunkTextFieldName.get -> string!
+MongoDB.AgentFramework.MongoDBRAGProviderOptions.ChunkTextFieldName.set -> void
+MongoDB.AgentFramework.MongoDBRAGProviderOptions.IdFieldName.get -> string!
+MongoDB.AgentFramework.MongoDBRAGProviderOptions.IdFieldName.set -> void
+MongoDB.AgentFramework.MongoDBRAGProviderOptions.IncludeScoreDetails.get -> bool
+MongoDB.AgentFramework.MongoDBRAGProviderOptions.IncludeScoreDetails.set -> void
+MongoDB.AgentFramework.MongoDBRAGProviderOptions.MandatoryFilter.get -> MongoDB.AgentFramework.MongoDBRAGFilter?
+MongoDB.AgentFramework.MongoDBRAGProviderOptions.MandatoryFilter.set -> void
+MongoDB.AgentFramework.MongoDBRAGProviderOptions.MetadataFieldNames.get -> System.Collections.Generic.IReadOnlyList<string!>?
+MongoDB.AgentFramework.MongoDBRAGProviderOptions.MetadataFieldNames.set -> void
+MongoDB.AgentFramework.MongoDBRAGProviderOptions.MongoDBRAGProviderOptions() -> void
+MongoDB.AgentFramework.MongoDBRAGProviderOptions.NumCandidates.get -> int?
+MongoDB.AgentFramework.MongoDBRAGProviderOptions.NumCandidates.set -> void
+MongoDB.AgentFramework.MongoDBRAGProviderOptions.RetrievalTimeout.get -> System.TimeSpan?
+MongoDB.AgentFramework.MongoDBRAGProviderOptions.RetrievalTimeout.set -> void
+MongoDB.AgentFramework.MongoDBRAGProviderOptions.SearchIndexName.get -> string!
+MongoDB.AgentFramework.MongoDBRAGProviderOptions.SearchIndexName.set -> void
+MongoDB.AgentFramework.MongoDBRAGProviderOptions.SearchMode.get -> MongoDB.AgentFramework.MongoDBSearchMode
+MongoDB.AgentFramework.MongoDBRAGProviderOptions.SearchMode.set -> void
+MongoDB.AgentFramework.MongoDBRAGProviderOptions.SearchTextFieldNames.get -> System.Collections.Generic.IReadOnlyList<string!>!
+MongoDB.AgentFramework.MongoDBRAGProviderOptions.SearchTextFieldNames.set -> void
+MongoDB.AgentFramework.MongoDBRAGProviderOptions.SourceNameFieldName.get -> string?
+MongoDB.AgentFramework.MongoDBRAGProviderOptions.SourceNameFieldName.set -> void
+MongoDB.AgentFramework.MongoDBRAGProviderOptions.SourceUrlFieldName.get -> string?
+MongoDB.AgentFramework.MongoDBRAGProviderOptions.SourceUrlFieldName.set -> void
+MongoDB.AgentFramework.MongoDBRAGProviderOptions.TextCandidateLimit.get -> int?
+MongoDB.AgentFramework.MongoDBRAGProviderOptions.TextCandidateLimit.set -> void
+MongoDB.AgentFramework.MongoDBRAGProviderOptions.TextWeight.get -> double
+MongoDB.AgentFramework.MongoDBRAGProviderOptions.TextWeight.set -> void
+MongoDB.AgentFramework.MongoDBRAGProviderOptions.TopK.get -> int
+MongoDB.AgentFramework.MongoDBRAGProviderOptions.TopK.set -> void
+MongoDB.AgentFramework.MongoDBRAGProviderOptions.Validate() -> void
+MongoDB.AgentFramework.MongoDBRAGProviderOptions.VectorCandidateLimit.get -> int?
+MongoDB.AgentFramework.MongoDBRAGProviderOptions.VectorCandidateLimit.set -> void
+MongoDB.AgentFramework.MongoDBRAGProviderOptions.VectorFieldName.get -> string!
+MongoDB.AgentFramework.MongoDBRAGProviderOptions.VectorFieldName.set -> void
+MongoDB.AgentFramework.MongoDBRAGProviderOptions.VectorIndexName.get -> string!
+MongoDB.AgentFramework.MongoDBRAGProviderOptions.VectorIndexName.set -> void
+MongoDB.AgentFramework.MongoDBRAGProviderOptions.VectorWeight.get -> double
+MongoDB.AgentFramework.MongoDBRAGProviderOptions.VectorWeight.set -> void
+MongoDB.AgentFramework.MongoDBRAGResult
+MongoDB.AgentFramework.MongoDBRAGResult.<Clone>$() -> MongoDB.AgentFramework.MongoDBRAGResult!
+MongoDB.AgentFramework.MongoDBRAGResult.Equals(MongoDB.AgentFramework.MongoDBRAGResult? other) -> bool
+MongoDB.AgentFramework.MongoDBRAGResult.Id.get -> string!
+MongoDB.AgentFramework.MongoDBRAGResult.Metadata.get -> System.Collections.Generic.IReadOnlyDictionary<string!, MongoDB.Bson.BsonValue!>!
+MongoDB.AgentFramework.MongoDBRAGResult.MongoDBRAGResult(string! id, string! text, double score, string? sourceName = null, string? sourceUrl = null, System.Collections.Generic.IReadOnlyDictionary<string!, MongoDB.Bson.BsonValue!>? metadata = null, MongoDB.Bson.BsonDocument? rawDocument = null, MongoDB.Bson.BsonDocument? scoreDetails = null) -> void
+MongoDB.AgentFramework.MongoDBRAGResult.RawDocument.get -> MongoDB.Bson.BsonDocument!
+MongoDB.AgentFramework.MongoDBRAGResult.Score.get -> double
+MongoDB.AgentFramework.MongoDBRAGResult.ScoreDetails.get -> MongoDB.Bson.BsonDocument?
+MongoDB.AgentFramework.MongoDBRAGResult.SourceName.get -> string?
+MongoDB.AgentFramework.MongoDBRAGResult.SourceUrl.get -> string?
+MongoDB.AgentFramework.MongoDBRAGResult.Text.get -> string!
+MongoDB.AgentFramework.MongoDBRetrievalException
+MongoDB.AgentFramework.MongoDBRetrievalException.MongoDBRetrievalException(string! message) -> void
+MongoDB.AgentFramework.MongoDBRetrievalException.MongoDBRetrievalException(string! message, System.Exception! innerException) -> void
+MongoDB.AgentFramework.MongoDBSearchIndexDefinition
+MongoDB.AgentFramework.MongoDBSearchIndexDefinition.<Clone>$() -> MongoDB.AgentFramework.MongoDBSearchIndexDefinition!
+MongoDB.AgentFramework.MongoDBSearchIndexDefinition.Equals(MongoDB.AgentFramework.MongoDBSearchIndexDefinition? other) -> bool
+MongoDB.AgentFramework.MongoDBSearchIndexDefinition.IndexName.get -> string!
+MongoDB.AgentFramework.MongoDBSearchIndexDefinition.MandatoryFilter.get -> MongoDB.AgentFramework.MongoDBRAGFilter?
+MongoDB.AgentFramework.MongoDBSearchIndexDefinition.MongoDBSearchIndexDefinition(string! indexName, System.Collections.Generic.IReadOnlyList<string!>! textFieldNames, MongoDB.AgentFramework.MongoDBRAGFilter? mandatoryFilter = null) -> void
+MongoDB.AgentFramework.MongoDBSearchIndexDefinition.TextFieldNames.get -> System.Collections.Generic.IReadOnlyList<string!>!
+MongoDB.AgentFramework.MongoDBSearchMode
+MongoDB.AgentFramework.MongoDBSearchMode.FullText = 2 -> MongoDB.AgentFramework.MongoDBSearchMode
+MongoDB.AgentFramework.MongoDBSearchMode.HybridRrf = 3 -> MongoDB.AgentFramework.MongoDBSearchMode
+MongoDB.AgentFramework.MongoDBSearchMode.VectorAnn = 0 -> MongoDB.AgentFramework.MongoDBSearchMode
+MongoDB.AgentFramework.MongoDBSearchMode.VectorEnn = 1 -> MongoDB.AgentFramework.MongoDBSearchMode
+MongoDB.AgentFramework.MongoDBTimeoutException
+MongoDB.AgentFramework.MongoDBTimeoutException.MongoDBTimeoutException(string! message, System.Exception! innerException) -> void
+MongoDB.AgentFramework.MongoDBVectorSearchIndexDefinition
+MongoDB.AgentFramework.MongoDBVectorSearchIndexDefinition.<Clone>$() -> MongoDB.AgentFramework.MongoDBVectorSearchIndexDefinition!
+MongoDB.AgentFramework.MongoDBVectorSearchIndexDefinition.Equals(MongoDB.AgentFramework.MongoDBVectorSearchIndexDefinition? other) -> bool
+MongoDB.AgentFramework.MongoDBVectorSearchIndexDefinition.FilterFieldPaths.get -> System.Collections.Generic.IReadOnlyList<string!>!
+MongoDB.AgentFramework.MongoDBVectorSearchIndexDefinition.IndexName.get -> string!
+MongoDB.AgentFramework.MongoDBVectorSearchIndexDefinition.MongoDBVectorSearchIndexDefinition(string! indexName, string! vectorFieldName, int vectorDimensions, string? similarity = null, System.Collections.Generic.IReadOnlyList<string!>? filterFieldPaths = null) -> void
+MongoDB.AgentFramework.MongoDBVectorSearchIndexDefinition.Similarity.get -> string?
+MongoDB.AgentFramework.MongoDBVectorSearchIndexDefinition.VectorDimensions.get -> int
+MongoDB.AgentFramework.MongoDBVectorSearchIndexDefinition.VectorFieldName.get -> string!
+override MongoDB.AgentFramework.MongoDBAgentSessionPage.Equals(object? obj) -> bool
+override MongoDB.AgentFramework.MongoDBAgentSessionPage.GetHashCode() -> int
+override MongoDB.AgentFramework.MongoDBAgentSessionPage.ToString() -> string!
+override MongoDB.AgentFramework.MongoDBAgentSessionRecord.Equals(object? obj) -> bool
+override MongoDB.AgentFramework.MongoDBAgentSessionRecord.GetHashCode() -> int
+override MongoDB.AgentFramework.MongoDBAgentSessionRecord.ToString() -> string!
+override MongoDB.AgentFramework.MongoDBAgentSessionStoreOptions.Equals(object? obj) -> bool
+override MongoDB.AgentFramework.MongoDBAgentSessionStoreOptions.GetHashCode() -> int
+override MongoDB.AgentFramework.MongoDBAgentSessionStoreOptions.ToString() -> string!
+override MongoDB.AgentFramework.MongoDBAgentSessionSummary.Equals(object? obj) -> bool
+override MongoDB.AgentFramework.MongoDBAgentSessionSummary.GetHashCode() -> int
+override MongoDB.AgentFramework.MongoDBAgentSessionSummary.ToString() -> string!
+override MongoDB.AgentFramework.MongoDBChatHistoryProvider.StateKeys.get -> System.Collections.Generic.IReadOnlyList<string!>!
+override MongoDB.AgentFramework.MongoDBChatHistoryProviderOptions.Equals(object? obj) -> bool
+override MongoDB.AgentFramework.MongoDBChatHistoryProviderOptions.GetHashCode() -> int
+override MongoDB.AgentFramework.MongoDBChatHistoryProviderOptions.ToString() -> string!
+override MongoDB.AgentFramework.MongoDBCheckpointPage.Equals(object? obj) -> bool
+override MongoDB.AgentFramework.MongoDBCheckpointPage.GetHashCode() -> int
+override MongoDB.AgentFramework.MongoDBCheckpointPage.ToString() -> string!
+override MongoDB.AgentFramework.MongoDBCheckpointRecord.Equals(object? obj) -> bool
+override MongoDB.AgentFramework.MongoDBCheckpointRecord.GetHashCode() -> int
+override MongoDB.AgentFramework.MongoDBCheckpointRecord.ToString() -> string!
+override MongoDB.AgentFramework.MongoDBCheckpointStore.CreateCheckpointAsync(string! sessionId, System.Text.Json.JsonElement value, Microsoft.Agents.AI.Workflows.CheckpointInfo? parent = null) -> System.Threading.Tasks.ValueTask<Microsoft.Agents.AI.Workflows.CheckpointInfo!>
+override MongoDB.AgentFramework.MongoDBCheckpointStore.RetrieveCheckpointAsync(string! sessionId, Microsoft.Agents.AI.Workflows.CheckpointInfo! key) -> System.Threading.Tasks.ValueTask<System.Text.Json.JsonElement>
+override MongoDB.AgentFramework.MongoDBCheckpointStore.RetrieveIndexAsync(string! sessionId, Microsoft.Agents.AI.Workflows.CheckpointInfo? withParent = null) -> System.Threading.Tasks.ValueTask<System.Collections.Generic.IEnumerable<Microsoft.Agents.AI.Workflows.CheckpointInfo!>!>
+override MongoDB.AgentFramework.MongoDBCheckpointStoreOptions.Equals(object? obj) -> bool
+override MongoDB.AgentFramework.MongoDBCheckpointStoreOptions.GetHashCode() -> int
+override MongoDB.AgentFramework.MongoDBCheckpointStoreOptions.ToString() -> string!
+override MongoDB.AgentFramework.MongoDBCheckpointSummary.Equals(object? obj) -> bool
+override MongoDB.AgentFramework.MongoDBCheckpointSummary.GetHashCode() -> int
+override MongoDB.AgentFramework.MongoDBCheckpointSummary.ToString() -> string!
+override MongoDB.AgentFramework.MongoDBIndexComparison.Equals(object? obj) -> bool
+override MongoDB.AgentFramework.MongoDBIndexComparison.GetHashCode() -> int
+override MongoDB.AgentFramework.MongoDBIndexComparison.ToString() -> string!
+override MongoDB.AgentFramework.MongoDBIndexInfo.Equals(object? obj) -> bool
+override MongoDB.AgentFramework.MongoDBIndexInfo.GetHashCode() -> int
+override MongoDB.AgentFramework.MongoDBIndexInfo.ToString() -> string!
+override MongoDB.AgentFramework.MongoDBMemoryMetadata.Equals(object? obj) -> bool
+override MongoDB.AgentFramework.MongoDBMemoryMetadata.GetHashCode() -> int
+override MongoDB.AgentFramework.MongoDBMemoryMetadata.ToString() -> string!
+override MongoDB.AgentFramework.MongoDBMemoryMetadataPage.Equals(object? obj) -> bool
+override MongoDB.AgentFramework.MongoDBMemoryMetadataPage.GetHashCode() -> int
+override MongoDB.AgentFramework.MongoDBMemoryMetadataPage.ToString() -> string!
+override MongoDB.AgentFramework.MongoDBMemoryProvider.StateKeys.get -> System.Collections.Generic.IReadOnlyList<string!>!
+override MongoDB.AgentFramework.MongoDBMemorySearchResult.Equals(object? obj) -> bool
+override MongoDB.AgentFramework.MongoDBMemorySearchResult.GetHashCode() -> int
+override MongoDB.AgentFramework.MongoDBMemorySearchResult.ToString() -> string!
+override MongoDB.AgentFramework.MongoDBRAGContextProvider.StateKeys.get -> System.Collections.Generic.IReadOnlyList<string!>!
+override MongoDB.AgentFramework.MongoDBRAGResult.Equals(object? obj) -> bool
+override MongoDB.AgentFramework.MongoDBRAGResult.GetHashCode() -> int
+override MongoDB.AgentFramework.MongoDBRAGResult.ToString() -> string!
+override MongoDB.AgentFramework.MongoDBSearchIndexDefinition.Equals(object? obj) -> bool
+override MongoDB.AgentFramework.MongoDBSearchIndexDefinition.GetHashCode() -> int
+override MongoDB.AgentFramework.MongoDBSearchIndexDefinition.ToString() -> string!
+override MongoDB.AgentFramework.MongoDBVectorSearchIndexDefinition.Equals(object? obj) -> bool
+override MongoDB.AgentFramework.MongoDBVectorSearchIndexDefinition.GetHashCode() -> int
+override MongoDB.AgentFramework.MongoDBVectorSearchIndexDefinition.ToString() -> string!
+static MongoDB.AgentFramework.MongoDBAgentSessionPage.operator !=(MongoDB.AgentFramework.MongoDBAgentSessionPage? left, MongoDB.AgentFramework.MongoDBAgentSessionPage? right) -> bool
+static MongoDB.AgentFramework.MongoDBAgentSessionPage.operator ==(MongoDB.AgentFramework.MongoDBAgentSessionPage? left, MongoDB.AgentFramework.MongoDBAgentSessionPage? right) -> bool
+static MongoDB.AgentFramework.MongoDBAgentSessionRecord.operator !=(MongoDB.AgentFramework.MongoDBAgentSessionRecord? left, MongoDB.AgentFramework.MongoDBAgentSessionRecord? right) -> bool
+static MongoDB.AgentFramework.MongoDBAgentSessionRecord.operator ==(MongoDB.AgentFramework.MongoDBAgentSessionRecord? left, MongoDB.AgentFramework.MongoDBAgentSessionRecord? right) -> bool
+static MongoDB.AgentFramework.MongoDBAgentSessionStoreOptions.operator !=(MongoDB.AgentFramework.MongoDBAgentSessionStoreOptions? left, MongoDB.AgentFramework.MongoDBAgentSessionStoreOptions? right) -> bool
+static MongoDB.AgentFramework.MongoDBAgentSessionStoreOptions.operator ==(MongoDB.AgentFramework.MongoDBAgentSessionStoreOptions? left, MongoDB.AgentFramework.MongoDBAgentSessionStoreOptions? right) -> bool
+static MongoDB.AgentFramework.MongoDBAgentSessionSummary.operator !=(MongoDB.AgentFramework.MongoDBAgentSessionSummary? left, MongoDB.AgentFramework.MongoDBAgentSessionSummary? right) -> bool
+static MongoDB.AgentFramework.MongoDBAgentSessionSummary.operator ==(MongoDB.AgentFramework.MongoDBAgentSessionSummary? left, MongoDB.AgentFramework.MongoDBAgentSessionSummary? right) -> bool
+static MongoDB.AgentFramework.MongoDBChatHistoryProviderOptions.operator !=(MongoDB.AgentFramework.MongoDBChatHistoryProviderOptions? left, MongoDB.AgentFramework.MongoDBChatHistoryProviderOptions? right) -> bool
+static MongoDB.AgentFramework.MongoDBChatHistoryProviderOptions.operator ==(MongoDB.AgentFramework.MongoDBChatHistoryProviderOptions? left, MongoDB.AgentFramework.MongoDBChatHistoryProviderOptions? right) -> bool
+static MongoDB.AgentFramework.MongoDBCheckpointPage.operator !=(MongoDB.AgentFramework.MongoDBCheckpointPage? left, MongoDB.AgentFramework.MongoDBCheckpointPage? right) -> bool
+static MongoDB.AgentFramework.MongoDBCheckpointPage.operator ==(MongoDB.AgentFramework.MongoDBCheckpointPage? left, MongoDB.AgentFramework.MongoDBCheckpointPage? right) -> bool
+static MongoDB.AgentFramework.MongoDBCheckpointRecord.operator !=(MongoDB.AgentFramework.MongoDBCheckpointRecord? left, MongoDB.AgentFramework.MongoDBCheckpointRecord? right) -> bool
+static MongoDB.AgentFramework.MongoDBCheckpointRecord.operator ==(MongoDB.AgentFramework.MongoDBCheckpointRecord? left, MongoDB.AgentFramework.MongoDBCheckpointRecord? right) -> bool
+static MongoDB.AgentFramework.MongoDBCheckpointStoreOptions.operator !=(MongoDB.AgentFramework.MongoDBCheckpointStoreOptions? left, MongoDB.AgentFramework.MongoDBCheckpointStoreOptions? right) -> bool
+static MongoDB.AgentFramework.MongoDBCheckpointStoreOptions.operator ==(MongoDB.AgentFramework.MongoDBCheckpointStoreOptions? left, MongoDB.AgentFramework.MongoDBCheckpointStoreOptions? right) -> bool
+static MongoDB.AgentFramework.MongoDBCheckpointSummary.operator !=(MongoDB.AgentFramework.MongoDBCheckpointSummary? left, MongoDB.AgentFramework.MongoDBCheckpointSummary? right) -> bool
+static MongoDB.AgentFramework.MongoDBCheckpointSummary.operator ==(MongoDB.AgentFramework.MongoDBCheckpointSummary? left, MongoDB.AgentFramework.MongoDBCheckpointSummary? right) -> bool
+static MongoDB.AgentFramework.MongoDBIndexComparison.operator !=(MongoDB.AgentFramework.MongoDBIndexComparison? left, MongoDB.AgentFramework.MongoDBIndexComparison? right) -> bool
+static MongoDB.AgentFramework.MongoDBIndexComparison.operator ==(MongoDB.AgentFramework.MongoDBIndexComparison? left, MongoDB.AgentFramework.MongoDBIndexComparison? right) -> bool
+static MongoDB.AgentFramework.MongoDBIndexInfo.operator !=(MongoDB.AgentFramework.MongoDBIndexInfo? left, MongoDB.AgentFramework.MongoDBIndexInfo? right) -> bool
+static MongoDB.AgentFramework.MongoDBIndexInfo.operator ==(MongoDB.AgentFramework.MongoDBIndexInfo? left, MongoDB.AgentFramework.MongoDBIndexInfo? right) -> bool
+static MongoDB.AgentFramework.MongoDBMemoryMetadata.operator !=(MongoDB.AgentFramework.MongoDBMemoryMetadata? left, MongoDB.AgentFramework.MongoDBMemoryMetadata? right) -> bool
+static MongoDB.AgentFramework.MongoDBMemoryMetadata.operator ==(MongoDB.AgentFramework.MongoDBMemoryMetadata? left, MongoDB.AgentFramework.MongoDBMemoryMetadata? right) -> bool
+static MongoDB.AgentFramework.MongoDBMemoryMetadataPage.operator !=(MongoDB.AgentFramework.MongoDBMemoryMetadataPage? left, MongoDB.AgentFramework.MongoDBMemoryMetadataPage? right) -> bool
+static MongoDB.AgentFramework.MongoDBMemoryMetadataPage.operator ==(MongoDB.AgentFramework.MongoDBMemoryMetadataPage? left, MongoDB.AgentFramework.MongoDBMemoryMetadataPage? right) -> bool
+static MongoDB.AgentFramework.MongoDBMemorySearchResult.operator !=(MongoDB.AgentFramework.MongoDBMemorySearchResult? left, MongoDB.AgentFramework.MongoDBMemorySearchResult? right) -> bool
+static MongoDB.AgentFramework.MongoDBMemorySearchResult.operator ==(MongoDB.AgentFramework.MongoDBMemorySearchResult? left, MongoDB.AgentFramework.MongoDBMemorySearchResult? right) -> bool
+static MongoDB.AgentFramework.MongoDBRAGFilter.And(params MongoDB.AgentFramework.MongoDBRAGFilter![]! operands) -> MongoDB.AgentFramework.MongoDBRAGFilter!
+static MongoDB.AgentFramework.MongoDBRAGFilter.Equal(string! fieldPath, object! value) -> MongoDB.AgentFramework.MongoDBRAGFilter!
+static MongoDB.AgentFramework.MongoDBRAGFilter.In(string! fieldPath, System.Collections.Generic.IEnumerable<object!>! values) -> MongoDB.AgentFramework.MongoDBRAGFilter!
+static MongoDB.AgentFramework.MongoDBRAGFilter.NotEqual(string! fieldPath, object! value) -> MongoDB.AgentFramework.MongoDBRAGFilter!
+static MongoDB.AgentFramework.MongoDBRAGFilter.NotIn(string! fieldPath, System.Collections.Generic.IEnumerable<object!>! values) -> MongoDB.AgentFramework.MongoDBRAGFilter!
+static MongoDB.AgentFramework.MongoDBRAGFilter.Or(params MongoDB.AgentFramework.MongoDBRAGFilter![]! operands) -> MongoDB.AgentFramework.MongoDBRAGFilter!
+static MongoDB.AgentFramework.MongoDBRAGFilter.Range(string! fieldPath, double? minimum, double? maximum, bool minimumInclusive = true, bool maximumInclusive = true) -> MongoDB.AgentFramework.MongoDBRAGFilter!
+static MongoDB.AgentFramework.MongoDBRAGFilter.Range(string! fieldPath, System.DateTimeOffset? minimum, System.DateTimeOffset? maximum, bool minimumInclusive = true, bool maximumInclusive = true) -> MongoDB.AgentFramework.MongoDBRAGFilter!
+static MongoDB.AgentFramework.MongoDBRAGResult.operator !=(MongoDB.AgentFramework.MongoDBRAGResult? left, MongoDB.AgentFramework.MongoDBRAGResult? right) -> bool
+static MongoDB.AgentFramework.MongoDBRAGResult.operator ==(MongoDB.AgentFramework.MongoDBRAGResult? left, MongoDB.AgentFramework.MongoDBRAGResult? right) -> bool
+static MongoDB.AgentFramework.MongoDBSearchIndexDefinition.operator !=(MongoDB.AgentFramework.MongoDBSearchIndexDefinition? left, MongoDB.AgentFramework.MongoDBSearchIndexDefinition? right) -> bool
+static MongoDB.AgentFramework.MongoDBSearchIndexDefinition.operator ==(MongoDB.AgentFramework.MongoDBSearchIndexDefinition? left, MongoDB.AgentFramework.MongoDBSearchIndexDefinition? right) -> bool
+static MongoDB.AgentFramework.MongoDBVectorSearchIndexDefinition.operator !=(MongoDB.AgentFramework.MongoDBVectorSearchIndexDefinition? left, MongoDB.AgentFramework.MongoDBVectorSearchIndexDefinition? right) -> bool
+static MongoDB.AgentFramework.MongoDBVectorSearchIndexDefinition.operator ==(MongoDB.AgentFramework.MongoDBVectorSearchIndexDefinition? left, MongoDB.AgentFramework.MongoDBVectorSearchIndexDefinition? right) -> bool
+static readonly MongoDB.AgentFramework.MongoDBIndexComparison.Compatible -> MongoDB.AgentFramework.MongoDBIndexComparison!

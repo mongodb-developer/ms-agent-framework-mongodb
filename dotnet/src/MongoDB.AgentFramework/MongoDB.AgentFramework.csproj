@@ -6,18 +6,85 @@
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <IsPackable>true</IsPackable>
     <PackageId>MongoDB.AgentFramework</PackageId>
-    <Version>0.1.0-dev</Version>
-    <Description>MongoDB integrations for Microsoft Agent Framework</Description>
+    <!--
+      0.1.0-preview.1: pre-1.0 under semantic versioning (docs/spec/compatibility-migration.md). MUST NOT be
+      raised to a 1.0/stable version until every docs/spec/quality-release.md "Complete Release 1.0" gate closes,
+      which currently blocks on the Session Store public hosting contract (see the "## Status" section of
+      ../../README.md and docs/development/persistence/dotnet-contract-research.md). The eventual release tag for
+      this version is `dotnet-v0.1.0-preview.1` (docs/spec/quality-release.md); this branch does not create that
+      tag.
+    -->
+    <Version>0.1.0-preview.1</Version>
+    <Description>MongoDB integrations for Microsoft Agent Framework: Memory, exact Chat History, RAG (vector/full-text/hybrid), Session Store, and Workflow Checkpoint Store.</Description>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <!--
+      Authors/Copyright intentionally mirror the repository's current, unconfirmed placeholders (../../LICENSE)
+      rather than asserting a legal publisher identity: ADR 0013 (establish-project-and-publishing-governance) is
+      still `proposed`, so the owning organization's confirmed publishing identity, package-signing certificate,
+      and NuGet trusted-publishing/API-key configuration are release prerequisites this branch cannot invent. See
+      the "## Publishing and release blockers" section of ../../README.md.
+    -->
+    <Authors>mongo</Authors>
+    <Copyright>Copyright (c) 2026 Shankar Narayanan SGS</Copyright>
+    <PackageProjectUrl>https://github.com/mongo/ms-agent-framework-mongodb</PackageProjectUrl>
     <RepositoryUrl>https://github.com/mongo/ms-agent-framework-mongodb</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
-    <PackageTags>mongodb;agents;ai</PackageTags>
+    <PackageTags>mongodb;agents;ai;agent-framework;vector-search;rag</PackageTags>
+    <PackageReleaseNotes>https://github.com/mongo/ms-agent-framework-mongodb/blob/main/dotnet/CHANGELOG.md</PackageReleaseNotes>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+
+    <!-- Symbols: portable PDBs packaged as a separate .snupkg symbol package (docs/spec/quality-release.md). -->
+    <DebugType>portable</DebugType>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+
+    <!-- Source Link: lets consumers step into this package's exact source from its published commit. -->
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+
+    <!--
+      Deterministic/reproducible build: identical inputs (source + restored dependency graph) must produce a
+      byte-identical assembly. ContinuousIntegrationBuild additionally strips local build-path/PDB-checksum
+      variance and is only enabled under CI (GitHub Actions sets the CI environment variable) so local
+      inner-loop builds keep normal (non-CI) debug ergonomics.
+    -->
+    <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild Condition="'$(CI)' == 'true'">true</ContinuousIntegrationBuild>
+
+    <!--
+      In-box .NET SDK package-validation tooling (docs/spec/quality-release.md "package creation validation"):
+      validates TFM-appropriate package shape/API surface on every pack. No PackageValidationBaselineVersion is
+      set because there is no prior published version to compare against yet (pre-1.0, first packageable build).
+    -->
+    <EnablePackageValidation>true</EnablePackageValidation>
+
+    <!-- Keeps local `dotnet pack` output next to the other packaging artifacts this repository already ignores. -->
+    <PackageOutputPath>$(MSBuildThisFileDirectory)../../artifacts/packages</PackageOutputPath>
   </PropertyGroup>
 
   <ItemGroup>
     <InternalsVisibleTo Include="MongoDB.AgentFramework.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      Public API compatibility gate (docs/spec/quality-release.md ".NET CI MUST compare public API surface and
+      detect binary/source-breaking changes"). PublicAPI.Shipped.txt is currently empty: this is a pre-1.0
+      baseline of the *currently intended* public surface, not a "first published release" baseline; see
+      PublicAPI.Shipped.txt's header comment and docs/development/packaging/dotnet-packaging-release.md. The
+      analyzer fails the build (RS0016/RS0017, promoted to errors by TreatWarningsAsErrors) whenever code adds,
+      removes, or changes public API without a matching PublicAPI.Unshipped.txt update, so every future PR must
+      deliberately record the surface change it makes.
+    -->
+    <PackageReference Include="Microsoft.CodeAnalysis.PublicApiAnalyzers" Version="5.6.0" PrivateAssets="all" />
+    <!-- Embeds .git-derived commit/branch metadata so Source Link can resolve this package's exact source commit. -->
+    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="8.0.0" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <AdditionalFiles Include="PublicAPI.Shipped.txt" />
+    <AdditionalFiles Include="PublicAPI.Unshipped.txt" />
   </ItemGroup>
 
   <ItemGroup>
