@@ -120,3 +120,17 @@ jobs:
         run: |
           cat "$REPORT_DIR/summary.md" >> "$GITHUB_STEP_SUMMARY"
           test "$GATE_OUTCOME" = success
+
+  compatibility-readiness:
+    needs: [resolve, compatibility]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Enforce complete stable compatibility matrix
+        env:
+          RESOLVE_RESULT: ${{ needs.resolve.result }}
+          COMPATIBILITY_RESULT: ${{ needs.compatibility.result }}
+        run: |
+          test "$RESOLVE_RESULT" = success
+          test "$COMPATIBILITY_RESULT" = success

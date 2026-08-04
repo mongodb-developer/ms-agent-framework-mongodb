@@ -32,8 +32,12 @@ def test_codeql_pushes_run_only_for_trusted_branches() -> None:
 
     assert '      - "main"' in push
     assert '      - "feature/python-implementation"' in push
+    assert '      - "build/python-packaging-release"' in push
     assert "dependabot" not in push
     assert "  pull_request:" in workflow
+    assert "  push:" in workflow
+    push = _trigger_block(workflow, "push", "schedule")
+    assert "build/python-packaging-release" in push
     assert workflow.split("jobs:", 1)[0].count("security-events: write") == 0
     assert workflow.split("jobs:", 1)[1].count("security-events: write") == 1
 
@@ -76,18 +80,47 @@ def test_python_quality_verifies_release_artifacts_and_dependency_endpoints() ->
     assert "pymongo==4.13.0" in workflow
     assert "--upgrade-strategy eager" in workflow
     assert "--format cyclonedx-json" in workflow
+    assert "version-readiness:" in workflow
+    assert "refs/heads/build/python-packaging-release" in workflow
+    assert "scripts/validate_version_readiness.py" in workflow
+    assert "git ls-remote --tags origin" in workflow
+    assert "dist/readiness/*.whl dist/readiness/*.tar.gz" in workflow
+
+
+def test_every_build_branch_push_runs_python_readiness_workflows() -> None:
+    quality = _workflow("python-quality.yml")
+    compatibility = _workflow("python-agent-framework-compatibility.yml")
+    codeql = _workflow("codeql.yml")
+    vulnerability = _workflow("python-vulnerability-scan.yml")
+    credentials = _workflow("credential-scan.yml")
+
+    assert "  push:" in quality
+    assert "build/python-packaging-release" in compatibility
+    assert "build/python-packaging-release" in codeql
+    assert "build/python-packaging-release" in vulnerability
+    assert "  push:" in credentials
+    assert "  push:" not in _workflow("dependency-review.yml")
 
 
 def test_python_release_creates_main_reachable_tag_and_requires_explicit_publish() -> None:
     workflow = _workflow("release-python.yml")
 
     assert "  workflow_dispatch:" in workflow
+    push = _trigger_block(workflow, "push", "workflow_dispatch")
+    assert "      - main" in push
+    assert '      - "python/pyproject.toml"' in push
+    assert "dotnet" not in push
+    assert "build/python-packaging-release" not in push
     assert "default: false" in workflow
     assert 'test "$DISPATCH_REF" = main' in workflow
     assert 'git merge-base --is-ancestor "$SHA" origin/main' in workflow
-    assert 'TAG="python-v$VERSION"' in workflow
+    assert "github.event_name == 'push' && github.sha || inputs.commit" in workflow
+    assert 'test "$SHA" = "$GITHUB_SHA"' in workflow
+    assert "--output tag" in workflow
+    assert 'VERSION="${TAG#python-v}"' in workflow
     assert 'git push origin "refs/tags/$TAG"' in workflow
     assert "inputs.publish" in workflow
+    assert "(github.event_name == 'push' || inputs.publish)" in workflow
     assert "vars.PYPI_PUBLISHING_APPROVED == 'true'" in workflow
     assert "vars.PYPI_ENVIRONMENT != ''" in workflow
     assert "environment: ${{ vars.PYPI_ENVIRONMENT }}" in workflow
@@ -119,6 +152,16 @@ def test_python_release_creates_main_reachable_tag_and_requires_explicit_publish
     assert "release-gate.json" in workflow
     assert "Enforce compatibility outcome after retaining evidence" in workflow
     assert "Enforce release outcomes after retaining evidence" in workflow
+
+
+def test_all_workflow_actions_are_pinned() -> None:
+    for path in _WORKFLOWS.glob("*.yml"):
+        workflow = path.read_text(encoding="utf-8")
+        for line in workflow.splitlines():
+            if not line.strip().startswith("- uses:"):
+                continue
+            reference = line.rsplit("@", 1)[1].split()[0]
+            assert re.fullmatch(r"[0-9a-f]{40}", reference), f"{path.name}: {line}"
 
 
 def test_python_release_actions_are_pinned_to_reviewed_commits() -> None:

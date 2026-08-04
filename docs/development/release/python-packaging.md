@@ -106,12 +106,30 @@ constructor smoke, dependency endpoints, a CycloneDX SBOM, checksums, and
 artifact retention. Security workflows separately run dependency review,
 credential scanning, CodeQL, and `pip-audit`.
 
-`release-python.yml` is manual and must be dispatched from `main`. It accepts a
-commit, proves that commit is reachable from `origin/main`, verifies the static
-manifest/API-baseline version, and creates or verifies the annotated
-`python-v<version>` tag. It then continues in the same workflow run, avoiding
-the incorrect assumption that a `GITHUB_TOKEN`-created tag triggers another
-workflow. Build-branch pushes and ordinary merges cannot tag or publish.
+On every relevant `build/python-packaging-release` push, the complete readiness
+surface runs automatically. The `version-readiness` job uses
+`scripts/validate_version_readiness.py` to require one static canonical PEP 440
+version, matching API baseline and `python-v<version>` identity, valid built
+metadata, and no remote tag that conflicts with the exact staging SHA. It has
+read-only permissions and never creates a tag. CodeQL and the vulnerability
+audit explicitly include the build branch; credential scanning already covers
+all pushes. Dependency Review remains PR-only because its GitHub action requires
+pull-request base/head context.
+
+`release-python.yml` starts automatically only for a push to `main` that changes
+`python/pyproject.toml`; .NET-only changes do not select it. Automatic mode
+binds checkout and tag creation to immutable `github.sha`, proves ancestry,
+verifies the static canonical manifest/API-baseline version, and creates or
+idempotently accepts the annotated `python-v<version>` tag only at that SHA. It
+then continues in the same workflow run, avoiding the incorrect assumption that
+a `GITHUB_TOKEN`-created tag triggers another workflow. The automatic mode
+requests publication; all governance, provenance, environment, and approval
+gates still apply.
+
+Manual dispatch from `main` is the recovery path and applies identical
+validation. Its commit input selects the immutable SHA and its `publish` input
+controls whether publication is requested. Build-branch pushes cannot invoke
+the release workflow, create a tag, or publish.
 
 The workflow clean-builds from the exact SHA, runs latest/previous stable
 compatibility rows and release gates, attests the distributions, and retains

@@ -35,6 +35,10 @@ not authorize publication.
 - [ ] `pip-audit`, dependency review, CodeQL, and credential scan pass.
 - [ ] CycloneDX SBOM, SHA-256 checksums, and approved provenance are retained.
 - [ ] `git diff --check` and the final staged-diff review pass.
+- [ ] Build-branch required checks are green: version readiness, quality,
+  compatibility-readiness, CodeQL, credential scan, and vulnerability audit.
+- [ ] Dependency Review passes on the promotion pull request; it is PR-only
+  because the action requires pull-request dependency-diff context.
 
 ## Credentialed implementation gates
 
@@ -66,8 +70,9 @@ not authorize publication.
 - [ ] Organization signature policy is recorded and implemented; do not invent
   a signing identity or key.
 - [ ] Protected tag policy for `python-v<version>` is enabled.
-- [ ] The release workflow is dispatched from `main` with the reviewed commit;
-  `publish` is true only for an intended production publication.
+- [ ] The manifest-changing `main` push automatically selected only the Python
+  release workflow and bound it to the merge SHA. Manual dispatch is used only
+  for recovery; `publish` is true only for an intended publication retry.
 - [ ] Published-package verification downloads from PyPI, verifies metadata,
   hashes/attestations/signatures per policy, and repeats public API smoke.
 

@@ -25,6 +25,12 @@ no upload operation. See the
 [release runbook](../docs/release/python-release.md) for promotion, Actions
 inputs, compatibility modes, and failure recovery.
 
+Maintainers stage releases on `build/python-packaging-release`; its required
+readiness workflows never publish. After reviewed promotion, only a
+`python/pyproject.toml` change on `main` starts the manifest-driven Python
+release coordinator. Publication still requires every documented governance
+variable and protected-environment approval.
+
 Do not install an unverified registry project with this name. The package
 requires Python 3.10 or later, Agent Framework Core 1.13 or later (but below
 2.0), PyMongo 4.13 or later (but below 5.0), and OpenTelemetry API 1.39 or later

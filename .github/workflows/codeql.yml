@@ -9,6 +9,7 @@ on:
     branches:
       - "main"
       - "feature/python-implementation"
+      - "build/python-packaging-release"
     paths:
       - "python/**"
       - ".github/workflows/codeql.yml"
@@ -32,12 +33,12 @@ jobs:
       contents: read
       security-events: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@d3f86a106a0bac45b974a628896c90dbdf5c8093 # actions/checkout v4
         with:
           persist-credentials: false
-      - uses: github/codeql-action/init@v3
+      - uses: github/codeql-action/init@b611370bb5703a7efb587f9e7d136a0bb6f3c8cc # github/codeql-action v3
         with:
           languages: python
-      - uses: github/codeql-action/analyze@v3
+      - uses: github/codeql-action/analyze@b611370bb5703a7efb587f9e7d136a0bb6f3c8cc # github/codeql-action v3
         with:
           category: "/language:python"

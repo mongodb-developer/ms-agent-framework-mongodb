@@ -102,3 +102,38 @@ def test_compatibility_runner_retains_failure_evidence_contract() -> None:
     assert "publishing_attempted" in script
     assert "--cov=agent_framework_mongodb" in script
     assert "finally:" in script
+
+
+def test_version_readiness_requires_canonical_pep440_and_matching_tag(
+    tmp_path: Path,
+) -> None:
+    validator = _load_script("validate_version_readiness")
+    pyproject = tmp_path / "pyproject.toml"
+    baseline = tmp_path / "api-baseline.json"
+    pyproject.write_text('[project]\nversion = "1.2.0rc1"\n', encoding="utf-8")
+    baseline.write_text('{"baseline_version": "1.2.0rc1"}\n', encoding="utf-8")
+
+    assert validator.validate_version_readiness(
+        pyproject,
+        baseline,
+        "python-v1.2.0rc1",
+    ) == ("1.2.0rc1", "python-v1.2.0rc1")
+
+    pyproject.write_text('[project]\nversion = "1.2.0-rc1"\n', encoding="utf-8")
+    with pytest.raises(ValueError, match="canonical PEP 440"):
+        validator.validate_version_readiness(pyproject, baseline)
+
+
+def test_version_readiness_rejects_baseline_and_tag_mismatches(tmp_path: Path) -> None:
+    validator = _load_script("validate_version_readiness")
+    pyproject = tmp_path / "pyproject.toml"
+    baseline = tmp_path / "api-baseline.json"
+    pyproject.write_text('[project]\nversion = "1.2.3"\n', encoding="utf-8")
+    baseline.write_text('{"baseline_version": "1.2.2"}\n', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="API baseline"):
+        validator.validate_version_readiness(pyproject, baseline)
+
+    baseline.write_text('{"baseline_version": "1.2.3"}\n', encoding="utf-8")
+    with pytest.raises(ValueError, match="does not match manifest tag"):
+        validator.validate_version_readiness(pyproject, baseline, "python-v1.2.2")

@@ -7,24 +7,53 @@ explains the implementation.
 
 ## Promotion and version preparation
 
-1. Develop and prove packaging changes on `build/python-packaging-release`. This
-   staging branch cannot release.
+1. Develop and prove packaging changes on `build/python-packaging-release`.
+   Every relevant push automatically runs Python quality/full credential-free
+   coverage, Ruff, MyPy, Pyright, API/package/clean-install checks, canonical
+   version readiness, latest/previous stable compatibility, CodeQL, credential
+   scanning, and dependency vulnerability audit. This staging branch cannot
+   tag or publish.
 2. Change the static `project.version` in `python/pyproject.toml` and the
    `baseline_version` in `python/api-baseline.json` together. Use PEP 440 and
    choose the next independent package version; do not copy the Agent Framework
    version.
 3. Update release notes and compatibility evidence, run the local rehearsal,
    and merge the reviewed branch to `main`.
-4. From the Actions **Release Python package** workflow on `main`, supply `main`
-   or a full commit SHA reachable from `main`. Leave `publish` false to create
-   and prove the protected `python-v<version>` tag without uploading. Set it
-   true only for the intended production release.
+4. Merge the reviewed pull request with its intentional
+   `python/pyproject.toml` version change. That exact manifest-changing `main`
+   push automatically starts **Release Python package**, binds the release to
+   immutable `github.sha`, derives `python-v<version>`, and requests
+   publication. A .NET-only main change does not start this workflow.
 
 The workflow rejects dispatches from a non-`main` workflow ref, commits not
 reachable from `origin/main`, version/baseline mismatches, and an existing tag
 that points elsewhere. It creates the annotated tag itself. The same workflow
 then checks out the immutable commit and continues the build; it does **not**
 expect a `GITHUB_TOKEN` tag push to recursively start another workflow.
+
+Manual dispatch remains a recovery path. Supply the original full main SHA (or
+`main` when it still identifies that commit); `publish` defaults false and must
+be deliberately selected for a publication retry. An existing tag is accepted
+idempotently only when its peeled commit equals the selected SHA. Never move a
+conflicting tag.
+
+## Build-branch protection
+
+Protect `build/python-packaging-release` and require these fixed checks before
+merge:
+
+- `Python quality / version-readiness`;
+- `Python quality / quality`;
+- `Python Agent Framework compatibility / compatibility-readiness`;
+- `CodeQL / analyze`;
+- `Credential pattern scan / scan`;
+- `Python dependency vulnerability scan / audit`.
+
+Also require pull-request review and `Dependency review / dependency-review`
+for pull requests. Dependency Review intentionally remains PR-only because
+GitHub's dependency-review action needs the base/head dependency diff available
+only in pull-request context. Credentialed integration checks become additional
+required checks when the shared policy marks their protected environment ready.
 
 ## Protected publication
 
@@ -48,10 +77,11 @@ creates the GitHub Release. The release contains those distributions,
 checksums, JUnit/release reports, compatibility reports, CycloneDX SBOM, and
 GitHub provenance bundle.
 
-Merely pushing or merging never tags or publishes. A dispatch with
-`publish: false`, an unset/false `PYPI_PUBLISHING_APPROVED`, an unset
+A build-branch push never tags or publishes. A manifest-changing main push
+requests publication, but an unset/false `PYPI_PUBLISHING_APPROVED`, an unset
 `PYPI_ENVIRONMENT`, missing provenance approval, or a rejected environment
-deployment never uploads to PyPI.
+deployment never uploads to PyPI. Manual dispatch additionally requires
+`publish: true`.
 
 ## Agent Framework compatibility
 
