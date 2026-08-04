@@ -233,8 +233,22 @@ app that:
 
 `verify-package.ps1` step 5 runs it with `NUGET_PACKAGES` redirected to a
 fresh, isolated cache directory under `artifacts/`, guaranteeing the
-resolved assembly is the one just packed, not a stale cached copy. A single
-`dotnet restore` covers the whole multi-targeted project graph; the script
+resolved assembly is the one just packed, not a stale cached copy. The
+`nuget.config` also declares `packageSourceMapping`:
+`MongoDB.AgentFramework` is mapped *exclusively* to the local packed feed
+(`../../artifacts/packages`), and every other package id is mapped to
+`nuget.org` only -- so a same-id/same-version package could never be
+silently satisfied from the wrong source even if both feeds happened to
+carry a matching version. `verify-package.ps1` goes one step further than
+trusting a successful restore exit code: after restore it parses the
+generated `tests/PackageSmokeTest/obj/project.assets.json`, locates the
+`MongoDB.AgentFramework` library entry, and compares its recorded `sha512`
+hash against a fresh SHA512 computed over the actual packed `.nupkg` bytes
+(`ConsumerCacheVerification.ps1`'s `Test-ConsumerCacheResolvedPackedPackage`,
+self-tested in `verify-consumer-cache.tests.ps1`) -- proving the restore
+resolved *that exact local artifact*, not merely "a" package satisfying the
+version range. A single `dotnet restore` covers the whole multi-targeted
+project graph; the script
 then runs `dotnet run --framework <tfm>` once per TFM read directly from the
 project's own `<TargetFrameworks>` element (so this script can never
 silently drift out of sync with the project it runs), proving the package
@@ -433,6 +447,12 @@ recorded output.
   original bug shape into `PackageMetadataAssertions.ps1` [ignoring the
   scriptblock's return value] makes this self-test fail, confirming it is a
   meaningful regression guard, not a tautological pass).
+- `dotnet/scripts/verify-consumer-cache.tests.ps1` (self-test for
+  `ConsumerCacheVerification.ps1`'s content-hash proof: 7 assertions --
+  hash reproduction against .NET's own SHA512, a matching hash passes, a
+  wrong/stale hash fails, a missing library entry fails, a non-`package`
+  type fails, a missing `sha512` fails, and looking up the wrong version
+  fails -- all 7 passed).
 - `dotnet/scripts/verify-release-tag.tests.ps1` (self-test: 14 assertions --
   pure tag/version comparison for exact match, mismatch, pre-release
   match/mismatch, missing `dotnet-` prefix, non-tag branch ref, and

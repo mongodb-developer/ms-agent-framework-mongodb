@@ -18,12 +18,18 @@
          and per-entry zip timestamps, since neither reflects package *content*. Every real payload entry (dll,
          xml docs, nuspec, README) must be byte-identical across the two runs.
       5. Restores and runs the isolated consumer smoke test (tests/PackageSmokeTest) against the packed artifact
-         through a local NuGet feed and an isolated NUGET_PACKAGES cache directory -- never a ProjectReference,
-         and never the developer machine's shared global package cache -- constructing every public
-         provider/facade type across Memory, exact Chat History, RAG (all four MongoDBSearchMode values), Index
-         Management, Session Store, and Workflow Checkpoint Store. Runs once per TFM MongoDB.AgentFramework
-         itself ships (`dotnet run -f net8.0|net9.0|net10.0`), proving the package restores and runs -- not just
-         compiles -- on every shipped target framework.
+         through a local NuGet feed and an isolated NUGET_PACKAGES cache directory (cleared before every restore)
+         -- never a ProjectReference, and never the developer machine's shared global package cache --
+         constructing every public provider/facade type across Memory, exact Chat History, RAG (all four
+         MongoDBSearchMode values), Index Management, Session Store, and Workflow Checkpoint Store. Runs once per
+         TFM MongoDB.AgentFramework itself ships (`dotnet run -f net8.0|net9.0|net10.0`), proving the package
+         restores and runs -- not just compiles -- on every shipped target framework. The smoke project's
+         nuget.config additionally uses packageSourceMapping so MongoDB.AgentFramework can be resolved ONLY from
+         the local packed feed (every other package only from nuget.org); this script then proves that
+         restriction actually held by comparing the restored project.assets.json's recorded content hash for
+         MongoDB.AgentFramework against a fresh hash of the actual packed .nupkg on disk (see
+         ConsumerCacheVerification.ps1) -- a wrong source resolving the same id/version string would still let
+         the restore "succeed" without this check.
 
     This script never contacts a real MongoDB deployment, never publishes or pushes a package, and never invents
     a signing identity or publisher credential; see dotnet/README.md and the final report this script prints for
@@ -55,6 +61,7 @@ $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 . (Join-Path $PSScriptRoot "PackageAllowlist.ps1")
 . (Join-Path $PSScriptRoot "PackageMetadataAssertions.ps1")
+. (Join-Path $PSScriptRoot "ConsumerCacheVerification.ps1")
 
 $DotnetRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $SrcProject = Join-Path $DotnetRoot "src/MongoDB.AgentFramework/MongoDB.AgentFramework.csproj"
@@ -312,6 +319,29 @@ else {
         & dotnet restore $SmokeProject --force --no-cache
         if ($LASTEXITCODE -ne 0) {
             throw "dotnet restore failed with exit code $LASTEXITCODE"
+        }
+
+        # Prove the isolated restore actually resolved MongoDB.AgentFramework from THIS run's freshly-packed
+        # .nupkg -- not merely that the restore's exit code was 0. tests/PackageSmokeTest/nuget.config's
+        # packageSourceMapping restricts MongoDB.AgentFramework to "local-packed-feed" (every other package to
+        # nuget.org), and $ConsumerCacheDir was cleared above so no stale cache entry survives from a previous
+        # run; this content-hash comparison (ConsumerCacheVerification.ps1) is what actually falsifies a broken
+        # source restriction or a stale/mismatched cache, since a wrong source resolving the same id/version
+        # string would still let the restore "succeed" without it.
+        $projectAssetsPath = Join-Path (Split-Path $SmokeProject -Parent) "obj/project.assets.json"
+        if (-not (Test-Path $projectAssetsPath)) {
+            throw "Expected restored project.assets.json not found at '$projectAssetsPath'."
+        }
+
+        $projectAssets = Get-Content $projectAssetsPath -Raw | ConvertFrom-Json
+        $consumerCacheMatchesPackedPackage = Test-ConsumerCacheResolvedPackedPackage `
+            -ProjectAssets $projectAssets -PackageId $metadata.id -PackageVersion $metadata.version -NupkgPath $primary.Nupkg
+
+        if ($consumerCacheMatchesPackedPackage) {
+            Write-Ok "Isolated restore resolved $($metadata.id)/$($metadata.version) from the local packed feed with a content hash matching the actual packed .nupkg"
+        }
+        else {
+            Write-Failure "Isolated restore's resolved $($metadata.id) library entry does not match the locally packed .nupkg's content hash -- packageSourceMapping/cache isolation may not be enforced as expected"
         }
 
         $tfmFailures = @()
