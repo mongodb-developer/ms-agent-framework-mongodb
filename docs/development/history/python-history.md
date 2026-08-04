@@ -37,14 +37,22 @@ dimension never behaves as a wildcard into a more-specific partition.
 
 Replay uses `Message.from_dict()`. Raw service representations excluded by Agent
 Framework public serialization are intentionally not persisted. Schema version 1
-documents require migration because they lack the complete discriminator.
+documents require migration because they lack the complete discriminator. Before
+returning current or empty history, the provider probes for authorized version 1
+documents under the exact raw scope and session. For each absent dimension, the
+probe accepts only explicit BSON null or a missing field; it cannot match a
+non-null, more-specific partition. Detection raises `MongoDBMappingError` with
+migration guidance instead of silently hiding legacy history.
 
 Internal `_kind: "sequence"` and `_kind: "reservation"` documents identify the same
 complete scope. `find_one_and_update($inc, upsert=True, return_document=AFTER)`
 atomically assigns a range. Before inserting any message, the provider durably
 records that range under a retry-attempt token. A partial failure therefore retries
 the original message IDs and sequence slots rather than allocating a split range.
-Concurrent attempts receive separate tokens and ranges.
+Concurrent anonymous attempts receive separate tokens and ranges. Explicit-ID
+attempts use a deterministic reservation token, so overlapping writers reconcile
+to the winning range even when one writer completed before the other looked up the
+reservation.
 
 Agent Framework provider state stores a versioned envelope of failed and in-flight
 attempts. Successful attempts are removed, so a later identical anonymous turn gets
@@ -55,6 +63,9 @@ guidance rather than ambiguously collapsing a legitimate turn. Stable scoped
 document IDs and the message uniqueness index make retries idempotent; duplicate
 stored data is accepted only when its payload, versions, and reserved sequence agree.
 Messages without framework IDs retain `message_id: null` in their exact payload.
+Reservations include `created_at` and a seven-day `expires_at`. Completed metadata
+remains available for losing concurrent writers and is bounded by the explicit
+reservation TTL index; failed attempts have the same bounded recovery window.
 Latest-N reads filter the complete scope in MongoDB, sort descending, limit, then
 reverse the bounded result. Optional `max_age` adds a server-side `created_at`
 predicate. Tool calls and results remain separate ordered messages.
@@ -73,12 +84,15 @@ not Search indexes:
 
 1. unique `scope_discriminator`/session/message identity;
 2. unique `scope_discriminator`/session/sequence ordering;
-3. optional single-field `expires_at` TTL with `expireAfterSeconds: 0`.
+3. optional message `expires_at` TTL with `expireAfterSeconds: 0`;
+4. required reservation `expires_at` TTL with `expireAfterSeconds: 0`.
 
 All definitions require a partial filter for message documents with a string scope
 discriminator. `validate_indexes()` checks exact key order, uniqueness, partial
 filter semantics, and TTL configuration and provides recreate guidance for every
-mismatch.
+mismatch. Identity and ordering indexes are created with `locale: simple`; validation
+accepts the server-equivalent omission or explicit simple representation and rejects
+case-insensitive or other non-binary collations.
 
 `clear_messages()` requires the configured
 authorization and exact session, deletes only that partition, resets its allocator,

@@ -175,6 +175,17 @@ class FakeCollection:
 
     async def create_index(self, keys: Any, **kwargs: Any) -> str:
         self.created_indexes.append((keys, kwargs))
+        self.regular_indexes.append(
+            {
+                "name": kwargs["name"],
+                "key": dict(keys),
+                **{
+                    key: value
+                    for key, value in kwargs.items()
+                    if key in {"expireAfterSeconds", "collation"}
+                },
+            }
+        )
         return str(kwargs["name"])
 
     async def list_indexes(self) -> FakeCursor:
@@ -838,26 +849,12 @@ async def test_explicit_search_and_regular_index_operations_remain_separate() ->
     assert collection.created_search_model is not None
     assert collection.created_indexes == []
 
-    regular_names = await memory.ensure_regular_indexes()
-    assert regular_names == ("memory_scope_admin", "memory_expiration_ttl")
+    regular_indexes = await memory.ensure_regular_indexes()
+    assert tuple(item.definition.name for item in regular_indexes) == (
+        "memory_scope_admin",
+        "memory_expiration_ttl",
+    )
     assert collection.created_indexes[1][1]["expireAfterSeconds"] == 0
-    collection.regular_indexes = [
-        {
-            "name": "memory_scope_admin",
-            "key": {
-                "application_id": 1,
-                "agent_id": 1,
-                "user_id": 1,
-                "session_id": 1,
-                "_id": 1,
-            },
-        },
-        {
-            "name": "memory_expiration_ttl",
-            "key": {"expires_at": 1},
-            "expireAfterSeconds": 0,
-        },
-    ]
     await memory.validate_regular_indexes()
 
     with pytest.raises(MongoDBIndexMissingError):
@@ -866,6 +863,7 @@ async def test_explicit_search_and_regular_index_operations_remain_separate() ->
     collection.search_indexes = [
         {
             "name": "agent_framework_memory",
+            "type": "vectorSearch",
             "status": "READY",
             "queryable": True,
             "latestDefinition": {

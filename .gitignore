@@ -15,3 +15,9 @@ artifacts/
 .env
 .env.*
 !.env.example
+.artifact-*/
+.audit-venv/
+.dependency-*/
+.release-smoke-*/
+.published-smoke-*/
+published/

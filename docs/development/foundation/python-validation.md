@@ -80,6 +80,7 @@ The package currently exports:
 | `MongoDBEmbeddingError` | Invalid embedding output or translated generator failure |
 | `MongoDBCapabilityError` | Unsupported server, deployment, driver, or mode capability |
 | `MongoDBMappingError` | Stored or retrieved data cannot be mapped safely |
+| `MongoDBSerializationError` | Mapping subtype for values whose lossless serialized identity cannot be canonicalized |
 
 Later slices extend the taxonomy for index, filter, retrieval, persistence, timeout, and
 cancellation behavior. Direct APIs surface these errors; only documented Agent Framework adapter
@@ -99,7 +100,7 @@ python -m ruff check src tests
 python -m mypy
 python -m pyright
 python -m build
-python -m twine check dist\*
+python -m twine check dist\*.whl dist\*.tar.gz
 ```
 
 The wheel and source distribution were each installed into a new virtual environment, then

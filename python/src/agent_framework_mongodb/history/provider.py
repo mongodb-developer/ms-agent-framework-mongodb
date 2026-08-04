@@ -6,7 +6,6 @@ import asyncio
 import hashlib
 import json
 import logging
-import time
 import uuid
 from collections.abc import Awaitable, Mapping, Sequence
 from dataclasses import dataclass
@@ -18,25 +17,20 @@ from agent_framework import AgentSession, HistoryProvider, Message, SessionConte
 from pymongo import ASCENDING, DESCENDING, AsyncMongoClient, ReturnDocument
 from pymongo.asynchronous.collection import AsyncCollection
 from pymongo.errors import (
-    ConnectionFailure,
     DuplicateKeyError,
-    OperationFailure,
     PyMongoError,
-    ServerSelectionTimeoutError,
 )
 
 from .._shared.client import MongoClientHandle
+from .._shared.error_handling import OperationKind, translate_pymongo_error
+from .._shared.observability import instrument
 from ..errors import (
-    MongoDBAuthorizationError,
     MongoDBConfigurationError,
     MongoDBIndexMismatchError,
     MongoDBIndexMissingError,
     MongoDBMappingError,
     MongoDBPersistenceError,
-    MongoDBRetrievalError,
     MongoDBTimeoutError,
-    MongoDBTransientPersistenceError,
-    MongoDBTransientRetrievalError,
 )
 
 MongoDocument = dict[str, Any]
@@ -145,6 +139,7 @@ class MongoDBHistoryProvider(HistoryProvider):
     FRAMEWORK_SERIALIZATION_VERSION: ClassVar[int] = 1
     DEFAULT_DATABASE_NAME: ClassVar[str] = "agent_framework"
     DEFAULT_COLLECTION_NAME: ClassVar[str] = "chat_history"
+    RESERVATION_RETENTION: ClassVar[timedelta] = timedelta(days=7)
 
     def __init__(
         self,
@@ -244,6 +239,7 @@ class MongoDBHistoryProvider(HistoryProvider):
         self._reject_service_managed_history(context)
         await super().after_run(agent=agent, session=session, context=context, state=state)
 
+    @instrument("history", "load")
     async def get_messages(
         self,
         session_id: str | None,
@@ -254,7 +250,6 @@ class MongoDBHistoryProvider(HistoryProvider):
         """Load the latest authorized messages and return them chronologically."""
         del state, kwargs
         scope = self._session_scope(session_id)
-        started = time.monotonic()
         try:
             messages = await _with_timeout(
                 self._get_messages(scope),
@@ -266,12 +261,11 @@ class MongoDBHistoryProvider(HistoryProvider):
         except (MongoDBMappingError, MongoDBTimeoutError):
             raise
         except PyMongoError as exc:
-            _log_failure("load", started, _error_category(exc, "retrieval"))
             raise _translate_mongo_error(exc, "retrieval") from exc
-        _log_success("load", started, len(messages))
         return messages
 
     async def _get_messages(self, scope: MongoDocument) -> list[Message]:
+        await self._reject_legacy_scope(scope)
         query: MongoDocument = {"_kind": "message", **scope}
         if self.options.max_age is not None:
             query["created_at"] = {
@@ -286,6 +280,40 @@ class MongoDBHistoryProvider(HistoryProvider):
         documents.reverse()
         return [_message_from_document(document) for document in documents]
 
+    async def _reject_legacy_scope(self, scope: MongoDocument) -> None:
+        absent_dimension_clauses: list[MongoDocument] = []
+        query: MongoDocument = {
+            "_kind": "message",
+            "schema_version": 1,
+            "scope_discriminator": {"$exists": False},
+            "session_id": scope["session_id"],
+        }
+        for name in ("tenant_id", "application_id", "agent_id", "user_id"):
+            value = scope[name]
+            if value is None:
+                absent_dimension_clauses.append(
+                    {
+                        "$or": [
+                            {name: {"$type": 10}},
+                            {name: {"$exists": False}},
+                        ]
+                    }
+                )
+            else:
+                query[name] = value
+        if absent_dimension_clauses:
+            query["$and"] = absent_dimension_clauses
+        if await self.collection.find_one(query) is not None:
+            raise MongoDBMappingError(
+                "Authorized History schema version 1 documents require migration to "
+                "schema version 2 with a canonical scope discriminator before replay."
+            )
+
+    @instrument(
+        "history",
+        "persist",
+        result_count=lambda arguments, _result: len(cast(Sequence[object], arguments["messages"])),
+    )
     async def save_messages(
         self,
         session_id: str | None,
@@ -299,7 +327,6 @@ class MongoDBHistoryProvider(HistoryProvider):
         scope = self._session_scope(session_id)
         if not messages:
             return
-        started = time.monotonic()
         try:
             await _with_timeout(
                 self._save_messages(scope, messages, state),
@@ -311,9 +338,7 @@ class MongoDBHistoryProvider(HistoryProvider):
         except (MongoDBMappingError, MongoDBTimeoutError):
             raise
         except PyMongoError as exc:
-            _log_failure("persist", started, _error_category(exc, "persistence"))
             raise _translate_mongo_error(exc, "persistence") from exc
-        _log_success("persist", started, len(messages))
 
     async def _save_messages(
         self,
@@ -367,9 +392,7 @@ class MongoDBHistoryProvider(HistoryProvider):
                     existing_by_id[document_id] = existing
 
             token = cast(str, attempt["token"])
-            if len(existing_by_id) == len(candidates):
-                await self._delete_reservation(scope, token)
-            else:
+            if len(existing_by_id) != len(candidates):
                 first_sequence = await self._reserve_sequence(
                     scope,
                     token=token,
@@ -398,7 +421,6 @@ class MongoDBHistoryProvider(HistoryProvider):
                         if existing is None:
                             raise
                         _validate_duplicate(existing, candidate, include_sequence=True)
-                await self._delete_reservation(scope, token)
         except (asyncio.CancelledError, Exception):
             _finish_history_retry_attempt(
                 retry_state,
@@ -440,6 +462,8 @@ class MongoDBHistoryProvider(HistoryProvider):
             "token": token,
             "count": count,
             "first_sequence": first_sequence,
+            "created_at": datetime.now(timezone.utc),
+            "expires_at": datetime.now(timezone.utc) + self.RESERVATION_RETENTION,
         }
         try:
             await self.collection.insert_one(reservation)
@@ -449,15 +473,6 @@ class MongoDBHistoryProvider(HistoryProvider):
                 raise
             return _validate_reservation(existing, count)
         return first_sequence
-
-    async def _delete_reservation(self, scope: MongoDocument, token: str) -> None:
-        await self.collection.delete_one(
-            {
-                "_id": _reservation_id(scope, token),
-                "_kind": "reservation",
-                **scope,
-            }
-        )
 
     async def _allocate_sequence(self, scope: MongoDocument, count: int) -> int:
         counter_id = _counter_id(scope)
@@ -484,10 +499,10 @@ class MongoDBHistoryProvider(HistoryProvider):
             raise MongoDBPersistenceError("MongoDB History sequence allocation returned no value.")
         return cast(int, counter["sequence"]) - count + 1
 
+    @instrument("history", "delete")
     async def clear_messages(self, session_id: str | None = None) -> int:
         """Clear exactly one authorized session and return acknowledged message count."""
         scope = self._session_scope(session_id)
-        started = time.monotonic()
         try:
             result = await _with_timeout(
                 self.collection.delete_many({"_kind": "message", **scope}),
@@ -511,12 +526,11 @@ class MongoDBHistoryProvider(HistoryProvider):
         except MongoDBTimeoutError:
             raise
         except PyMongoError as exc:
-            _log_failure("delete", started, _error_category(exc, "persistence"))
             raise _translate_mongo_error(exc, "persistence") from exc
         count = int(result.deleted_count)
-        _log_success("delete", started, count)
         return count
 
+    @instrument("indexing", "ensure_index")
     async def ensure_indexes(self) -> tuple[str, ...]:
         """Explicitly create regular uniqueness, ordering, and optional TTL indexes."""
         scope_keys = [
@@ -534,6 +548,7 @@ class MongoDBHistoryProvider(HistoryProvider):
                     "name": "history_scoped_message_unique",
                     "unique": True,
                     "partialFilterExpression": partial,
+                    "collation": {"locale": "simple"},
                 },
             ),
             (
@@ -542,6 +557,7 @@ class MongoDBHistoryProvider(HistoryProvider):
                     "name": "history_scoped_sequence",
                     "unique": True,
                     "partialFilterExpression": partial,
+                    "collation": {"locale": "simple"},
                 },
             ),
         ]
@@ -556,6 +572,19 @@ class MongoDBHistoryProvider(HistoryProvider):
                     },
                 )
             )
+        definitions.append(
+            (
+                [("expires_at", ASCENDING)],
+                {
+                    "name": "history_reservation_ttl",
+                    "expireAfterSeconds": 0,
+                    "partialFilterExpression": {
+                        "_kind": "reservation",
+                        "scope_discriminator": {"$type": "string"},
+                    },
+                },
+            )
+        )
         try:
             return tuple(
                 [await self.collection.create_index(keys, **kwargs) for keys, kwargs in definitions]
@@ -565,6 +594,7 @@ class MongoDBHistoryProvider(HistoryProvider):
         except PyMongoError as exc:
             raise _translate_mongo_error(exc, "persistence") from exc
 
+    @instrument("indexing", "validate_index")
     async def validate_indexes(self) -> None:
         """Validate required regular indexes without mutating MongoDB."""
         try:
@@ -620,6 +650,11 @@ class MongoDBHistoryProvider(HistoryProvider):
                     f"Regular index '{name}' has an incompatible "
                     "partialFilterExpression; recreate it with ensure_indexes()."
                 )
+            if not _has_simple_collation(index):
+                raise MongoDBIndexMismatchError(
+                    f"Regular index '{name}' must use simple binary collation; "
+                    "recreate it with ensure_indexes()."
+                )
         if self.options.retention is not None:
             ttl = by_name.get("history_expiration_ttl")
             if ttl is None:
@@ -646,6 +681,26 @@ class MongoDBHistoryProvider(HistoryProvider):
                     "Regular index 'history_expiration_ttl' has an incompatible "
                     "expireAfterSeconds value; recreate it with ensure_indexes()."
                 )
+        reservation_ttl = by_name.get("history_reservation_ttl")
+        if reservation_ttl is None:
+            raise MongoDBIndexMissingError(
+                "Regular index 'history_reservation_ttl' does not exist; create it explicitly."
+            )
+        reservation_partial = {
+            "_kind": "reservation",
+            "scope_discriminator": {"$type": "string"},
+        }
+        if (
+            _index_keys(reservation_ttl) != (("expires_at", 1),)
+            or reservation_ttl.get("unique", False) is not False
+            or reservation_ttl.get("partialFilterExpression") != reservation_partial
+            or reservation_ttl.get("expireAfterSeconds") != 0
+        ):
+            raise MongoDBIndexMismatchError(
+                "Regular index 'history_reservation_ttl' has incompatible keys, uniqueness, "
+                "partialFilterExpression, or expireAfterSeconds; recreate it with "
+                "ensure_indexes()."
+            )
 
     async def close(self) -> None:
         """Close only a MongoDB client created by this provider."""
@@ -958,45 +1013,15 @@ def _index_keys(index: Mapping[str, Any]) -> tuple[tuple[str, int], ...]:
     )
 
 
-def _error_category(error: PyMongoError, operation: str) -> str:
-    translated = _translate_mongo_error(error, operation)
-    return translated.__class__.__name__
-
-
-def _translate_mongo_error(error: PyMongoError, operation: str) -> Exception:
-    if isinstance(error, OperationFailure) and error.code in {13, 18}:
-        return MongoDBAuthorizationError("MongoDB authorization failed.")
-    transient = isinstance(error, (ConnectionFailure, ServerSelectionTimeoutError))
-    if operation == "retrieval":
-        if transient:
-            return MongoDBTransientRetrievalError("MongoDB History retrieval failed transiently.")
-        return MongoDBRetrievalError("MongoDB History retrieval failed.")
-    if transient:
-        return MongoDBTransientPersistenceError("MongoDB History persistence failed transiently.")
-    return MongoDBPersistenceError("MongoDB History persistence failed.")
-
-
-def _log_success(operation: str, started: float, count: int) -> None:
-    _LOGGER.info(
-        "MongoDB History operation completed",
-        extra={
-            "feature": "history",
-            "operation": operation,
-            "outcome": "success",
-            "result_count": count,
-            "duration_ms": round((time.monotonic() - started) * 1000),
-        },
+def _has_simple_collation(index: Mapping[str, Any]) -> bool:
+    collation = index.get("collation")
+    if collation is None or collation == "simple":
+        return True
+    return (
+        isinstance(collation, Mapping)
+        and cast(Mapping[str, object], collation).get("locale") == "simple"
     )
 
 
-def _log_failure(operation: str, started: float, category: str) -> None:
-    _LOGGER.warning(
-        "MongoDB History operation failed",
-        extra={
-            "feature": "history",
-            "operation": operation,
-            "outcome": "failed",
-            "error_category": category,
-            "duration_ms": round((time.monotonic() - started) * 1000),
-        },
-    )
+def _translate_mongo_error(error: PyMongoError, operation: OperationKind) -> Exception:
+    return translate_pymongo_error(error, operation, feature="history")
