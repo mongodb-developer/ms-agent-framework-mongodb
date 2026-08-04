@@ -269,16 +269,36 @@ human-readable tag next to the pinned commit SHA):
   exactly what happens when this workflow is not run.
 - **`dotnet-sbom-provenance.yml`** -- split into two trust-gated jobs:
   - `sbom` runs on `pull_request`/push-to-`main`/push of a `dotnet-v*` tag/
-    `workflow_dispatch`, with only `contents: read`. It packs the library,
-    generates an SPDX and a CycloneDX SBOM via `anchore/sbom-action`, prints
-    a SHA256 checksum manifest, and uploads all of the above as one workflow
-    artifact. Requires no secrets and never requests elevated OIDC/
-    attestation permissions, so it is safe to run against untrusted fork
-    pull requests.
+    `workflow_dispatch`, with only `contents: read`. It runs
+    `scripts/verify-package.ps1` (the same script `dotnet-quality.yml` runs)
+    to pack and verify the library -- never an independent, unverified
+    `dotnet pack` -- then generates an SPDX and a CycloneDX SBOM via
+    `anchore/sbom-action` over that exact, already-verified primary
+    `.nupkg`/`.snupkg`, prints a SHA256 checksum manifest, and uploads all of
+    the above as one workflow artifact. On a trusted `dotnet-v*` tag push or
+    a manual `workflow_dispatch`, it runs the script's FULL verification
+    (allowlist, nuspec metadata, double-pack reproducibility, and the
+    multi-TFM isolated consumer smoke test); for `pull_request`/push-to-
+    `main` it runs the faster pack+allowlist+metadata-only path, since
+    `dotnet-quality.yml` already runs the full script for those triggers on
+    both OS matrix legs, and this workflow is the only one of this
+    repository's .NET workflows that ever triggers on a tag push at all, so
+    it cannot assume any other workflow already fully verified a tag-pushed
+    artifact. It also asserts, for a trusted tag push only, that the packed
+    `.nuspec`'s `<version>` exactly matches `dotnet-v<version>` for the
+    triggering tag (`scripts/verify-release-tag.ps1`/
+    `scripts/ReleaseVersionTag.ps1`, self-tested in
+    `scripts/verify-release-tag.tests.ps1`) before anything is uploaded --
+    refusing to upload/attest a mismatched tag/version pair. A manual
+    `workflow_dispatch` instead only *records* the packed version (there is
+    no tag to validate against in that mode). Requires no secrets and never
+    requests elevated OIDC/attestation permissions, so it is safe to run
+    against untrusted fork pull requests.
   - `provenance-attestation` (`needs: sbom`) downloads that exact artifact
     (rather than re-packing, so the attested bytes are provably the same
-    ones the `sbom` job already SBOM'd/checksummed) and requests a GitHub
-    build-provenance attestation via `actions/attest-build-provenance`
+    ones the `sbom` job already verified, tag/version-checked, SBOM'd, and
+    checksummed) and requests a GitHub build-provenance attestation via
+    `actions/attest-build-provenance`
     (`id-token: write`, `attestations: write`, `artifact-metadata: write`,
     `contents: read` -- the exact permissions that action's own
     documentation requires, nothing broader). It runs **only** for a
@@ -302,6 +322,11 @@ The package version is `0.1.0-preview.1`. Per `packages.md`/
 `dotnet-v<version>` (for example `dotnet-v0.1.0-preview.1`). **No tag has
 been created by this work** -- tagging and publishing are explicitly
 excluded from this packaging-engineering slice pending ADR 0013 acceptance.
+When a `dotnet-v*` tag is eventually pushed, `dotnet-sbom-provenance.yml`'s
+`sbom` job asserts the packed `.nuspec`'s `<version>` exactly matches that
+tag (`scripts/verify-release-tag.ps1`) before any upload or attestation can
+proceed, so a tag/version mismatch fails the workflow rather than silently
+publishing/attesting the wrong artifact.
 
 ## Known blockers (not resolved by this slice)
 
@@ -370,9 +395,9 @@ recorded output.
   return a strict boolean rather than discarding its result; double-pack
   reproducibility with every real payload entry byte-identical; isolated
   consumer smoke test across all three shipped TFMs
-  [net8.0/net9.0/net10.0], each constructing all twelve public-API
-  constructions including `VectorEnn`; checksum manifest -- all steps
-  passed).
+  [net8.0/net9.0/net10.0], each constructing all public-API surfaces
+  including all four `MongoDBSearchMode` values (`VectorAnn`/`VectorEnn`/
+  `FullText`/`HybridRrf`); checksum manifest -- all steps passed).
 - `dotnet/scripts/verify-package.allowlist.tests.ps1` (self-test: 17
   assertions across 6 fixtures -- valid entries pass; a missing required
   file, an unexpected extra file, and a duplicated entry each fail with the
@@ -389,6 +414,14 @@ recorded output.
   `PackageMetadataAssertions.ps1` [ignoring the scriptblock's return value]
   makes this self-test fail with 19 assertion failures, confirming it is a
   meaningful regression guard, not a tautological pass).
+- `dotnet/scripts/verify-release-tag.tests.ps1` (self-test: 14 assertions --
+  pure tag/version comparison for exact match, mismatch, pre-release
+  match/mismatch, missing `dotnet-` prefix, non-tag branch ref, and
+  case-sensitivity; `Get-NupkgVersion` parses both a normal and a
+  pre-release version from a real in-memory `.nuspec`-containing zip
+  fixture; end-to-end process-exit-code checks of `verify-release-tag.ps1`
+  for both the `-EnforceMatch` [tag-push] and record-only
+  [`workflow_dispatch`] invocation shapes -- all 14 passed).
 - `dotnet/scripts/verify-agent-framework-compatibility.ps1 -Configuration
   Release` (restores `MongoDB.AgentFramework.Tests.csproj` -- which pulls in
   `MongoDB.AgentFramework.csproj` via `ProjectReference` -- and builds both
