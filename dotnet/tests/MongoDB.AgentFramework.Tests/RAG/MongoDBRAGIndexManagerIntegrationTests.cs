@@ -47,6 +47,7 @@ public sealed class MongoDBRAGIndexManagerIntegrationTests
 
         try
         {
+            await client.GetDatabase(databaseName!).CreateCollectionAsync(collectionName);
             Assert.Null(await provisioner.GetVectorSearchIndexAsync());
             Assert.Null(await provisioner.GetSearchIndexAsync());
 

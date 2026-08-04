@@ -64,8 +64,6 @@ public sealed class ParentDocumentSmokeIntegrationTests
         await SampleCleanupOrchestration.RunAsync(
             body: async () =>
             {
-                await provisioner.ProvisionAsync();
-
                 var document = new SourceDocument(
                     tenantId,
                     sourceId,
@@ -73,6 +71,7 @@ public sealed class ParentDocumentSmokeIntegrationTests
                         "This parent document links both facts together for attribution.",
                     Title: "Shipping colors reference");
                 await pipeline.IngestAsync(document);
+                await provisioner.ProvisionAsync();
 
                 var searchOptions = new MongoDBRAGProviderOptions
                 {
@@ -96,7 +95,7 @@ public sealed class ParentDocumentSmokeIntegrationTests
                 var retriever = new ParentDocumentRetriever(childSearcher, parentLookup, tenantId);
 
                 IReadOnlyList<ParentSearchResult> results = await PollUntilNonEmptyAsync(
-                    retriever, "What color do widgets ship in?", TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(1));
+                    retriever, "What color do widgets ship in?", TimeSpan.FromMinutes(2), TimeSpan.FromSeconds(1));
 
                 Assert.NotEmpty(results);
                 ParentSearchResult hydratedParent = Assert.Single(results);

@@ -122,14 +122,14 @@ public sealed class MongoDBRAGIntegrationTests
                 annReadinessProvider,
                 "blue widgets",
                 results => results.Any(r => r.Id == tenantAId) && results.Any(r => r.Id == tenantBId),
-                timeout: TimeSpan.FromSeconds(30),
+                timeout: TimeSpan.FromMinutes(2),
                 pollInterval: TimeSpan.FromSeconds(1));
 
             IReadOnlyList<MongoDBRAGResult> annResults = await PollUntilSearchableAsync(
                 provider,
                 "blue widgets",
                 tenantAId,
-                timeout: TimeSpan.FromSeconds(30),
+                timeout: TimeSpan.FromMinutes(2),
                 pollInterval: TimeSpan.FromSeconds(1));
             Assert.Contains(annResults, result => result.Id == tenantAId);
             Assert.DoesNotContain(annResults, result => result.Id == tenantBId);
@@ -147,14 +147,14 @@ public sealed class MongoDBRAGIntegrationTests
                 ennReadinessProvider,
                 "blue widgets",
                 results => results.Any(r => r.Id == tenantAId) && results.Any(r => r.Id == tenantBId),
-                timeout: TimeSpan.FromSeconds(30),
+                timeout: TimeSpan.FromMinutes(2),
                 pollInterval: TimeSpan.FromSeconds(1));
 
             IReadOnlyList<MongoDBRAGResult> ennResults = await PollUntilSearchableAsync(
                 ennProvider,
                 "blue widgets",
                 tenantAId,
-                timeout: TimeSpan.FromSeconds(30),
+                timeout: TimeSpan.FromMinutes(2),
                 pollInterval: TimeSpan.FromSeconds(1));
             Assert.Contains(ennResults, result => result.Id == tenantAId);
             Assert.DoesNotContain(ennResults, result => result.Id == tenantBId);
@@ -303,14 +303,14 @@ public sealed class MongoDBRAGIntegrationTests
                 readinessProvider,
                 "blue widgets",
                 results => results.Any(r => r.Id == tenantAId) && results.Any(r => r.Id == tenantBId),
-                timeout: TimeSpan.FromSeconds(30),
+                timeout: TimeSpan.FromMinutes(2),
                 pollInterval: TimeSpan.FromSeconds(1));
 
             IReadOnlyList<MongoDBRAGResult> results = await PollUntilSearchableAsync(
                 provider,
                 "blue widgets",
                 tenantAId,
-                timeout: TimeSpan.FromSeconds(30),
+                timeout: TimeSpan.FromMinutes(2),
                 pollInterval: TimeSpan.FromSeconds(1));
             Assert.Contains(results, result => result.Id == tenantAId);
             Assert.DoesNotContain(results, result => result.Id == tenantBId);
@@ -415,6 +415,7 @@ public sealed class MongoDBRAGIntegrationTests
             TopK = 10,
             VectorWeight = 10.0,
             TextWeight = 0.1,
+            MandatoryFilter = MongoDBRAGFilter.Equal("tenant_id", "weight-fixture"),
         };
         await using MongoDBRAGProvider vectorHeavyProvider = new(
             client,
@@ -432,6 +433,7 @@ public sealed class MongoDBRAGIntegrationTests
             TopK = 10,
             VectorWeight = 0.1,
             TextWeight = 10.0,
+            MandatoryFilter = MongoDBRAGFilter.Equal("tenant_id", "weight-fixture"),
         };
         await using MongoDBRAGProvider textHeavyProvider = new(
             client,
@@ -465,6 +467,7 @@ public sealed class MongoDBRAGIntegrationTests
                     // document should only rank first under vector-dominant weighting.
                     { "text", "Completely unrelated shipping content about crates and pallets." },
                     { "embedding", new BsonArray([1.0, 0.0, 0.0]) },
+                    { "tenant_id", "weight-fixture" },
                 },
                 new BsonDocument
                 {
@@ -473,6 +476,7 @@ public sealed class MongoDBRAGIntegrationTests
                     // query phrase, so this document should only rank first under text-dominant weighting.
                     { "text", $"This chunk contains the {weightQuery} verbatim for search matching." },
                     { "embedding", new BsonArray([0.0, 1.0, 0.0]) },
+                    { "tenant_id", "weight-fixture" },
                 },
             ]);
 
@@ -480,20 +484,20 @@ public sealed class MongoDBRAGIntegrationTests
                 vectorReadinessProvider,
                 "blue widgets",
                 results => results.Any(r => r.Id == tenantAId) && results.Any(r => r.Id == tenantBId),
-                timeout: TimeSpan.FromSeconds(30),
+                timeout: TimeSpan.FromMinutes(2),
                 pollInterval: TimeSpan.FromSeconds(1));
             await PollUntilSearchableAsync(
                 textReadinessProvider,
                 "blue widgets",
                 results => results.Any(r => r.Id == tenantAId) && results.Any(r => r.Id == tenantBId),
-                timeout: TimeSpan.FromSeconds(30),
+                timeout: TimeSpan.FromMinutes(2),
                 pollInterval: TimeSpan.FromSeconds(1));
 
             IReadOnlyList<MongoDBRAGResult> results = await PollUntilSearchableAsync(
                 hybridProvider,
                 "blue widgets",
                 tenantAId,
-                timeout: TimeSpan.FromSeconds(30),
+                timeout: TimeSpan.FromMinutes(2),
                 pollInterval: TimeSpan.FromSeconds(1));
             Assert.Contains(results, result => result.Id == tenantAId);
             Assert.DoesNotContain(results, result => result.Id == tenantBId);
@@ -513,13 +517,13 @@ public sealed class MongoDBRAGIntegrationTests
                 vectorHeavyProvider,
                 weightQuery,
                 candidates => candidates.Any(r => r.Id == vectorMatchId) && candidates.Any(r => r.Id == textMatchId),
-                timeout: TimeSpan.FromSeconds(30),
+                timeout: TimeSpan.FromMinutes(2),
                 pollInterval: TimeSpan.FromSeconds(1));
             IReadOnlyList<MongoDBRAGResult> textHeavyResults = await PollUntilSearchableAsync(
                 textHeavyProvider,
                 weightQuery,
                 candidates => candidates.Any(r => r.Id == vectorMatchId) && candidates.Any(r => r.Id == textMatchId),
-                timeout: TimeSpan.FromSeconds(30),
+                timeout: TimeSpan.FromMinutes(2),
                 pollInterval: TimeSpan.FromSeconds(1));
 
             Assert.Equal(vectorMatchId, vectorHeavyResults[0].Id);

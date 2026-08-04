@@ -39,6 +39,7 @@ public sealed class MongoDBMemoryIndexManagerIntegrationTests
 
         try
         {
+            await client.GetDatabase(databaseName!).CreateCollectionAsync(collectionName);
             Assert.Null(await provisioner.GetIndexAsync());
 
             MongoDBIndexInfo created = await provisioner.EnsureIndexAsync(
