@@ -92,6 +92,24 @@ Injected clients, databases, collections, and embedding generators remain
 caller-owned. Only a client created by the connection-string constructor is
 disposed by the provider.
 
+### Running samples with `.env`
+
+Each runnable project under `samples` includes a source-controlled
+`.env.example`. Copy the relevant template to `.env`, populate any placeholders,
+then use the shared runner:
+
+```powershell
+Copy-Item samples\MemoryQuickstart\.env.example samples\MemoryQuickstart\.env
+.\samples\run-sample.ps1 -Sample MemoryQuickstart -ValidateOnly
+.\samples\run-sample.ps1 -Sample MemoryQuickstart
+```
+
+The runner parses `NAME=VALUE` entries without evaluating their contents and
+sets them only for the child process. Existing process environment variables
+take precedence. Real `.env` files are ignored by Git; only `.env.example`
+templates are committed. The checkpoint sample deliberately requires replacing
+its signing-key placeholder with a newly generated 32-byte base64 secret.
+
 Run the sample after setting `MONGODB_URI`, `MONGODB_DATABASE`, and optionally
 `MONGODB_MEMORY_COLLECTION`:
 
