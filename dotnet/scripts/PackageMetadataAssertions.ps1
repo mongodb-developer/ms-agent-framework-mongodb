@@ -198,25 +198,70 @@ function Get-NuspecMetadataAssertions {
         [Parameter(Mandatory)]$Metadata
     )
 
+    # Closure-safe function capture. GetNewClosure() gives the resulting scriptblock its own isolated dynamic
+    # module/session state; ordinary lexical *variables* referenced in the body are snapshotted into that new
+    # state by GetNewClosure() itself, but a *function call* made from inside a closured body (e.g.
+    # `Get-NuspecDependencyGroupsByTfm $Metadata`) is instead resolved by ordinary PowerShell command-name lookup
+    # at the moment the closure is later invoked -- and that lookup depends on the closure's own session state
+    # chaining back to whatever scope originally dot-sourced this file. That chain is an implementation detail,
+    # not a documented guarantee, and does not reliably hold across every invocation context a scriptblock value
+    # can end up being called from (e.g. a Pester It/Describe block, a background job, a runspace, or simply a
+    # different PowerShell host/version than was used during development) -- in which case the call fails with
+    # "the term '...' is not recognized" precisely because the closure's isolated scope never sees the sibling
+    # function at all, even though the exact same code works when tested in the same scope it was authored in.
+    #
+    # The fix: capture each helper function's definition as a scriptblock *value* (via the `function:` drive)
+    # here, in Get-NuspecMetadataAssertions's own scope -- where both helpers are unconditionally visible because
+    # this file dot-sources them together -- and let GetNewClosure() snapshot that captured value into the
+    # closure exactly like any other captured variable. Every assertion below then invokes the helper via `& `
+    # against the captured value, never via bare command-name resolution, so behavior no longer depends on which
+    # scope the resulting scriptblock is eventually invoked from.
+    $capturedGetGroupsByTfm = ${function:Get-NuspecDependencyGroupsByTfm}
+    $capturedMatchesExactly = ${function:Test-NuspecDependencyMapMatchesExactly}
+
+    # Same `$script:`-qualified-variable gotcha documented below on the per-TFM loop: any scriptblock that gets
+    # `.GetNewClosure()`'d must reference a plain local copy of a `$script:` value, never the `$script:` variable
+    # itself, because the closure's own isolated session state has no such script-scoped variable and silently
+    # evaluates the reference to $null instead of failing loudly.
+    $capturedRequiredTfms = $script:RequiredNuspecDependencyTfms
+    $capturedExcludedDependencyIds = $script:ExcludedNuspecDependencyPackageIds
+
+    # Every assertion scriptblock below is `.GetNewClosure()`'d, including the simple ones that reference only
+    # $Metadata and no helper function. This is deliberate and not merely defensive-in-depth: a PLAIN (non-closed)
+    # PowerShell scriptblock is dynamically scoped when later invoked via `& $Body` -- it resolves a free variable
+    # like $Metadata by walking the ACTUAL CALL STACK at the moment of invocation, not by binding to wherever the
+    # scriptblock was lexically written. In other words, `{ $Metadata.id -eq "..." }` only ever produces the
+    # right answer if, at the exact point something eventually calls `& $Body`, there HAPPENS to be an in-scope
+    # variable literally named $Metadata (PowerShell variable names are case-insensitive, so verify-package.ps1's
+    # own `$metadata = $nuspec.package.metadata` at its top level is what has always made this "work" there, and
+    # verify-package.metadata.tests.ps1's Test-AllAssertions helper takes a parameter literally named $Metadata
+    # for the same reason) -- a total accident of naming, not real closure semantics. Call these assertions from
+    # ANY other scope shape that does not happen to have a like-named variable in its call chain (proven by
+    # verify-package.metadata-integration.tests.ps1's "Shape 1" case, which names its variable $realMetadata) and
+    # every one of them silently evaluates against $null and returns the WRONG boolean $false -- with no error,
+    # not even the "term not recognized" symptom the closure-only bug produces, making it strictly more dangerous.
+    # GetNewClosure() eliminates this: it snapshots $Metadata's CURRENT value into the closure's own isolated
+    # state, so evaluation no longer depends on what variable names happen to exist in whatever scope later calls
+    # `& $Body`.
     $assertions = [ordered]@{
-        "id equals MongoDB.AgentFramework"             = { $Metadata.id -eq "MongoDB.AgentFramework" }
-        "version is set"                                = { -not [string]::IsNullOrWhiteSpace($Metadata.version) }
-        "authors is set"                                = { -not [string]::IsNullOrWhiteSpace($Metadata.authors) }
-        "license expression is MIT"                     = { $Metadata.license.type -eq "expression" -and $Metadata.license.'#text' -eq "MIT" }
-        "licenseUrl is set (legacy consumer fallback)"  = { -not [string]::IsNullOrWhiteSpace($Metadata.licenseUrl) }
-        "readme is set"                                 = { -not [string]::IsNullOrWhiteSpace($Metadata.readme) }
-        "projectUrl is set"                             = { -not [string]::IsNullOrWhiteSpace($Metadata.projectUrl) }
-        "description is set"                            = { -not [string]::IsNullOrWhiteSpace($Metadata.description) }
-        "releaseNotes is set"                           = { -not [string]::IsNullOrWhiteSpace($Metadata.releaseNotes) }
-        "copyright is set"                              = { -not [string]::IsNullOrWhiteSpace($Metadata.copyright) }
-        "tags is set"                                   = { -not [string]::IsNullOrWhiteSpace($Metadata.tags) }
-        "repository url is embedded (SourceLink)"       = { -not [string]::IsNullOrWhiteSpace($Metadata.repository.url) }
-        "repository commit is embedded (SourceLink)"    = { -not [string]::IsNullOrWhiteSpace($Metadata.repository.commit) }
+        "id equals MongoDB.AgentFramework"             = { $Metadata.id -eq "MongoDB.AgentFramework" }.GetNewClosure()
+        "version is set"                                = { -not [string]::IsNullOrWhiteSpace($Metadata.version) }.GetNewClosure()
+        "authors is set"                                = { -not [string]::IsNullOrWhiteSpace($Metadata.authors) }.GetNewClosure()
+        "license expression is MIT"                     = { $Metadata.license.type -eq "expression" -and $Metadata.license.'#text' -eq "MIT" }.GetNewClosure()
+        "licenseUrl is set (legacy consumer fallback)"  = { -not [string]::IsNullOrWhiteSpace($Metadata.licenseUrl) }.GetNewClosure()
+        "readme is set"                                 = { -not [string]::IsNullOrWhiteSpace($Metadata.readme) }.GetNewClosure()
+        "projectUrl is set"                             = { -not [string]::IsNullOrWhiteSpace($Metadata.projectUrl) }.GetNewClosure()
+        "description is set"                            = { -not [string]::IsNullOrWhiteSpace($Metadata.description) }.GetNewClosure()
+        "releaseNotes is set"                           = { -not [string]::IsNullOrWhiteSpace($Metadata.releaseNotes) }.GetNewClosure()
+        "copyright is set"                              = { -not [string]::IsNullOrWhiteSpace($Metadata.copyright) }.GetNewClosure()
+        "tags is set"                                   = { -not [string]::IsNullOrWhiteSpace($Metadata.tags) }.GetNewClosure()
+        "repository url is embedded (SourceLink)"       = { -not [string]::IsNullOrWhiteSpace($Metadata.repository.url) }.GetNewClosure()
+        "repository commit is embedded (SourceLink)"    = { -not [string]::IsNullOrWhiteSpace($Metadata.repository.commit) }.GetNewClosure()
         "dependency groups are exactly net8.0, net9.0, and net10.0 (no more, no less)" = {
-            $actualTfms = @((Get-NuspecDependencyGroupsByTfm $Metadata).Keys) | Sort-Object
-            $expectedTfms = @($script:RequiredNuspecDependencyTfms) | Sort-Object
+            $actualTfms = @((& $capturedGetGroupsByTfm $Metadata).Keys) | Sort-Object
+            $expectedTfms = @($capturedRequiredTfms) | Sort-Object
             $null -eq (Compare-Object -ReferenceObject $expectedTfms -DifferenceObject $actualTfms)
-        }
+        }.GetNewClosure()
     }
 
     foreach ($tfm in $script:RequiredNuspecDependencyTfms) {
@@ -229,21 +274,21 @@ function Get-NuspecMetadataAssertions {
         $capturedTfm = $tfm
         $capturedExpectedDependencies = $script:ExpectedNuspecDependenciesByPackageId
         $assertions["$capturedTfm dependency group has exactly the expected package ids and version ranges"] = {
-            $groupsByTfm = Get-NuspecDependencyGroupsByTfm $Metadata
+            $groupsByTfm = & $capturedGetGroupsByTfm $Metadata
             if (-not $groupsByTfm.Contains($capturedTfm)) {
                 return $false
             }
 
-            Test-NuspecDependencyMapMatchesExactly -Actual $groupsByTfm[$capturedTfm] -Expected $capturedExpectedDependencies
+            & $capturedMatchesExactly -Actual $groupsByTfm[$capturedTfm] -Expected $capturedExpectedDependencies
         }.GetNewClosure()
     }
 
     $assertions["no analyzer/source-link/build-only packages leak into the nuspec dependency list"] = {
-        $groupsByTfm = Get-NuspecDependencyGroupsByTfm $Metadata
+        $groupsByTfm = & $capturedGetGroupsByTfm $Metadata
         $allDependencyIds = @($groupsByTfm.Values | ForEach-Object { @($_.Keys) })
-        $leaked = @($allDependencyIds | Where-Object { $script:ExcludedNuspecDependencyPackageIds -contains $_ })
+        $leaked = @($allDependencyIds | Where-Object { $capturedExcludedDependencyIds -contains $_ })
         $leaked.Count -eq 0
-    }
+    }.GetNewClosure()
 
     return $assertions
 }

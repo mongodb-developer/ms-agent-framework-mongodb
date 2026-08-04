@@ -117,7 +117,78 @@ nuspec) leaks into any group's dependency list. A wrong/missing/extra
 dependency group, a wrong/missing/extra package id within a group, or a
 wrong version range all fail this check individually and by name; see
 `dotnet/scripts/verify-package.metadata.tests.ps1` for the fixtures proving
-each failure mode.
+each failure mode, and
+`dotnet/scripts/verify-package.metadata-integration.tests.ps1` for an
+end-to-end integration self-test that packs the real project, parses the
+real (`System.Xml.XmlElement`) `.nuspec` metadata -- not a synthetic
+fixture object -- and invokes the same assertions from three deliberately
+different invocation-scope shapes (see "Closure/scope regression" below).
+
+#### Closure/scope regression (and why the original self-test missed it)
+
+A review pass reported that `verify-package.ps1`'s production Step 3 failed
+all three per-TFM dependency-group assertions with "the term
+'Get-NuspecDependencyGroupsByTfm' is not recognized", even though
+`verify-package.metadata.tests.ps1`'s self-test passed the exact same named
+assertions. Investigation found two distinct, closely related bugs in
+`PackageMetadataAssertions.ps1`'s use of `.GetNewClosure()`, plus a gap in
+why the existing self-test could not have caught either one:
+
+1. **Function-call resolution.** The three per-TFM assertions are each
+   built with `.GetNewClosure()` (so each can independently capture its own
+   loop-scoped TFM name) and, as written, called sibling function
+   `Get-NuspecDependencyGroupsByTfm` by bare command name from inside the
+   closured scriptblock body. `.GetNewClosure()` gives a scriptblock its
+   own isolated dynamic module/session state; ordinary lexical *variables*
+   referenced in the body are snapshotted into that state by
+   `.GetNewClosure()` itself, but a bare function *call* is instead resolved
+   by ordinary PowerShell command-name lookup at the moment the closure is
+   later invoked -- and that lookup depends on the closure's own session
+   state chaining back to whatever scope originally dot-sourced this file,
+   which is an implementation detail, not a documented guarantee, and does
+   not reliably hold in every invocation context. **Fix:** capture each
+   helper function's definition as a scriptblock *value* (`${function:Name}`)
+   in `Get-NuspecMetadataAssertions`'s own scope -- where both helpers are
+   unconditionally visible, since this file dot-sources them together --
+   and invoke that captured value via `&` from inside the closure, instead
+   of relying on ambient command-name resolution.
+
+2. **A second, more dangerous bug found while reproducing the first.**
+   While building an integration self-test to reproduce (1) against a real
+   nuspec, the *other* (non-per-TFM) assertions -- `id equals
+   MongoDB.AgentFramework`, `version is set`, etc., none of which were
+   `.GetNewClosure()`'d at all -- were discovered to silently return the
+   wrong boolean `$false` when invoked from a scope that does not happen to
+   have an in-scope variable literally named `$Metadata`. A plain
+   (non-closed) PowerShell scriptblock is *dynamically* scoped when later
+   invoked via `& $Body`: it resolves a free variable like `$Metadata` by
+   walking the actual call stack at the moment of invocation, not by
+   binding to wherever the scriptblock was lexically written. These
+   assertions had only ever "worked" because both `verify-package.ps1`
+   (`$metadata = $nuspec.package.metadata`) and the existing self-test's
+   `Test-AllAssertions` helper (parameter `$Metadata`) happen to use a
+   variable with that exact name (PowerShell variable names are
+   case-insensitive) somewhere in the call chain -- a naming coincidence,
+   not real closure semantics, and strictly more dangerous than bug (1)
+   because it fails silently (wrong result, no error) rather than loudly.
+   **Fix:** every assertion scriptblock, not only the per-TFM ones, is now
+   `.GetNewClosure()`'d, so `$Metadata` is explicitly snapshotted as data
+   regardless of what variable names exist in whatever scope later invokes
+   it.
+
+**Why the original self-test missed both bugs:** `verify-package.metadata.tests.ps1`
+always builds and evaluates assertions using a single, fixed invocation
+shape -- a `Test-AllAssertions` helper that both is one function level deep
+*and* happens to name its parameter `$Metadata` -- so it never varied the
+invocation-scope shape enough to expose either bug. It also only ever used
+synthetic `[pscustomobject]` fixtures, never a real, `[xml]`-parsed
+`System.Xml.XmlElement`, so it could not tell the two apart from a shape
+that genuinely differs from production. `verify-package.metadata-integration.tests.ps1`
+closes this gap: it packs the real project, parses the real nuspec, and
+specifically varies the invocation-scope shape (flat top-level, one function
+level deep, and two function levels deep via a second dot-sourced file) to
+prove the fix holds regardless of caller shape, not merely in the one shape
+that happened to work before.
 
 Both Agent Framework `PackageReference` entries in
 `MongoDB.AgentFramework.csproj` (and the matching explicit reference in the
@@ -471,6 +542,24 @@ recorded output.
   original bug shape into `PackageMetadataAssertions.ps1` [ignoring the
   scriptblock's return value] makes this self-test fail, confirming it is a
   meaningful regression guard, not a tautological pass).
+- `dotnet/scripts/verify-package.metadata-integration.tests.ps1` (new
+  integration self-test, added to close a gap the self-test above could not
+  catch -- see "Closure/scope regression" below for the full root-cause
+  narrative. Packs the real `MongoDB.AgentFramework.csproj` [Release,
+  deterministic/CI mode], extracts and `[xml]`-parses the real packed
+  `.nuspec` exactly as `verify-package.ps1`'s Step 3 does, confirms
+  `$Metadata` is a genuine `System.Xml.XmlElement` [not a synthetic
+  fixture], then invokes `Get-NuspecMetadataAssertions`/`Test-NuspecAssertion`
+  from three deliberately different invocation-scope shapes -- flat
+  top-level [matching `verify-package.ps1`], one function level deep
+  [matching this self-test's own wrapper shape], and two function levels
+  deep via a second, separately dot-sourced helper file [a shape neither
+  other script exercises] -- asserting every required assertion, especially
+  the three per-TFM dependency-group checks, executes and passes in all
+  three shapes; finally corrupts one dependency's version range directly in
+  the raw nuspec XML text [not a fixture object] and confirms exactly the
+  corresponding per-TFM assertion fails against real XML shape too -- all
+  assertions passed).
 - `dotnet/scripts/verify-consumer-cache.tests.ps1` (self-test for
   `ConsumerCacheVerification.ps1`'s content-hash proof: 7 assertions --
   hash reproduction against .NET's own SHA512, a matching hash passes, a
