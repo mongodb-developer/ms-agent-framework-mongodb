@@ -51,6 +51,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.IO.Compression.FileSystem
+. (Join-Path $PSScriptRoot "PackageAllowlist.ps1")
 
 $DotnetRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $SrcProject = Join-Path $DotnetRoot "src/MongoDB.AgentFramework/MongoDB.AgentFramework.csproj"
@@ -153,51 +154,45 @@ Write-Ok "Packed $($primary.Nupkg)"
 Write-Ok "Packed $($primary.Snupkg)"
 
 # ---------------------------------------------------------------------------------------------------------------
-# Step 2: package-content allowlist
+# Step 2: package-content allowlist -- exact expected entry set + exact multiplicity (dotnet/scripts/PackageAllowlist.ps1)
 # ---------------------------------------------------------------------------------------------------------------
-Write-Section "Step 2: package-content allowlist"
+Write-Section "Step 2: package-content allowlist (exact set + multiplicity)"
 
-# Every entry this repository intends to ship. Anything else -- a sample, a test assembly, an internal-only file,
-# stray build metadata -- fails the check, proving no non-public-surface content leaks into the shipped artifact.
-$NupkgAllowlist = @(
-    '^_rels/\.rels$',
-    '^\[Content_Types\]\.xml$',
-    '^package/services/metadata/core-properties/[0-9a-f]{32}\.psmdcp$',
-    '^MongoDB\.AgentFramework\.nuspec$',
-    '^README\.md$',
-    '^lib/net(8|9|10)\.0/MongoDB\.AgentFramework\.(dll|xml)$'
-)
-$SnupkgAllowlist = @(
-    '^_rels/\.rels$',
-    '^\[Content_Types\]\.xml$',
-    '^package/services/metadata/core-properties/[0-9a-f]{32}\.psmdcp$',
-    '^MongoDB\.AgentFramework\.nuspec$',
-    '^lib/net(8|9|10)\.0/MongoDB\.AgentFramework\.pdb$'
-)
-
-function Test-Allowlist([string]$ZipPath, [string[]]$Allowlist, [string]$Label) {
+function Get-ZipEntryNames([string]$ZipPath) {
     $zip = [System.IO.Compression.ZipFile]::OpenRead($ZipPath)
     try {
-        $entries = $zip.Entries | ForEach-Object { $_.FullName }
+        return @($zip.Entries | ForEach-Object { $_.FullName })
     }
     finally {
         $zip.Dispose()
     }
+}
 
-    $unexpected = $entries | Where-Object { $entry = $_; -not ($Allowlist | Where-Object { $entry -match $_ }) }
-    if ($unexpected) {
-        Write-Failure "$Label contains disallowed entries: $($unexpected -join ', ')"
+function Assert-PackageAllowlist([string]$ZipPath, [string[]]$ExpectedEntries, [string]$Label) {
+    $actualEntries = Get-ZipEntryNames $ZipPath
+    $result = Test-PackageContentAllowlist -ActualEntries $actualEntries -ExpectedEntries $ExpectedEntries -Label $Label
+
+    if (-not $result.Passed) {
+        if ($result.Missing.Count -gt 0) {
+            Write-Failure "$Label is missing required entries: $($result.Missing -join ', ')"
+        }
+        if ($result.Unexpected.Count -gt 0) {
+            Write-Failure "$Label contains disallowed/unexpected entries: $($result.Unexpected -join ', ')"
+        }
+        if ($result.MultiplicityMismatch.Count -gt 0) {
+            Write-Failure "$Label has wrong entry counts: $($result.MultiplicityMismatch -join ', ')"
+        }
         return
     }
 
-    Write-Ok "$Label ($($entries.Count) entries) matches the allowlist exactly"
-    foreach ($entry in ($entries | Sort-Object)) {
+    Write-Ok "$Label ($($result.ActualCount) entries) matches the expected set and multiplicity exactly"
+    foreach ($entry in ($actualEntries | Sort-Object)) {
         Write-Host "         $entry"
     }
 }
 
-Test-Allowlist -ZipPath $primary.Nupkg -Allowlist $NupkgAllowlist -Label "nupkg"
-Test-Allowlist -ZipPath $primary.Snupkg -Allowlist $SnupkgAllowlist -Label "snupkg"
+Assert-PackageAllowlist -ZipPath $primary.Nupkg -ExpectedEntries $script:NupkgExpectedEntries -Label "nupkg"
+Assert-PackageAllowlist -ZipPath $primary.Snupkg -ExpectedEntries $script:SnupkgExpectedEntries -Label "snupkg"
 
 # ---------------------------------------------------------------------------------------------------------------
 # Step 3: nuspec metadata assertions
