@@ -49,3 +49,8 @@ This documentation explains the implemented system at the code level. The
 - [.NET threat model](observability-security/dotnet-threat-model.md)
 - [.NET least-privilege roles](observability-security/dotnet-least-privilege.md)
 - [.NET TLS and network-access requirements](observability-security/dotnet-tls.md)
+
+## Release Engineering
+
+- [.NET packaging and release engineering](release/dotnet-packaging-release.md)
+- [.NET samples inventory](release/dotnet-samples-inventory.md)

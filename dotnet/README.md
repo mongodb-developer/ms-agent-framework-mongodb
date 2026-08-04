@@ -2,6 +2,35 @@
 
 `MongoDB.AgentFramework` provides MongoDB-backed integrations for Microsoft Agent Framework.
 
+## Status
+
+The package version is a **pre-1.0 preview** (`0.1.0-preview.*`). The public
+API surface, package metadata, symbols/SourceLink, and packaging pipeline are
+implemented and verified; see the
+[.NET packaging and release engineering guide](../docs/development/release/dotnet-packaging-release.md)
+for exactly what has been validated and what has not.
+
+| Area | Packaging readiness | Notes |
+| --- | --- | --- |
+| Semantic Memory | Packageable | See [Semantic Memory](#semantic-memory) below. |
+| Exact Chat History | Packageable | See [Exact Chat History](#exact-chat-history) below. |
+| RAG (Vector/FullText/HybridRrf) | Packageable | See [RAG contracts, typed filters, Vector Search (ANN/ENN), FullText, and HybridRrf](#rag-contracts-typed-filters-vector-search-annenn-fulltext-and-hybridrrf) below. |
+| Index Management | Packageable | See [Index Management](#index-management) below. |
+| Workflow Checkpoint Store | Packageable, complete | Derives from the real public `JsonCheckpointStore` extension point; see [Workflow Checkpoint Store](#workflow-checkpoint-store) below. |
+| Session Store | **Compatibility-blocked, non-1.0-complete** | No public session-hosting persistence contract exists yet upstream; see [Session Store](#session-store) below. |
+
+Because Session Store cannot yet implement a real framework interface, this
+package **cannot claim a 1.0 release** even though every other area is
+packageable. 1.0 is gated on an upstream Agent Framework session-hosting
+contract becoming public, not on anything in this repository.
+
+Publishing governance (release owner identity, security contact, support
+channel, and NuGet package/organization ownership) is tracked in
+[ADR 0013](../docs/decisions/0013-establish-project-and-publishing-governance.md),
+which remains `proposed`, not `accepted`. No package version described in this
+README has been published to NuGet.org, and no `dotnet-v*` tag has been
+created.
+
 ## Semantic Memory
 
 `MongoDBMemoryProvider : AIContextProvider` recalls scoped conversation
@@ -70,7 +99,7 @@ read/write and Search index-management privileges. See the
 [.NET Memory developer guide](../docs/development/memory/dotnet-memory.md) and
 [implementation specifications](../docs/spec/README.md).
 
-The package is under active development and is not ready for publication.
+See [Status](#status) above for packaging readiness and publishing blockers.
 
 ## Exact Chat History
 
