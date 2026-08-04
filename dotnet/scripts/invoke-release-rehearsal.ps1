@@ -27,14 +27,9 @@ try {
     Invoke-Checked { dotnet restore $solution } 'Restore'
     Invoke-Checked { dotnet format $solution --verify-no-changes --verbosity minimal } 'Formatting validation'
     Invoke-Checked { dotnet build $solution --configuration $Configuration --no-restore } 'Build'
-    Invoke-Checked {
-        dotnet test $solution --configuration $Configuration --no-build `
-            --logger 'trx;LogFileName=release-rehearsal.trx' --results-directory $results
-    } 'Tests'
-
-    & (Join-Path $PSScriptRoot 'assert-trx-executed.ps1') `
-        -TrxPath (Join-Path $results 'release-rehearsal.trx') -Label 'release rehearsal'
-    if ($LASTEXITCODE -ne 0) { throw 'TRX execution assertion failed.' }
+    & (Join-Path $PSScriptRoot 'invoke-test-projects-with-trx.ps1') `
+        -Configuration $Configuration -ResultsDirectory $results -NoBuild
+    if ($LASTEXITCODE -ne 0) { throw 'Credential-free tests or TRX assertions failed.' }
 
     & (Join-Path $PSScriptRoot 'resolve-agent-framework-versions.ps1') -Mode StablePair
     if ($LASTEXITCODE -ne 0) { throw 'Agent Framework version resolution failed.' }

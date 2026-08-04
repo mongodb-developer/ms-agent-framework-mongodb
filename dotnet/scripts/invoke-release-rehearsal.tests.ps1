@@ -13,7 +13,7 @@ function Assert-Excludes([string]$Pattern, [string]$Message) {
 }
 
 Assert-Contains 'dotnet format' 'Rehearsal validates formatting'
-Assert-Contains 'dotnet test' 'Rehearsal runs tests'
+Assert-Contains 'invoke-test-projects-with-trx\.ps1' 'Rehearsal runs every credential-free test project with unique TRX'
 Assert-Contains 'resolve-agent-framework-versions\.ps1' 'Rehearsal resolves dynamic compatibility versions'
 Assert-Contains 'verify-agent-framework-compatibility\.ps1' 'Rehearsal runs compatibility checks'
 Assert-Contains 'verify-package\.ps1' 'Rehearsal reuses full package validation'

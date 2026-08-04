@@ -94,8 +94,8 @@ For each of `1.13.0` and `1.16.0` (overridable via `-Versions`), it:
    `<ProjectReference>` to `MongoDB.AgentFramework.csproj` automatically, so
    this single restore covers the exact pinned version for both the package
    under test and its test suite.
-3. Builds (Release) both `MongoDB.AgentFramework.csproj` (the exact thing
-   that gets packed) and `MongoDB.AgentFramework.Tests.csproj`, each with
+3. Builds (Release) `MongoDB.AgentFramework.csproj` (the exact thing that gets
+   packed) and both credential-free test projects, each with
    `--no-restore` (restore already happened in step 2).
 4. Reads the resulting `project.assets.json` and asserts
    `Microsoft.Agents.AI.Abstractions` and `Microsoft.Agents.AI.Workflows`
@@ -104,10 +104,11 @@ For each of `1.13.0` and `1.16.0` (overridable via `-Versions`), it:
    `Microsoft.Extensions.Logging.Abstractions` version so a reviewer can
    confirm it stayed within this package's own declared
    `[10.0.9, 11.0.0)` range at both matrix bounds.
-5. Runs `dotnet test` against `MongoDB.AgentFramework.Tests.csproj` with
+5. Runs `dotnet test` against `MongoDB.AgentFramework.Tests.csproj` and
+   `IngestionSamples.Tests.csproj` with
    `--no-build --no-restore` (the build already happened in step 3, so this
    can only execute already-built tests, never silently no-op through an
-   implicit rebuild) and a TRX logger, then parses the produced TRX file's
+   implicit rebuild) and unique per-project TRX loggers, then parses each file's
    `<ResultSummary><Counters>` element and asserts its `executed` attribute
    is strictly greater than zero. This is deliberate: `dotnet test
    --no-restore` alone against an unrestored/stale test project can exit `0`
@@ -117,7 +118,9 @@ For each of `1.13.0` and `1.16.0` (overridable via `-Versions`), it:
    catch this. Skipped credentialed integration tests count toward the TRX's
    `total`, not its `executed` count, so they never mask a genuine
    zero-unit-tests-executed failure.
-6. Cleans `bin`/`obj` and the TRX results directory again at the end, so a
+6. Packs and local-feed consumer-smokes the package with both real Agent
+   Framework dependencies pinned to the exact requested version.
+7. Cleans `bin`/`obj` while retaining TRX/JSON/Markdown evidence, so a
    subsequent plain `dotnet build`/`dotnet pack` resolves the tracked range
    exactly as before.
 
@@ -125,10 +128,10 @@ Both matrix bounds were verified locally: `Microsoft.Agents.AI.Abstractions`
 and `Microsoft.Agents.AI.Workflows` each resolved to the exact requested
 version (`1.13.0`/`1.16.0`), `Microsoft.Extensions.Logging.Abstractions`
 resolved to `10.0.9` at both bounds (within the declared
-`[10.0.9, 11.0.0)` range), and the full `MongoDB.AgentFramework.Tests` unit
-suite passed at both bounds with **974 tests executed per TRX** (984 total,
-10 skipped credentialed integration tests) -- a real, TRX-derived count, not
-a console-output heuristic.
+`[10.0.9, 11.0.0)` range). The refined `1.16.0` run executed **1,100 tests**
+(974 provider tests and 126 ingestion-sample tests) with credentialed
+integration tests skipped, retaining one TRX per project -- real TRX-derived
+counts, not console-output heuristics.
 
 ## CI: `dotnet-agent-framework-compat`
 
