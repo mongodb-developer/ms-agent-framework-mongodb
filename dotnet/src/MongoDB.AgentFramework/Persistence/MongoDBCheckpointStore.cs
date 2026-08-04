@@ -1,6 +1,9 @@
 using Microsoft.Agents.AI.Workflows;
 using Microsoft.Agents.AI.Workflows.Checkpointing;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using MongoDB.AgentFramework.Internal;
+using MongoDB.AgentFramework.Internal.Observability;
 using MongoDB.Bson;
 using MongoDB.Driver;
 using System.Buffers.Binary;
@@ -106,16 +109,36 @@ public sealed class MongoDBCheckpointStore : JsonCheckpointStore, IAsyncDisposab
     private readonly MongoDBCheckpointStoreOptions _options;
     private readonly OwnedResource<IMongoClient>? _client;
     private readonly Func<DateTimeOffset> _clock;
+    private readonly ILogger<MongoDBCheckpointStore> _logger;
 
     // Defensively copied out of _options.ContinuationTokenSigningKey at construction so a caller that mutates
     // its original array afterward cannot change this store's effective signing key.
     private readonly byte[] _continuationTokenSigningKey;
 
     /// <summary>Creates a store over an injected collection, which remains caller-owned.</summary>
+    /// <remarks>
+    /// This overload's exact parameter signature (no <see cref="ILogger{TCategoryName}"/> parameter) is a binary
+    /// compatibility surface: it must never gain a new parameter, including an optional one, because a caller
+    /// already compiled against it resolves default argument values at its own compile time, not this callee's.
+    /// Use the sibling overload accepting an explicit <see cref="ILogger{TCategoryName}"/> for structured operation
+    /// telemetry. See docs/development/observability-security/dotnet-telemetry.md.
+    /// </remarks>
     public MongoDBCheckpointStore(
         IMongoCollection<BsonDocument> collection,
         MongoDBCheckpointStoreOptions options)
-        : this(collection, options, DefaultResolvedFrameworkAssemblyVersionProvider, DefaultClock)
+        : this(collection, options, logger: null)
+    {
+    }
+
+    /// <summary>
+    /// Creates a store over an injected collection, which remains caller-owned, with an explicit logger for
+    /// structured operation telemetry. See docs/development/observability-security/dotnet-telemetry.md.
+    /// </summary>
+    public MongoDBCheckpointStore(
+        IMongoCollection<BsonDocument> collection,
+        MongoDBCheckpointStoreOptions options,
+        ILogger<MongoDBCheckpointStore>? logger)
+        : this(collection, options, DefaultResolvedFrameworkAssemblyVersionProvider, DefaultClock, logger)
     {
     }
 
@@ -127,8 +150,9 @@ public sealed class MongoDBCheckpointStore : JsonCheckpointStore, IAsyncDisposab
     internal MongoDBCheckpointStore(
         IMongoCollection<BsonDocument> collection,
         MongoDBCheckpointStoreOptions options,
-        Func<Version> resolvedFrameworkAssemblyVersionProvider)
-        : this(collection, options, resolvedFrameworkAssemblyVersionProvider, DefaultClock)
+        Func<Version> resolvedFrameworkAssemblyVersionProvider,
+        ILogger<MongoDBCheckpointStore>? logger = null)
+        : this(collection, options, resolvedFrameworkAssemblyVersionProvider, DefaultClock, logger)
     {
     }
 
@@ -136,8 +160,9 @@ public sealed class MongoDBCheckpointStore : JsonCheckpointStore, IAsyncDisposab
     internal MongoDBCheckpointStore(
         IMongoCollection<BsonDocument> collection,
         MongoDBCheckpointStoreOptions options,
-        Func<DateTimeOffset> clock)
-        : this(collection, options, DefaultResolvedFrameworkAssemblyVersionProvider, clock)
+        Func<DateTimeOffset> clock,
+        ILogger<MongoDBCheckpointStore>? logger = null)
+        : this(collection, options, DefaultResolvedFrameworkAssemblyVersionProvider, clock, logger)
     {
     }
 
@@ -146,7 +171,8 @@ public sealed class MongoDBCheckpointStore : JsonCheckpointStore, IAsyncDisposab
         IMongoCollection<BsonDocument> collection,
         MongoDBCheckpointStoreOptions options,
         Func<Version> resolvedFrameworkAssemblyVersionProvider,
-        Func<DateTimeOffset> clock)
+        Func<DateTimeOffset> clock,
+        ILogger<MongoDBCheckpointStore>? logger = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(resolvedFrameworkAssemblyVersionProvider);
@@ -161,41 +187,88 @@ public sealed class MongoDBCheckpointStore : JsonCheckpointStore, IAsyncDisposab
         _continuationTokenSigningKey = (byte[])options.ContinuationTokenSigningKey.Clone();
         _collection = collection ?? throw new ArgumentNullException(nameof(collection));
         _clock = clock;
+        _logger = logger ?? NullLogger<MongoDBCheckpointStore>.Instance;
     }
 
     /// <summary>Creates a store over an injected database, which remains caller-owned.</summary>
+    /// <remarks>See the collection constructor's remarks on why this overload's signature must stay exact.</remarks>
     public MongoDBCheckpointStore(
         IMongoDatabase database,
         string collectionName,
         MongoDBCheckpointStoreOptions options)
+        : this(database, collectionName, options, logger: null)
+    {
+    }
+
+    /// <summary>
+    /// Creates a store over an injected database, which remains caller-owned, with an explicit logger for
+    /// structured operation telemetry.
+    /// </summary>
+    public MongoDBCheckpointStore(
+        IMongoDatabase database,
+        string collectionName,
+        MongoDBCheckpointStoreOptions options,
+        ILogger<MongoDBCheckpointStore>? logger)
         : this(
             (database ?? throw new ArgumentNullException(nameof(database))).GetCollection<BsonDocument>(
                 MongoDBCheckpointStoreOptions.RequireText(collectionName, nameof(collectionName))),
-            options)
+            options,
+            logger)
     {
     }
 
     /// <summary>Creates a store over an injected client, which remains caller-owned.</summary>
+    /// <remarks>See the collection constructor's remarks on why this overload's signature must stay exact.</remarks>
     public MongoDBCheckpointStore(
         IMongoClient client,
         string databaseName,
         string collectionName,
         MongoDBCheckpointStoreOptions options)
+        : this(client, databaseName, collectionName, options, logger: null)
+    {
+    }
+
+    /// <summary>
+    /// Creates a store over an injected client, which remains caller-owned, with an explicit logger for
+    /// structured operation telemetry.
+    /// </summary>
+    public MongoDBCheckpointStore(
+        IMongoClient client,
+        string databaseName,
+        string collectionName,
+        MongoDBCheckpointStoreOptions options,
+        ILogger<MongoDBCheckpointStore>? logger)
         : this(
             (client ?? throw new ArgumentNullException(nameof(client))).GetDatabase(
                 MongoDBCheckpointStoreOptions.RequireText(databaseName, nameof(databaseName))),
             collectionName,
-            options)
+            options,
+            logger)
     {
     }
 
     /// <summary>Creates a provider-owned client from a connection string.</summary>
+    /// <remarks>See the collection constructor's remarks on why this overload's signature must stay exact.</remarks>
     public MongoDBCheckpointStore(
         string connectionString,
         string databaseName,
         string collectionName,
         MongoDBCheckpointStoreOptions options)
-        : this(connectionString, databaseName, collectionName, options, clientFactory: null)
+        : this(connectionString, databaseName, collectionName, options, logger: null)
+    {
+    }
+
+    /// <summary>
+    /// Creates a provider-owned client from a connection string, with an explicit logger for structured operation
+    /// telemetry.
+    /// </summary>
+    public MongoDBCheckpointStore(
+        string connectionString,
+        string databaseName,
+        string collectionName,
+        MongoDBCheckpointStoreOptions options,
+        ILogger<MongoDBCheckpointStore>? logger)
+        : this(connectionString, databaseName, collectionName, options, clientFactory: null, logger)
     {
     }
 
@@ -209,9 +282,10 @@ public sealed class MongoDBCheckpointStore : JsonCheckpointStore, IAsyncDisposab
         string databaseName,
         string collectionName,
         MongoDBCheckpointStoreOptions options,
-        Func<string, IMongoClient>? clientFactory)
+        Func<string, IMongoClient>? clientFactory,
+        ILogger<MongoDBCheckpointStore>? logger = null)
         : this(connectionString, databaseName, collectionName, options, clientFactory,
-              DefaultResolvedFrameworkAssemblyVersionProvider)
+              DefaultResolvedFrameworkAssemblyVersionProvider, logger)
     {
     }
 
@@ -222,10 +296,11 @@ public sealed class MongoDBCheckpointStore : JsonCheckpointStore, IAsyncDisposab
         string collectionName,
         MongoDBCheckpointStoreOptions options,
         Func<string, IMongoClient>? clientFactory,
-        Func<Version> resolvedFrameworkAssemblyVersionProvider)
+        Func<Version> resolvedFrameworkAssemblyVersionProvider,
+        ILogger<MongoDBCheckpointStore>? logger = null)
         : this(Connect(
             connectionString, databaseName, collectionName, options, clientFactory,
-            resolvedFrameworkAssemblyVersionProvider))
+            resolvedFrameworkAssemblyVersionProvider), logger)
     {
     }
 
@@ -233,8 +308,9 @@ public sealed class MongoDBCheckpointStore : JsonCheckpointStore, IAsyncDisposab
         (OwnedResource<IMongoClient> Client,
          IMongoCollection<BsonDocument> Collection,
          MongoDBCheckpointStoreOptions Options,
-         Func<Version> VersionProvider) connected)
-        : this(connected.Collection, connected.Options, connected.VersionProvider)
+         Func<Version> VersionProvider) connected,
+        ILogger<MongoDBCheckpointStore>? logger = null)
+        : this(connected.Collection, connected.Options, connected.VersionProvider, logger)
     {
         _client = connected.Client;
     }
@@ -323,11 +399,9 @@ public sealed class MongoDBCheckpointStore : JsonCheckpointStore, IAsyncDisposab
         CheckpointInfo? parent = null)
     {
         string checkpointId = Guid.NewGuid().ToString("N");
-        MongoDBCheckpointRecord record = await WithDeadlineAsync(
-            token => SaveCheckpointCoreAsync(sessionId, checkpointId, value, parent?.CheckpointId, expiresAt: null, token),
-            _options.PersistenceTimeout,
-            "MongoDB Workflow Checkpoint Store persistence deadline exceeded.",
-            CancellationToken.None).ConfigureAwait(false);
+        MongoDBCheckpointRecord record = await SaveCheckpointCoreAsync(
+            sessionId, checkpointId, value, parent?.CheckpointId, expiresAt: null, CancellationToken.None)
+            .ConfigureAwait(false);
         return new CheckpointInfo(record.SessionId, record.CheckpointId);
     }
 
@@ -361,7 +435,22 @@ public sealed class MongoDBCheckpointStore : JsonCheckpointStore, IAsyncDisposab
     /// </remarks>
     public override async ValueTask<IEnumerable<CheckpointInfo>> RetrieveIndexAsync(
         string sessionId,
-        CheckpointInfo? withParent = null)
+        CheckpointInfo? withParent = null) =>
+        await MongoDBTelemetry.TrackAsync(
+            _logger,
+            MongoDBTelemetryFeature.CheckpointStore,
+            MongoDBTelemetryOperation.List,
+            mode: null,
+            () => RetrieveIndexInnerAsync(sessionId, withParent),
+            static results => new MongoDBTelemetryResult(
+                results.Count > 0 ? MongoDBTelemetryOutcome.Success : MongoDBTelemetryOutcome.Empty,
+                results.Count,
+                CandidateBucket: null),
+            CancellationToken.None).ConfigureAwait(false);
+
+    private async Task<IReadOnlyList<CheckpointInfo>> RetrieveIndexInnerAsync(
+        string sessionId,
+        CheckpointInfo? withParent)
     {
         BsonDocument scope = Scope(sessionId);
         return await WithDeadlineAsync(
@@ -373,7 +462,7 @@ public sealed class MongoDBCheckpointStore : JsonCheckpointStore, IAsyncDisposab
                     var results = new List<CheckpointInfo>();
                     if (upperBound is null)
                     {
-                        return (IEnumerable<CheckpointInfo>)results;
+                        return (IReadOnlyList<CheckpointInfo>)results;
                     }
 
                     long? afterSequence = null;
@@ -398,7 +487,7 @@ public sealed class MongoDBCheckpointStore : JsonCheckpointStore, IAsyncDisposab
                         }
                     } while (hasMore);
 
-                    return (IEnumerable<CheckpointInfo>)results;
+                    return (IReadOnlyList<CheckpointInfo>)results;
                 }
                 catch (OperationCanceledException)
                 {
@@ -439,18 +528,32 @@ public sealed class MongoDBCheckpointStore : JsonCheckpointStore, IAsyncDisposab
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        return await WithDeadlineAsync(
-            token => SaveCheckpointCoreAsync(sessionId, checkpointId, payload, parentCheckpointId, expiresAt, token),
-            _options.PersistenceTimeout,
-            "MongoDB Workflow Checkpoint Store persistence deadline exceeded.",
-            cancellationToken).ConfigureAwait(false);
+        return await SaveCheckpointCoreAsync(
+            sessionId, checkpointId, payload, parentCheckpointId, expiresAt, cancellationToken)
+            .ConfigureAwait(false);
     }
 
     /// <summary>Loads a checkpoint by its explicit identifier, or <see langword="null"/> if absent.</summary>
-    public async Task<MongoDBCheckpointRecord?> LoadCheckpointAsync(
+    public Task<MongoDBCheckpointRecord?> LoadCheckpointAsync(
         string sessionId,
         string checkpointId,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        MongoDBTelemetry.TrackAsync(
+            _logger,
+            MongoDBTelemetryFeature.CheckpointStore,
+            MongoDBTelemetryOperation.Load,
+            mode: null,
+            () => LoadCheckpointInnerAsync(sessionId, checkpointId, cancellationToken),
+            static record => new MongoDBTelemetryResult(
+                record is null ? MongoDBTelemetryOutcome.Empty : MongoDBTelemetryOutcome.Success,
+                record is null ? 0 : 1,
+                CandidateBucket: null),
+            cancellationToken);
+
+    private async Task<MongoDBCheckpointRecord?> LoadCheckpointInnerAsync(
+        string sessionId,
+        string checkpointId,
+        CancellationToken cancellationToken)
     {
         BsonDocument scope = Scope(sessionId);
         MongoDBCheckpointStoreOptions.RequireText(checkpointId, nameof(checkpointId));
@@ -488,9 +591,24 @@ public sealed class MongoDBCheckpointStore : JsonCheckpointStore, IAsyncDisposab
     /// Returns the checkpoint with the greatest monotonic <c>sequence</c> for <paramref name="sessionId"/>, or
     /// <see langword="null"/> if none exist. Never orders by timestamp.
     /// </summary>
-    public async Task<MongoDBCheckpointRecord?> GetLatestCheckpointAsync(
+    public Task<MongoDBCheckpointRecord?> GetLatestCheckpointAsync(
         string sessionId,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        MongoDBTelemetry.TrackAsync(
+            _logger,
+            MongoDBTelemetryFeature.CheckpointStore,
+            MongoDBTelemetryOperation.Load,
+            mode: null,
+            () => GetLatestCheckpointInnerAsync(sessionId, cancellationToken),
+            static record => new MongoDBTelemetryResult(
+                record is null ? MongoDBTelemetryOutcome.Empty : MongoDBTelemetryOutcome.Success,
+                record is null ? 0 : 1,
+                CandidateBucket: null),
+            cancellationToken);
+
+    private async Task<MongoDBCheckpointRecord?> GetLatestCheckpointInnerAsync(
+        string sessionId,
+        CancellationToken cancellationToken)
     {
         BsonDocument scope = Scope(sessionId);
         cancellationToken.ThrowIfCancellationRequested();
@@ -538,11 +656,28 @@ public sealed class MongoDBCheckpointStore : JsonCheckpointStore, IAsyncDisposab
     /// <paramref name="limit"/> items per call, with an opaque scoped/versioned/tamper-rejecting continuation
     /// token for the next page.
     /// </summary>
-    public async Task<MongoDBCheckpointPage> ListCheckpointsAsync(
+    public Task<MongoDBCheckpointPage> ListCheckpointsAsync(
         string sessionId,
         int limit,
         string? continuationToken = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        MongoDBTelemetry.TrackAsync(
+            _logger,
+            MongoDBTelemetryFeature.CheckpointStore,
+            MongoDBTelemetryOperation.List,
+            mode: null,
+            () => ListCheckpointsInnerAsync(sessionId, limit, continuationToken, cancellationToken),
+            static page => new MongoDBTelemetryResult(
+                page.Items.Count > 0 ? MongoDBTelemetryOutcome.Success : MongoDBTelemetryOutcome.Empty,
+                page.Items.Count,
+                CandidateBucket: null),
+            cancellationToken);
+
+    private async Task<MongoDBCheckpointPage> ListCheckpointsInnerAsync(
+        string sessionId,
+        int limit,
+        string? continuationToken,
+        CancellationToken cancellationToken)
     {
         if (limit is < 1 or > 10_000)
         {
@@ -595,10 +730,26 @@ public sealed class MongoDBCheckpointStore : JsonCheckpointStore, IAsyncDisposab
     /// checkpoint exists (an idempotent no-op). Deleting a checkpoint that is another checkpoint's lineage
     /// parent leaves a lineage gap; this is documented, not prevented.
     /// </summary>
-    public async Task<bool> DeleteCheckpointAsync(
+    public Task<bool> DeleteCheckpointAsync(
         string sessionId,
         string checkpointId,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        MongoDBTelemetry.TrackAsync(
+            _logger,
+            MongoDBTelemetryFeature.CheckpointStore,
+            MongoDBTelemetryOperation.Delete,
+            mode: null,
+            () => DeleteCheckpointInnerAsync(sessionId, checkpointId, cancellationToken),
+            static deleted => new MongoDBTelemetryResult(
+                deleted ? MongoDBTelemetryOutcome.Success : MongoDBTelemetryOutcome.Empty,
+                deleted ? 1 : 0,
+                CandidateBucket: null),
+            cancellationToken);
+
+    private async Task<bool> DeleteCheckpointInnerAsync(
+        string sessionId,
+        string checkpointId,
+        CancellationToken cancellationToken)
     {
         BsonDocument scope = Scope(sessionId);
         MongoDBCheckpointStoreOptions.RequireText(checkpointId, nameof(checkpointId));
@@ -655,7 +806,17 @@ public sealed class MongoDBCheckpointStore : JsonCheckpointStore, IAsyncDisposab
     /// Explicitly provisions the required regular lookup indexes and the optional TTL index. Never called
     /// implicitly during construction, saves, or retrieval.
     /// </summary>
-    public async Task<IReadOnlyList<string>> EnsureIndexesAsync(CancellationToken cancellationToken = default)
+    public Task<IReadOnlyList<string>> EnsureIndexesAsync(CancellationToken cancellationToken = default) =>
+        MongoDBTelemetry.TrackAsync(
+            _logger,
+            MongoDBTelemetryFeature.CheckpointStore,
+            MongoDBTelemetryOperation.EnsureIndex,
+            mode: null,
+            () => EnsureIndexesInnerAsync(cancellationToken),
+            static _ => new MongoDBTelemetryResult(MongoDBTelemetryOutcome.Success, null, null),
+            cancellationToken);
+
+    private async Task<IReadOnlyList<string>> EnsureIndexesInnerAsync(CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var models = new List<CreateIndexModel<BsonDocument>>
@@ -710,7 +871,17 @@ public sealed class MongoDBCheckpointStore : JsonCheckpointStore, IAsyncDisposab
     }
 
     /// <summary>Validates the required regular and TTL indexes without mutating MongoDB.</summary>
-    public async Task ValidateIndexesAsync(CancellationToken cancellationToken = default)
+    public Task ValidateIndexesAsync(CancellationToken cancellationToken = default) =>
+        MongoDBTelemetry.TrackAsync(
+            _logger,
+            MongoDBTelemetryFeature.CheckpointStore,
+            MongoDBTelemetryOperation.ValidateIndex,
+            mode: null,
+            () => ValidateIndexesInnerAsync(cancellationToken),
+            static () => new MongoDBTelemetryResult(MongoDBTelemetryOutcome.Success, null, null),
+            cancellationToken);
+
+    private async Task ValidateIndexesInnerAsync(CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         try
@@ -779,7 +950,33 @@ public sealed class MongoDBCheckpointStore : JsonCheckpointStore, IAsyncDisposab
     // Shared internal core.
     // ---------------------------------------------------------------------------------------------------
 
-    private async Task<MongoDBCheckpointRecord> SaveCheckpointCoreAsync(
+    /// <summary>
+    /// Instrumented once here so both the framework's <see cref="CreateCheckpointAsync"/> hook and the public
+    /// <see cref="SaveCheckpointAsync"/> facade -- which both call this shared core -- emit exactly one
+    /// telemetry activity/log per underlying persistence attempt, never a duplicate.
+    /// </summary>
+    private Task<MongoDBCheckpointRecord> SaveCheckpointCoreAsync(
+        string sessionId,
+        string checkpointId,
+        JsonElement payload,
+        string? parentCheckpointId,
+        DateTimeOffset? expiresAt,
+        CancellationToken cancellationToken) =>
+        MongoDBTelemetry.TrackAsync(
+            _logger,
+            MongoDBTelemetryFeature.CheckpointStore,
+            MongoDBTelemetryOperation.Persist,
+            mode: null,
+            () => WithDeadlineAsync(
+                token => SaveCheckpointCoreInnerAsync(
+                    sessionId, checkpointId, payload, parentCheckpointId, expiresAt, token),
+                _options.PersistenceTimeout,
+                "MongoDB Workflow Checkpoint Store persistence deadline exceeded.",
+                cancellationToken),
+            static _ => new MongoDBTelemetryResult(MongoDBTelemetryOutcome.Success, 1, CandidateBucket: null),
+            cancellationToken);
+
+    private async Task<MongoDBCheckpointRecord> SaveCheckpointCoreInnerAsync(
         string sessionId,
         string checkpointId,
         JsonElement payload,

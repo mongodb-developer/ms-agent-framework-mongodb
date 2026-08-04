@@ -4,6 +4,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using MongoDB.AgentFramework.Internal;
 using MongoDB.AgentFramework.Internal.IndexManagement;
+using MongoDB.AgentFramework.Internal.Observability;
 using MongoDB.Bson;
 using MongoDB.Driver;
 
@@ -484,10 +485,23 @@ public sealed class MongoDBRAGProvider : IAsyncDisposable
     /// <exception cref="MongoDBIndexNotReadyException">
     /// <paramref name="requireReady"/> is <c>true</c> and the index is not queryable.
     /// </exception>
-    public async Task ValidateSearchIndexAsync(
+    public Task ValidateSearchIndexAsync(
         bool requireReady = true,
         bool refresh = false,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        MongoDBTelemetry.TrackAsync(
+            _logger,
+            MongoDBTelemetryFeature.Rag,
+            MongoDBTelemetryOperation.ValidateIndex,
+            mode: null,
+            () => ValidateSearchIndexInnerAsync(requireReady, refresh, cancellationToken),
+            static () => new MongoDBTelemetryResult(MongoDBTelemetryOutcome.Success, null, null),
+            cancellationToken);
+
+    private async Task ValidateSearchIndexInnerAsync(
+        bool requireReady,
+        bool refresh,
+        CancellationToken cancellationToken)
     {
         RequireSearchIndexMode();
 
@@ -547,10 +561,23 @@ public sealed class MongoDBRAGProvider : IAsyncDisposable
     /// <exception cref="MongoDBIndexNotReadyException">
     /// <paramref name="requireReady"/> is <c>true</c> and either index is not queryable.
     /// </exception>
-    public async Task ValidateHybridSearchCapabilityAsync(
+    public Task ValidateHybridSearchCapabilityAsync(
         bool requireReady = true,
         bool refresh = false,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        MongoDBTelemetry.TrackAsync(
+            _logger,
+            MongoDBTelemetryFeature.Rag,
+            MongoDBTelemetryOperation.ValidateIndex,
+            MongoDBTelemetryMode.HybridRrf,
+            () => ValidateHybridSearchCapabilityInnerAsync(requireReady, refresh, cancellationToken),
+            static () => new MongoDBTelemetryResult(MongoDBTelemetryOutcome.Success, null, null),
+            cancellationToken);
+
+    private async Task ValidateHybridSearchCapabilityInnerAsync(
+        bool requireReady,
+        bool refresh,
+        CancellationToken cancellationToken)
     {
         RequireHybridCapabilityMode();
 
@@ -633,11 +660,59 @@ public sealed class MongoDBRAGProvider : IAsyncDisposable
     public Task<IReadOnlyList<MongoDBRAGResult>> SearchAsync(
         string query,
         CancellationToken cancellationToken = default) =>
-        WithDeadlineAsync(
-            token => SearchCoreAsync(query, token),
-            _options.RetrievalTimeout,
-            "MongoDB RAG retrieval deadline exceeded.",
+        SearchTrackedAsync(query, cancellationToken);
+
+    /// <summary>
+    /// Computes the telemetry mode/candidate-bucket for the configured <see cref="MongoDBRAGProviderOptions.SearchMode"/>
+    /// before tracking, then wraps <see cref="SearchCoreAsync"/> as the single <c>retrieve</c> operation --
+    /// including its internal <see cref="ValidateHybridSearchCapabilityAsync"/> pre-check for Hybrid, which
+    /// records its own distinct <c>validate_index</c> operation rather than being folded into this one.
+    /// </summary>
+    private Task<IReadOnlyList<MongoDBRAGResult>> SearchTrackedAsync(
+        string query,
+        CancellationToken cancellationToken)
+    {
+        string mode = _options.SearchMode switch
+        {
+            MongoDBSearchMode.VectorAnn => MongoDBTelemetryMode.Ann,
+            MongoDBSearchMode.VectorEnn => MongoDBTelemetryMode.Enn,
+            MongoDBSearchMode.FullText => MongoDBTelemetryMode.FullText,
+            MongoDBSearchMode.HybridRrf => MongoDBTelemetryMode.HybridRrf,
+            _ => MongoDBTelemetryMode.Ann,
+        };
+        int? rawCandidates = _options.SearchMode switch
+        {
+            MongoDBSearchMode.VectorAnn => _options.NumCandidates,
+            MongoDBSearchMode.HybridRrf => HybridCandidateCount(_options.VectorCandidateLimit, _options.TextCandidateLimit),
+            _ => null,
+        };
+        string? candidateBucket = MongoDBCandidateBucket.Bucket(rawCandidates);
+
+        return MongoDBTelemetry.TrackAsync(
+            _logger,
+            MongoDBTelemetryFeature.Rag,
+            MongoDBTelemetryOperation.Retrieve,
+            mode,
+            () => WithDeadlineAsync(
+                token => SearchCoreAsync(query, token),
+                _options.RetrievalTimeout,
+                "MongoDB RAG retrieval deadline exceeded.",
+                cancellationToken),
+            results => new MongoDBTelemetryResult(
+                results.Count > 0 ? MongoDBTelemetryOutcome.Success : MongoDBTelemetryOutcome.Empty,
+                results.Count,
+                candidateBucket),
             cancellationToken);
+    }
+
+    /// <summary>The bounded candidate-count concept for Hybrid's two input branches: the larger of the vector
+    /// and text candidate limits, or <see langword="null"/> when neither is configured (both default to the
+    /// driver's own default rather than an explicit bounded value).</summary>
+    private static int? HybridCandidateCount(int? vectorCandidateLimit, int? textCandidateLimit)
+    {
+        int max = Math.Max(vectorCandidateLimit ?? 0, textCandidateLimit ?? 0);
+        return max > 0 ? max : null;
+    }
 
     private async Task<IReadOnlyList<MongoDBRAGResult>> SearchCoreAsync(
         string query,

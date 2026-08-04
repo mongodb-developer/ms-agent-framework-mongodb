@@ -87,7 +87,7 @@ internal class HistoryCollectionProxy : DispatchProxy
         return collection;
     }
 
-    private Task<IAsyncCursor<BsonDocument>> FindAsync(object?[] args)
+    private async Task<IAsyncCursor<BsonDocument>> FindAsync(object?[] args)
     {
         BsonDocument filter = Render((FilterDefinition<BsonDocument>)args[0]!);
         var options = (FindOptions<BsonDocument, BsonDocument>)args[1]!;
@@ -97,7 +97,12 @@ internal class HistoryCollectionProxy : DispatchProxy
                 BsonDocumentSerializer.Instance,
                 BsonSerializer.SerializerRegistry));
         State.LastFindLimit = options.Limit;
-        IEnumerable<BsonDocument> values = State.Documents
+
+        // Snapshot-and-enumerate under the same gate InsertOneAsync/FindOneAndUpdateAsync use, so a concurrent
+        // insert can never mutate State.Documents while this LINQ pipeline is enumerating it (previously
+        // unguarded here, causing an intermittent "Collection was modified" failure under true concurrency).
+        BsonDocument[] documents = await State.LockedAsync(() => State.Documents.ToArray());
+        IEnumerable<BsonDocument> values = documents
             .Where(document => Matches(document, filter))
             .Select(static document => document.DeepClone().AsBsonDocument);
         if (State.LastFindSort is { ElementCount: > 0 } sort)
@@ -113,8 +118,7 @@ internal class HistoryCollectionProxy : DispatchProxy
             values = values.Take(limit);
         }
 
-        return Task.FromResult<IAsyncCursor<BsonDocument>>(
-            new HistoryCursor(values.ToArray()));
+        return new HistoryCursor(values.ToArray());
     }
 
     private Task<BsonDocument> FindOneAndUpdateAsync(object?[] args)

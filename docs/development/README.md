@@ -42,3 +42,10 @@ This documentation explains the implemented system at the code level. The
 - [.NET Session Store implementation](persistence/dotnet-session-store.md)
 - [.NET Workflow Checkpoint Store contract verification](persistence/dotnet-checkpoint-contract-research.md)
 - [.NET Workflow Checkpoint Store implementation](persistence/dotnet-checkpoint-store.md)
+
+## Observability and Security
+
+- [.NET observability telemetry](observability-security/dotnet-telemetry.md)
+- [.NET threat model](observability-security/dotnet-threat-model.md)
+- [.NET least-privilege roles](observability-security/dotnet-least-privilege.md)
+- [.NET TLS and network-access requirements](observability-security/dotnet-tls.md)

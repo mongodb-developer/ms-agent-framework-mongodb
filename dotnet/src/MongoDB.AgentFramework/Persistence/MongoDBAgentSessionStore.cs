@@ -1,5 +1,8 @@
 using Microsoft.Agents.AI;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using MongoDB.AgentFramework.Internal;
+using MongoDB.AgentFramework.Internal.Observability;
 using MongoDB.AgentFramework.Internal.Persistence;
 using MongoDB.Bson;
 using MongoDB.Bson.IO;
@@ -61,12 +64,32 @@ public sealed class MongoDBAgentSessionStore : IAsyncDisposable
     private readonly MongoDBAgentSessionStoreOptions _options;
     private readonly OwnedResource<IMongoClient>? _client;
     private readonly Func<DateTimeOffset> _clock;
+    private readonly ILogger<MongoDBAgentSessionStore> _logger;
 
     /// <summary>Creates a store over an injected collection, which remains caller-owned.</summary>
+    /// <remarks>
+    /// This overload's exact parameter signature (no <see cref="ILogger{TCategoryName}"/> parameter) is a binary
+    /// compatibility surface: it must never gain a new parameter, including an optional one, because a caller
+    /// already compiled against it resolves default argument values at its own compile time, not this callee's.
+    /// Use the sibling overload accepting an explicit <see cref="ILogger{TCategoryName}"/> for structured operation
+    /// telemetry. See docs/development/observability-security/dotnet-telemetry.md.
+    /// </remarks>
     public MongoDBAgentSessionStore(
         IMongoCollection<BsonDocument> collection,
         MongoDBAgentSessionStoreOptions options)
-        : this(collection, options, DefaultResolvedFrameworkAssemblyVersionProvider, DefaultClock)
+        : this(collection, options, logger: null)
+    {
+    }
+
+    /// <summary>
+    /// Creates a store over an injected collection, which remains caller-owned, with an explicit logger for
+    /// structured operation telemetry. See docs/development/observability-security/dotnet-telemetry.md.
+    /// </summary>
+    public MongoDBAgentSessionStore(
+        IMongoCollection<BsonDocument> collection,
+        MongoDBAgentSessionStoreOptions options,
+        ILogger<MongoDBAgentSessionStore>? logger)
+        : this(collection, options, DefaultResolvedFrameworkAssemblyVersionProvider, DefaultClock, logger)
     {
     }
 
@@ -78,8 +101,9 @@ public sealed class MongoDBAgentSessionStore : IAsyncDisposable
     internal MongoDBAgentSessionStore(
         IMongoCollection<BsonDocument> collection,
         MongoDBAgentSessionStoreOptions options,
-        Func<Version> resolvedFrameworkAssemblyVersionProvider)
-        : this(collection, options, resolvedFrameworkAssemblyVersionProvider, DefaultClock)
+        Func<Version> resolvedFrameworkAssemblyVersionProvider,
+        ILogger<MongoDBAgentSessionStore>? logger = null)
+        : this(collection, options, resolvedFrameworkAssemblyVersionProvider, DefaultClock, logger)
     {
     }
 
@@ -92,8 +116,9 @@ public sealed class MongoDBAgentSessionStore : IAsyncDisposable
     internal MongoDBAgentSessionStore(
         IMongoCollection<BsonDocument> collection,
         MongoDBAgentSessionStoreOptions options,
-        Func<DateTimeOffset> clock)
-        : this(collection, options, DefaultResolvedFrameworkAssemblyVersionProvider, clock)
+        Func<DateTimeOffset> clock,
+        ILogger<MongoDBAgentSessionStore>? logger = null)
+        : this(collection, options, DefaultResolvedFrameworkAssemblyVersionProvider, clock, logger)
     {
     }
 
@@ -102,7 +127,8 @@ public sealed class MongoDBAgentSessionStore : IAsyncDisposable
         IMongoCollection<BsonDocument> collection,
         MongoDBAgentSessionStoreOptions options,
         Func<Version> resolvedFrameworkAssemblyVersionProvider,
-        Func<DateTimeOffset> clock)
+        Func<DateTimeOffset> clock,
+        ILogger<MongoDBAgentSessionStore>? logger = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(resolvedFrameworkAssemblyVersionProvider);
@@ -118,41 +144,88 @@ public sealed class MongoDBAgentSessionStore : IAsyncDisposable
         };
         _collection = collection ?? throw new ArgumentNullException(nameof(collection));
         _clock = clock;
+        _logger = logger ?? NullLogger<MongoDBAgentSessionStore>.Instance;
     }
 
     /// <summary>Creates a store over an injected database, which remains caller-owned.</summary>
+    /// <remarks>See the collection constructor's remarks on why this overload's signature must stay exact.</remarks>
     public MongoDBAgentSessionStore(
         IMongoDatabase database,
         string collectionName,
         MongoDBAgentSessionStoreOptions options)
+        : this(database, collectionName, options, logger: null)
+    {
+    }
+
+    /// <summary>
+    /// Creates a store over an injected database, which remains caller-owned, with an explicit logger for
+    /// structured operation telemetry.
+    /// </summary>
+    public MongoDBAgentSessionStore(
+        IMongoDatabase database,
+        string collectionName,
+        MongoDBAgentSessionStoreOptions options,
+        ILogger<MongoDBAgentSessionStore>? logger)
         : this(
             (database ?? throw new ArgumentNullException(nameof(database))).GetCollection<BsonDocument>(
                 MongoDBAgentSessionStoreOptions.RequireText(collectionName, nameof(collectionName))),
-            options)
+            options,
+            logger)
     {
     }
 
     /// <summary>Creates a store over an injected client, which remains caller-owned.</summary>
+    /// <remarks>See the collection constructor's remarks on why this overload's signature must stay exact.</remarks>
     public MongoDBAgentSessionStore(
         IMongoClient client,
         string databaseName,
         string collectionName,
         MongoDBAgentSessionStoreOptions options)
+        : this(client, databaseName, collectionName, options, logger: null)
+    {
+    }
+
+    /// <summary>
+    /// Creates a store over an injected client, which remains caller-owned, with an explicit logger for
+    /// structured operation telemetry.
+    /// </summary>
+    public MongoDBAgentSessionStore(
+        IMongoClient client,
+        string databaseName,
+        string collectionName,
+        MongoDBAgentSessionStoreOptions options,
+        ILogger<MongoDBAgentSessionStore>? logger)
         : this(
             (client ?? throw new ArgumentNullException(nameof(client))).GetDatabase(
                 MongoDBAgentSessionStoreOptions.RequireText(databaseName, nameof(databaseName))),
             collectionName,
-            options)
+            options,
+            logger)
     {
     }
 
     /// <summary>Creates a provider-owned client from a connection string.</summary>
+    /// <remarks>See the collection constructor's remarks on why this overload's signature must stay exact.</remarks>
     public MongoDBAgentSessionStore(
         string connectionString,
         string databaseName,
         string collectionName,
         MongoDBAgentSessionStoreOptions options)
-        : this(connectionString, databaseName, collectionName, options, clientFactory: null)
+        : this(connectionString, databaseName, collectionName, options, logger: null)
+    {
+    }
+
+    /// <summary>
+    /// Creates a provider-owned client from a connection string, with an explicit logger for structured operation
+    /// telemetry.
+    /// </summary>
+    public MongoDBAgentSessionStore(
+        string connectionString,
+        string databaseName,
+        string collectionName,
+        MongoDBAgentSessionStoreOptions options,
+        ILogger<MongoDBAgentSessionStore>? logger)
+        : this(connectionString, databaseName, collectionName, options, clientFactory: null, logger)
     {
     }
 
@@ -168,9 +241,10 @@ public sealed class MongoDBAgentSessionStore : IAsyncDisposable
         string databaseName,
         string collectionName,
         MongoDBAgentSessionStoreOptions options,
-        Func<string, IMongoClient>? clientFactory)
+        Func<string, IMongoClient>? clientFactory,
+        ILogger<MongoDBAgentSessionStore>? logger = null)
         : this(connectionString, databaseName, collectionName, options, clientFactory,
-              DefaultResolvedFrameworkAssemblyVersionProvider)
+              DefaultResolvedFrameworkAssemblyVersionProvider, logger)
     {
     }
 
@@ -181,10 +255,11 @@ public sealed class MongoDBAgentSessionStore : IAsyncDisposable
         string collectionName,
         MongoDBAgentSessionStoreOptions options,
         Func<string, IMongoClient>? clientFactory,
-        Func<Version> resolvedFrameworkAssemblyVersionProvider)
+        Func<Version> resolvedFrameworkAssemblyVersionProvider,
+        ILogger<MongoDBAgentSessionStore>? logger = null)
         : this(Connect(
             connectionString, databaseName, collectionName, options, clientFactory,
-            resolvedFrameworkAssemblyVersionProvider))
+            resolvedFrameworkAssemblyVersionProvider), logger)
     {
     }
 
@@ -192,8 +267,9 @@ public sealed class MongoDBAgentSessionStore : IAsyncDisposable
         (OwnedResource<IMongoClient> Client,
          IMongoCollection<BsonDocument> Collection,
          MongoDBAgentSessionStoreOptions Options,
-         Func<Version> VersionProvider) connected)
-        : this(connected.Collection, connected.Options, connected.VersionProvider)
+         Func<Version> VersionProvider) connected,
+        ILogger<MongoDBAgentSessionStore>? logger)
+        : this(connected.Collection, connected.Options, connected.VersionProvider, logger)
     {
         _client = connected.Client;
     }
@@ -268,11 +344,28 @@ public sealed class MongoDBAgentSessionStore : IAsyncDisposable
     }
 
     /// <summary>Loads the authorized session snapshot, or <see langword="null"/> if absent.</summary>
-    public async Task<MongoDBAgentSessionRecord?> GetAsync(
+    public Task<MongoDBAgentSessionRecord?> GetAsync(
         string sessionId,
         AIAgent agent,
         JsonSerializerOptions? serializerOptions = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        MongoDBTelemetry.TrackAsync(
+            _logger,
+            MongoDBTelemetryFeature.SessionStore,
+            MongoDBTelemetryOperation.Load,
+            mode: null,
+            () => GetInnerAsync(sessionId, agent, serializerOptions, cancellationToken),
+            static record => new MongoDBTelemetryResult(
+                record is null ? MongoDBTelemetryOutcome.Empty : MongoDBTelemetryOutcome.Success,
+                record is null ? 0 : 1,
+                CandidateBucket: null),
+            cancellationToken);
+
+    private async Task<MongoDBAgentSessionRecord?> GetInnerAsync(
+        string sessionId,
+        AIAgent agent,
+        JsonSerializerOptions? serializerOptions,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(agent);
         BsonDocument scope = Scope(sessionId);
@@ -316,13 +409,29 @@ public sealed class MongoDBAgentSessionStore : IAsyncDisposable
     /// Inserts a new authorized session snapshot. Fails if a session with the same identity already exists,
     /// unless the existing snapshot's content is identical to this call's (idempotent retry convergence).
     /// </summary>
-    public async Task<MongoDBAgentSessionRecord> CreateAsync(
+    public Task<MongoDBAgentSessionRecord> CreateAsync(
         string sessionId,
         AgentSession session,
         AIAgent agent,
         DateTimeOffset? expiresAt = null,
         JsonSerializerOptions? serializerOptions = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        MongoDBTelemetry.TrackAsync(
+            _logger,
+            MongoDBTelemetryFeature.SessionStore,
+            MongoDBTelemetryOperation.Persist,
+            mode: null,
+            () => CreateInnerAsync(sessionId, session, agent, expiresAt, serializerOptions, cancellationToken),
+            static _ => new MongoDBTelemetryResult(MongoDBTelemetryOutcome.Success, 1, CandidateBucket: null),
+            cancellationToken);
+
+    private async Task<MongoDBAgentSessionRecord> CreateInnerAsync(
+        string sessionId,
+        AgentSession session,
+        AIAgent agent,
+        DateTimeOffset? expiresAt,
+        JsonSerializerOptions? serializerOptions,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(session);
         ArgumentNullException.ThrowIfNull(agent);
@@ -381,6 +490,20 @@ public sealed class MongoDBAgentSessionStore : IAsyncDisposable
                         "Use SetAsync with the current version to update it.",
                         exception);
                 }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (MongoDBIntegrationException)
+                {
+                    throw;
+                }
+                catch (MongoException exception)
+                {
+                    throw new MongoDBPersistenceException(
+                        "MongoDB Session Store persistence failed.",
+                        exception);
+                }
 
                 return await ToRecordAsync(candidate, codec, token).ConfigureAwait(false);
             },
@@ -395,14 +518,32 @@ public sealed class MongoDBAgentSessionStore : IAsyncDisposable
     /// write is an atomic compare-and-swap: it succeeds only if the stored version still matches, and a retried
     /// call whose stored result already reflects this exact content converges rather than conflicting.
     /// </summary>
-    public async Task<MongoDBAgentSessionRecord> SetAsync(
+    public Task<MongoDBAgentSessionRecord> SetAsync(
         string sessionId,
         AgentSession session,
         AIAgent agent,
         string? expectedVersion = null,
         DateTimeOffset? expiresAt = null,
         JsonSerializerOptions? serializerOptions = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        MongoDBTelemetry.TrackAsync(
+            _logger,
+            MongoDBTelemetryFeature.SessionStore,
+            MongoDBTelemetryOperation.Persist,
+            mode: null,
+            () => SetInnerAsync(
+                sessionId, session, agent, expectedVersion, expiresAt, serializerOptions, cancellationToken),
+            static _ => new MongoDBTelemetryResult(MongoDBTelemetryOutcome.Success, 1, CandidateBucket: null),
+            cancellationToken);
+
+    private async Task<MongoDBAgentSessionRecord> SetInnerAsync(
+        string sessionId,
+        AgentSession session,
+        AIAgent agent,
+        string? expectedVersion,
+        DateTimeOffset? expiresAt,
+        JsonSerializerOptions? serializerOptions,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(session);
         ArgumentNullException.ThrowIfNull(agent);
@@ -470,7 +611,24 @@ public sealed class MongoDBAgentSessionStore : IAsyncDisposable
                         throw IncompatibleSchemaException();
                     }
 
+                    throw new MongoDBConcurrencyException(
+                        "A concurrent write raced this unconditional upsert at the same authorized identity. " +
+                        "Reload the current session and retry.",
+                        exception);
+                }
+                catch (OperationCanceledException)
+                {
                     throw;
+                }
+                catch (MongoDBIntegrationException)
+                {
+                    throw;
+                }
+                catch (MongoException exception)
+                {
+                    throw new MongoDBPersistenceException(
+                        "MongoDB Session Store persistence failed.",
+                        exception);
                 }
 
                 if (result is not null)
@@ -518,10 +676,26 @@ public sealed class MongoDBAgentSessionStore : IAsyncDisposable
     /// exists (an idempotent no-op), and throws <see cref="MongoDBConcurrencyException"/> when
     /// <paramref name="expectedVersion"/> is supplied but a differently versioned snapshot exists.
     /// </summary>
-    public async Task<bool> DeleteAsync(
+    public Task<bool> DeleteAsync(
         string sessionId,
         string? expectedVersion = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        MongoDBTelemetry.TrackAsync(
+            _logger,
+            MongoDBTelemetryFeature.SessionStore,
+            MongoDBTelemetryOperation.Delete,
+            mode: null,
+            () => DeleteInnerAsync(sessionId, expectedVersion, cancellationToken),
+            static deleted => new MongoDBTelemetryResult(
+                deleted ? MongoDBTelemetryOutcome.Success : MongoDBTelemetryOutcome.Empty,
+                deleted ? 1 : 0,
+                CandidateBucket: null),
+            cancellationToken);
+
+    private async Task<bool> DeleteInnerAsync(
+        string sessionId,
+        string? expectedVersion,
+        CancellationToken cancellationToken)
     {
         long? parsedExpectedVersion = ParseVersionOrNull(expectedVersion);
         BsonDocument scope = Scope(sessionId);
@@ -537,8 +711,27 @@ public sealed class MongoDBAgentSessionStore : IAsyncDisposable
                     filter &= Builders<BsonDocument>.Filter.Eq("version", expected);
                 }
 
-                DeleteResult result = await _collection.DeleteOneAsync(filter, token)
-                    .ConfigureAwait(false);
+                DeleteResult result;
+                try
+                {
+                    result = await _collection.DeleteOneAsync(filter, token)
+                        .ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (MongoDBIntegrationException)
+                {
+                    throw;
+                }
+                catch (MongoException exception)
+                {
+                    throw new MongoDBPersistenceException(
+                        "MongoDB Session Store persistence failed.",
+                        exception);
+                }
+
                 if (!result.IsAcknowledged)
                 {
                     throw new MongoDBPersistenceException(
@@ -579,10 +772,26 @@ public sealed class MongoDBAgentSessionStore : IAsyncDisposable
     /// Lists authorized session summaries in ascending session-ID order, without deserializing session content
     /// (no <see cref="AIAgent"/> is required). Supports cleanup and administrative enumeration.
     /// </summary>
-    public async Task<MongoDBAgentSessionPage> ListAsync(
+    public Task<MongoDBAgentSessionPage> ListAsync(
         int limit,
         string? continuationToken = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        MongoDBTelemetry.TrackAsync(
+            _logger,
+            MongoDBTelemetryFeature.SessionStore,
+            MongoDBTelemetryOperation.List,
+            mode: null,
+            () => ListInnerAsync(limit, continuationToken, cancellationToken),
+            static page => new MongoDBTelemetryResult(
+                page.Items.Count > 0 ? MongoDBTelemetryOutcome.Success : MongoDBTelemetryOutcome.Empty,
+                page.Items.Count,
+                CandidateBucket: null),
+            cancellationToken);
+
+    private async Task<MongoDBAgentSessionPage> ListInnerAsync(
+        int limit,
+        string? continuationToken,
+        CancellationToken cancellationToken)
     {
         if (limit is < 1 or > 10_000)
         {
@@ -651,8 +860,19 @@ public sealed class MongoDBAgentSessionStore : IAsyncDisposable
     }
 
     /// <summary>Explicitly provisions the required regular lookup index and the optional TTL index.</summary>
-    public async Task<IReadOnlyList<string>> EnsureIndexesAsync(
-        CancellationToken cancellationToken = default)
+    public Task<IReadOnlyList<string>> EnsureIndexesAsync(
+        CancellationToken cancellationToken = default) =>
+        MongoDBTelemetry.TrackAsync(
+            _logger,
+            MongoDBTelemetryFeature.SessionStore,
+            MongoDBTelemetryOperation.EnsureIndex,
+            mode: null,
+            () => EnsureIndexesInnerAsync(cancellationToken),
+            static _ => new MongoDBTelemetryResult(MongoDBTelemetryOutcome.Success, null, null),
+            cancellationToken);
+
+    private async Task<IReadOnlyList<string>> EnsureIndexesInnerAsync(
+        CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var models = new List<CreateIndexModel<BsonDocument>>
@@ -695,7 +915,17 @@ public sealed class MongoDBAgentSessionStore : IAsyncDisposable
     }
 
     /// <summary>Validates the required regular and TTL indexes without mutating MongoDB.</summary>
-    public async Task ValidateIndexesAsync(CancellationToken cancellationToken = default)
+    public Task ValidateIndexesAsync(CancellationToken cancellationToken = default) =>
+        MongoDBTelemetry.TrackAsync(
+            _logger,
+            MongoDBTelemetryFeature.SessionStore,
+            MongoDBTelemetryOperation.ValidateIndex,
+            mode: null,
+            () => ValidateIndexesInnerAsync(cancellationToken),
+            static () => new MongoDBTelemetryResult(MongoDBTelemetryOutcome.Success, null, null),
+            cancellationToken);
+
+    private async Task ValidateIndexesInnerAsync(CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         try

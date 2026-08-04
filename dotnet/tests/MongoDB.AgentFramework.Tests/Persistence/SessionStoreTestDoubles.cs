@@ -20,6 +20,18 @@ internal sealed class SessionCollectionState
 
     public Exception? InsertException { get; set; }
 
+    /// <summary>When set, every fake <c>FindOneAndUpdateAsync</c> call throws this instead of applying the
+    /// update -- used to prove a non-duplicate-key <see cref="MongoException"/> during <c>SetAsync</c> is
+    /// still wrapped as a stable <see cref="MongoDBPersistenceException"/> rather than leaking the raw driver
+    /// exception to the caller.</summary>
+    public Exception? UpdateException { get; set; }
+
+    /// <summary>When set, every fake <c>DeleteOneAsync</c> call throws this instead of deleting -- used to
+    /// prove a <see cref="MongoException"/> during <c>DeleteAsync</c> is still wrapped as a stable
+    /// <see cref="MongoDBPersistenceException"/> rather than leaking the raw driver exception to the caller.
+    /// </summary>
+    public Exception? DeleteException { get; set; }
+
     public T Locked<T>(Func<T> action)
     {
         lock (_gate)
@@ -140,6 +152,11 @@ internal class SessionCollectionProxy : DispatchProxy
 
     private Task<BsonDocument?> FindOneAndUpdateAsync(object?[] args)
     {
+        if (State.UpdateException is not null)
+        {
+            throw State.UpdateException;
+        }
+
         BsonDocument filter = Render((FilterDefinition<BsonDocument>)args[0]!);
         BsonDocument update = ((UpdateDefinition<BsonDocument>)args[1]!).Render(
             new RenderArgs<BsonDocument>(BsonDocumentSerializer.Instance, BsonSerializer.SerializerRegistry))
@@ -254,6 +271,11 @@ internal class SessionCollectionProxy : DispatchProxy
 
     private Task<DeleteResult> DeleteOneAsync(object?[] args)
     {
+        if (State.DeleteException is not null)
+        {
+            throw State.DeleteException;
+        }
+
         BsonDocument filter = Render((FilterDefinition<BsonDocument>)args[0]!);
         return Task.FromResult<DeleteResult>(State.Locked(() =>
         {

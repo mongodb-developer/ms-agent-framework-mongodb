@@ -1,5 +1,8 @@
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using MongoDB.AgentFramework.Internal;
 using MongoDB.AgentFramework.Internal.IndexManagement;
+using MongoDB.AgentFramework.Internal.Observability;
 using MongoDB.Bson;
 using MongoDB.Driver;
 using MongoDB.Driver.Search;
@@ -20,39 +23,91 @@ public sealed class MongoDBMemoryIndexManager : IAsyncDisposable
 {
     private readonly IMongoCollection<BsonDocument> _collection;
     private readonly OwnedResource<IMongoClient>? _client;
+    private readonly ILogger<MongoDBMemoryIndexManager> _logger;
 
     /// <summary>Creates a manager over an injected database, which remains caller-owned.</summary>
+    /// <remarks>
+    /// This overload's exact parameter signature (no <see cref="ILogger{TCategoryName}"/> parameter) is a binary
+    /// compatibility surface: it must never gain a new parameter, including an optional one, because a caller
+    /// already compiled against it resolves default argument values at its own compile time, not this callee's.
+    /// Use the sibling overload accepting an explicit <see cref="ILogger{TCategoryName}"/> for structured
+    /// operation telemetry. See docs/development/observability-security/dotnet-telemetry.md.
+    /// </remarks>
     public MongoDBMemoryIndexManager(
         IMongoDatabase database,
         string collectionName,
         MongoDBVectorSearchIndexDefinition definition)
+        : this(database, collectionName, definition, logger: null)
+    {
+    }
+
+    /// <summary>
+    /// Creates a manager over an injected database, which remains caller-owned, with an explicit logger for
+    /// structured operation telemetry.
+    /// </summary>
+    public MongoDBMemoryIndexManager(
+        IMongoDatabase database,
+        string collectionName,
+        MongoDBVectorSearchIndexDefinition definition,
+        ILogger<MongoDBMemoryIndexManager>? logger)
         : this(
             (database ?? throw new ArgumentNullException(nameof(database)))
                 .GetCollection<BsonDocument>(RequireText(collectionName, nameof(collectionName))),
-            definition)
+            definition,
+            logger)
     {
     }
 
     /// <summary>Creates a manager over an injected collection, which remains caller-owned.</summary>
+    /// <remarks>See the database constructor's remarks on why this overload's signature must stay exact.</remarks>
     public MongoDBMemoryIndexManager(
         IMongoCollection<BsonDocument> collection,
         MongoDBVectorSearchIndexDefinition definition)
+        : this(collection, definition, logger: null)
+    {
+    }
+
+    /// <summary>
+    /// Creates a manager over an injected collection, which remains caller-owned, with an explicit logger for
+    /// structured operation telemetry.
+    /// </summary>
+    public MongoDBMemoryIndexManager(
+        IMongoCollection<BsonDocument> collection,
+        MongoDBVectorSearchIndexDefinition definition,
+        ILogger<MongoDBMemoryIndexManager>? logger)
     {
         _collection = collection ?? throw new ArgumentNullException(nameof(collection));
         Definition = definition ?? throw new ArgumentNullException(nameof(definition));
+        _logger = logger ?? NullLogger<MongoDBMemoryIndexManager>.Instance;
     }
 
     /// <summary>Creates a manager over an injected client, which remains caller-owned.</summary>
+    /// <remarks>See the database constructor's remarks on why this overload's signature must stay exact.</remarks>
     public MongoDBMemoryIndexManager(
         IMongoClient client,
         string databaseName,
         string collectionName,
         MongoDBVectorSearchIndexDefinition definition)
+        : this(client, databaseName, collectionName, definition, logger: null)
+    {
+    }
+
+    /// <summary>
+    /// Creates a manager over an injected client, which remains caller-owned, with an explicit logger for
+    /// structured operation telemetry.
+    /// </summary>
+    public MongoDBMemoryIndexManager(
+        IMongoClient client,
+        string databaseName,
+        string collectionName,
+        MongoDBVectorSearchIndexDefinition definition,
+        ILogger<MongoDBMemoryIndexManager>? logger)
         : this(
             (client ?? throw new ArgumentNullException(nameof(client)))
                 .GetDatabase(RequireText(databaseName, nameof(databaseName))),
             collectionName,
-            definition)
+            definition,
+            logger)
     {
     }
 
@@ -62,12 +117,27 @@ public sealed class MongoDBMemoryIndexManager : IAsyncDisposable
     /// <see cref="MongoDBMemoryProvider"/> connects with (docs/spec/features/index-management.md's least-privilege
     /// table).
     /// </summary>
+    /// <remarks>See the database constructor's remarks on why this overload's signature must stay exact.</remarks>
     public MongoDBMemoryIndexManager(
         string connectionString,
         string databaseName,
         string collectionName,
         MongoDBVectorSearchIndexDefinition definition)
-        : this(connectionString, databaseName, collectionName, definition, clientFactory: null)
+        : this(connectionString, databaseName, collectionName, definition, logger: null)
+    {
+    }
+
+    /// <summary>
+    /// Creates a manager-owned client from a connection string, with an explicit logger for structured operation
+    /// telemetry. See the collection constructor's remarks on the least-privilege rationale.
+    /// </summary>
+    public MongoDBMemoryIndexManager(
+        string connectionString,
+        string databaseName,
+        string collectionName,
+        MongoDBVectorSearchIndexDefinition definition,
+        ILogger<MongoDBMemoryIndexManager>? logger)
+        : this(connectionString, databaseName, collectionName, definition, clientFactory: null, logger: logger)
     {
     }
 
@@ -83,14 +153,16 @@ public sealed class MongoDBMemoryIndexManager : IAsyncDisposable
         string databaseName,
         string collectionName,
         MongoDBVectorSearchIndexDefinition definition,
-        Func<string, IMongoClient>? clientFactory)
-        : this(Connect(connectionString, databaseName, collectionName, definition, clientFactory))
+        Func<string, IMongoClient>? clientFactory,
+        ILogger<MongoDBMemoryIndexManager>? logger = null)
+        : this(Connect(connectionString, databaseName, collectionName, definition, clientFactory), logger)
     {
     }
 
     private MongoDBMemoryIndexManager(
-        (OwnedResource<IMongoClient> Client, IMongoCollection<BsonDocument> Collection, MongoDBVectorSearchIndexDefinition Definition) connected)
-        : this(connected.Collection, connected.Definition)
+        (OwnedResource<IMongoClient> Client, IMongoCollection<BsonDocument> Collection, MongoDBVectorSearchIndexDefinition Definition) connected,
+        ILogger<MongoDBMemoryIndexManager>? logger)
+        : this(connected.Collection, connected.Definition, logger)
     {
         _client = connected.Client;
     }
@@ -102,8 +174,21 @@ public sealed class MongoDBMemoryIndexManager : IAsyncDisposable
     public MongoDBVectorSearchIndexDefinition Definition { get; }
 
     /// <summary>Lists every Search/Vector Search index on the collection, never mutating MongoDB.</summary>
-    public async Task<IReadOnlyList<MongoDBIndexInfo>> ListIndexesAsync(
-        CancellationToken cancellationToken = default)
+    public Task<IReadOnlyList<MongoDBIndexInfo>> ListIndexesAsync(
+        CancellationToken cancellationToken = default) =>
+        MongoDBTelemetry.TrackAsync(
+            _logger,
+            MongoDBTelemetryFeature.Memory,
+            MongoDBTelemetryOperation.List,
+            mode: null,
+            () => ListIndexesCoreAsync(cancellationToken),
+            static indexes => new MongoDBTelemetryResult(
+                indexes.Count > 0 ? MongoDBTelemetryOutcome.Success : MongoDBTelemetryOutcome.Empty,
+                indexes.Count,
+                CandidateBucket: null),
+            cancellationToken);
+
+    private async Task<IReadOnlyList<MongoDBIndexInfo>> ListIndexesCoreAsync(CancellationToken cancellationToken)
     {
         IReadOnlyList<BsonDocument> indexes = await MongoDBSearchIndexes.ListAllAsync(
             _collection.SearchIndexes,
@@ -113,7 +198,20 @@ public sealed class MongoDBMemoryIndexManager : IAsyncDisposable
     }
 
     /// <summary>Inspects the configured index, returning <see langword="null"/> if it does not exist.</summary>
-    public async Task<MongoDBIndexInfo?> GetIndexAsync(CancellationToken cancellationToken = default)
+    public Task<MongoDBIndexInfo?> GetIndexAsync(CancellationToken cancellationToken = default) =>
+        MongoDBTelemetry.TrackAsync(
+            _logger,
+            MongoDBTelemetryFeature.Memory,
+            MongoDBTelemetryOperation.List,
+            mode: null,
+            () => GetIndexCoreAsync(cancellationToken),
+            static index => new MongoDBTelemetryResult(
+                index is not null ? MongoDBTelemetryOutcome.Success : MongoDBTelemetryOutcome.Empty,
+                index is not null ? 1 : 0,
+                CandidateBucket: null),
+            cancellationToken);
+
+    private async Task<MongoDBIndexInfo?> GetIndexCoreAsync(CancellationToken cancellationToken)
     {
         BsonDocument? index = await FindAsync(cancellationToken).ConfigureAwait(false);
         return index is null ? null : ToIndexInfo(index);
@@ -128,9 +226,20 @@ public sealed class MongoDBMemoryIndexManager : IAsyncDisposable
     /// <exception cref="MongoDBIndexMissingException">The configured index does not exist.</exception>
     /// <exception cref="MongoDBIndexMismatchException">The index does not match <see cref="Definition"/>.</exception>
     /// <exception cref="MongoDBIndexNotReadyException"><paramref name="requireReady"/> is <see langword="true"/> and the index is not queryable.</exception>
-    public async Task<MongoDBIndexComparison> ValidateIndexAsync(
+    public Task<MongoDBIndexComparison> ValidateIndexAsync(
         bool requireReady = true,
         CancellationToken cancellationToken = default) =>
+        MongoDBTelemetry.TrackAsync(
+            _logger,
+            MongoDBTelemetryFeature.Memory,
+            MongoDBTelemetryOperation.ValidateIndex,
+            mode: null,
+            () => ValidateIndexCoreAsync(requireReady, cancellationToken),
+            static _ => new MongoDBTelemetryResult(MongoDBTelemetryOutcome.Success, null, null),
+            cancellationToken);
+
+    private async Task<MongoDBIndexComparison> ValidateIndexCoreAsync(
+        bool requireReady, CancellationToken cancellationToken) =>
         (await ValidateSnapshotAsync(requireReady, cancellationToken).ConfigureAwait(false)).Comparison;
 
     /// <summary>
@@ -146,7 +255,17 @@ public sealed class MongoDBMemoryIndexManager : IAsyncDisposable
     /// <exception cref="MongoDBIndexMismatchException">The created index does not match <see cref="Definition"/>.</exception>
     /// <exception cref="MongoDBIndexFailedException">The created index reports a terminal build failure.</exception>
     /// <exception cref="MongoDBIndexPrivilegeException">The connected identity lacks index-creation privileges.</exception>
-    public async Task<MongoDBIndexInfo> CreateIndexAsync(CancellationToken cancellationToken = default)
+    public Task<MongoDBIndexInfo> CreateIndexAsync(CancellationToken cancellationToken = default) =>
+        MongoDBTelemetry.TrackAsync(
+            _logger,
+            MongoDBTelemetryFeature.Memory,
+            MongoDBTelemetryOperation.EnsureIndex,
+            mode: null,
+            () => CreateIndexCoreAsync(cancellationToken),
+            static _ => new MongoDBTelemetryResult(MongoDBTelemetryOutcome.Success, null, null),
+            cancellationToken);
+
+    private async Task<MongoDBIndexInfo> CreateIndexCoreAsync(CancellationToken cancellationToken)
     {
         BsonDocument index = await MongoDBSearchIndexes.CreateOnlyAsync(
             _collection.SearchIndexes,
@@ -174,7 +293,9 @@ public sealed class MongoDBMemoryIndexManager : IAsyncDisposable
     /// and validates the index's final state after any create/update attempt (including a create that raced a
     /// concurrent caller to an "already exists" no-op, and including leaving a Failed/wrong-type index
     /// untouched), so a rival concurrent caller having created an incompatible definition is still caught rather
-    /// than silently accepted.
+    /// than silently accepted. When <paramref name="waitUntilReady"/> is <see langword="true"/>, the internal wait
+    /// runs uninstrumented so this whole ensure-then-wait sequence still records exactly one telemetry
+    /// activity/log, not a duplicate nested one for the wait.
     /// </summary>
     /// <param name="waitUntilReady">When <see langword="true"/>, polls with bounded exponential backoff until queryable.</param>
     /// <param name="timeout">The bounded polling deadline. Defaults to 60 seconds.</param>
@@ -184,11 +305,25 @@ public sealed class MongoDBMemoryIndexManager : IAsyncDisposable
     /// <exception cref="MongoDBIndexFailedException">The index reports a terminal build failure.</exception>
     /// <exception cref="MongoDBIndexPrivilegeException">The connected identity lacks index-creation/update privileges.</exception>
     /// <exception cref="MongoDBTimeoutException"><paramref name="waitUntilReady"/> is <see langword="true"/> and the deadline elapsed before the index became queryable.</exception>
-    public async Task<MongoDBIndexInfo> EnsureIndexAsync(
+    public Task<MongoDBIndexInfo> EnsureIndexAsync(
         bool waitUntilReady = false,
         TimeSpan? timeout = null,
         TimeSpan? pollInterval = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        MongoDBTelemetry.TrackAsync(
+            _logger,
+            MongoDBTelemetryFeature.Memory,
+            MongoDBTelemetryOperation.EnsureIndex,
+            mode: null,
+            () => EnsureIndexCoreAsync(waitUntilReady, timeout, pollInterval, cancellationToken),
+            static _ => new MongoDBTelemetryResult(MongoDBTelemetryOutcome.Success, null, null),
+            cancellationToken);
+
+    private async Task<MongoDBIndexInfo> EnsureIndexCoreAsync(
+        bool waitUntilReady,
+        TimeSpan? timeout,
+        TimeSpan? pollInterval,
+        CancellationToken cancellationToken)
     {
         BsonDocument index = await MongoDBSearchIndexes.EnsureAsync(
             _collection.SearchIndexes,
@@ -204,7 +339,7 @@ public sealed class MongoDBMemoryIndexManager : IAsyncDisposable
             cancellationToken).ConfigureAwait(false);
 
         return waitUntilReady
-            ? await WaitUntilReadyAsync(timeout, pollInterval, cancellationToken).ConfigureAwait(false)
+            ? await WaitUntilReadyCoreAsync(timeout, pollInterval, cancellationToken).ConfigureAwait(false)
             : ToIndexInfo(index);
     }
 
@@ -214,7 +349,17 @@ public sealed class MongoDBMemoryIndexManager : IAsyncDisposable
     /// </summary>
     /// <exception cref="MongoDBIndexMissingException">The configured index does not exist.</exception>
     /// <exception cref="MongoDBIndexPrivilegeException">The connected identity lacks index-update privileges.</exception>
-    public async Task UpdateIndexAsync(CancellationToken cancellationToken = default)
+    public Task UpdateIndexAsync(CancellationToken cancellationToken = default) =>
+        MongoDBTelemetry.TrackAsync(
+            _logger,
+            MongoDBTelemetryFeature.Memory,
+            MongoDBTelemetryOperation.EnsureIndex,
+            mode: null,
+            () => UpdateIndexCoreAsync(cancellationToken),
+            static () => new MongoDBTelemetryResult(MongoDBTelemetryOutcome.Success, null, null),
+            cancellationToken);
+
+    private async Task UpdateIndexCoreAsync(CancellationToken cancellationToken)
     {
         await RequireIndexAsync(cancellationToken).ConfigureAwait(false);
         await MongoDBSearchIndexes.UpdateAsync(
@@ -237,6 +382,25 @@ public sealed class MongoDBMemoryIndexManager : IAsyncDisposable
         TimeSpan? timeout = null,
         TimeSpan? pollInterval = null,
         CancellationToken cancellationToken = default) =>
+        MongoDBTelemetry.TrackAsync(
+            _logger,
+            MongoDBTelemetryFeature.Memory,
+            MongoDBTelemetryOperation.EnsureIndex,
+            mode: null,
+            () => WaitUntilReadyCoreAsync(timeout, pollInterval, cancellationToken),
+            static _ => new MongoDBTelemetryResult(MongoDBTelemetryOutcome.Success, null, null),
+            cancellationToken);
+
+    /// <summary>
+    /// The uninstrumented polling core, called both by the public <see cref="WaitUntilReadyAsync"/> (which wraps
+    /// it in its own telemetry) and internally by <see cref="EnsureIndexCoreAsync"/> when
+    /// <c>waitUntilReady</c> is requested -- so <see cref="EnsureIndexAsync"/> calling into a wait never produces
+    /// a second, nested telemetry activity/log for the same outer operation.
+    /// </summary>
+    private Task<MongoDBIndexInfo> WaitUntilReadyCoreAsync(
+        TimeSpan? timeout,
+        TimeSpan? pollInterval,
+        CancellationToken cancellationToken) =>
         BoundedExponentialPolling.RunAsync(
             async token =>
             {
@@ -264,10 +428,17 @@ public sealed class MongoDBMemoryIndexManager : IAsyncDisposable
     /// </summary>
     /// <exception cref="MongoDBIndexPrivilegeException">The connected identity lacks index-drop privileges.</exception>
     public Task DropIndexAsync(CancellationToken cancellationToken = default) =>
-        MongoDBSearchIndexes.DropAsync(
-            _collection.SearchIndexes,
-            Definition.IndexName,
-            MapDropException,
+        MongoDBTelemetry.TrackAsync(
+            _logger,
+            MongoDBTelemetryFeature.Memory,
+            MongoDBTelemetryOperation.Delete,
+            mode: null,
+            () => MongoDBSearchIndexes.DropAsync(
+                _collection.SearchIndexes,
+                Definition.IndexName,
+                MapDropException,
+                cancellationToken),
+            static () => new MongoDBTelemetryResult(MongoDBTelemetryOutcome.Success, null, null),
             cancellationToken);
 
     /// <inheritdoc />

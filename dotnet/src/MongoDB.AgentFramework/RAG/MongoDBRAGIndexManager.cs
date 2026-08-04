@@ -1,6 +1,9 @@
 using System.Diagnostics;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using MongoDB.AgentFramework.Internal;
 using MongoDB.AgentFramework.Internal.IndexManagement;
+using MongoDB.AgentFramework.Internal.Observability;
 using MongoDB.Bson;
 using MongoDB.Driver;
 using MongoDB.Driver.Search;
@@ -22,26 +25,67 @@ public sealed class MongoDBRAGIndexManager : IAsyncDisposable
 {
     private readonly IMongoCollection<BsonDocument> _collection;
     private readonly OwnedResource<IMongoClient>? _client;
+    private readonly ILogger<MongoDBRAGIndexManager> _logger;
 
     /// <summary>Creates a manager over an injected database, which remains caller-owned.</summary>
+    /// <remarks>
+    /// This overload's exact parameter signature (no <see cref="ILogger{TCategoryName}"/> parameter) is a binary
+    /// compatibility surface: it must never gain a new parameter, including an optional one, because a caller
+    /// already compiled against it resolves default argument values at its own compile time, not this callee's.
+    /// Use the sibling overload accepting an explicit <see cref="ILogger{TCategoryName}"/> for structured
+    /// operation telemetry. See docs/development/observability-security/dotnet-telemetry.md.
+    /// </remarks>
     public MongoDBRAGIndexManager(
         IMongoDatabase database,
         string collectionName,
         MongoDBVectorSearchIndexDefinition? vectorDefinition = null,
         MongoDBSearchIndexDefinition? searchDefinition = null)
+        : this(database, collectionName, vectorDefinition, searchDefinition, logger: null)
+    {
+    }
+
+    /// <summary>
+    /// Creates a manager over an injected database, which remains caller-owned, with an explicit logger for
+    /// structured operation telemetry. <paramref name="vectorDefinition"/>/<paramref name="searchDefinition"/>
+    /// are required (rather than optional, as on the sibling non-logger overload) purely so this overload's
+    /// arity differs from that overload's and callers resolve unambiguously; at least one of the two must still
+    /// be non-null.
+    /// </summary>
+    public MongoDBRAGIndexManager(
+        IMongoDatabase database,
+        string collectionName,
+        MongoDBVectorSearchIndexDefinition? vectorDefinition,
+        MongoDBSearchIndexDefinition? searchDefinition,
+        ILogger<MongoDBRAGIndexManager>? logger)
         : this(
             (database ?? throw new ArgumentNullException(nameof(database)))
                 .GetCollection<BsonDocument>(RequireText(collectionName, nameof(collectionName))),
             vectorDefinition,
-            searchDefinition)
+            searchDefinition,
+            logger)
     {
     }
 
     /// <summary>Creates a manager over an injected collection, which remains caller-owned.</summary>
+    /// <remarks>See the database constructor's remarks on why this overload's signature must stay exact.</remarks>
     public MongoDBRAGIndexManager(
         IMongoCollection<BsonDocument> collection,
         MongoDBVectorSearchIndexDefinition? vectorDefinition = null,
         MongoDBSearchIndexDefinition? searchDefinition = null)
+        : this(collection, vectorDefinition, searchDefinition, logger: null)
+    {
+    }
+
+    /// <summary>
+    /// Creates a manager over an injected collection, which remains caller-owned, with an explicit logger for
+    /// structured operation telemetry. See the database constructor's logger-overload remarks on why
+    /// <paramref name="vectorDefinition"/>/<paramref name="searchDefinition"/> are required here.
+    /// </summary>
+    public MongoDBRAGIndexManager(
+        IMongoCollection<BsonDocument> collection,
+        MongoDBVectorSearchIndexDefinition? vectorDefinition,
+        MongoDBSearchIndexDefinition? searchDefinition,
+        ILogger<MongoDBRAGIndexManager>? logger)
     {
         if (vectorDefinition is null && searchDefinition is null)
         {
@@ -52,21 +96,40 @@ public sealed class MongoDBRAGIndexManager : IAsyncDisposable
         _collection = collection ?? throw new ArgumentNullException(nameof(collection));
         VectorDefinition = vectorDefinition;
         SearchDefinition = searchDefinition;
+        _logger = logger ?? NullLogger<MongoDBRAGIndexManager>.Instance;
     }
 
     /// <summary>Creates a manager over an injected client, which remains caller-owned.</summary>
+    /// <remarks>See the database constructor's remarks on why this overload's signature must stay exact.</remarks>
     public MongoDBRAGIndexManager(
         IMongoClient client,
         string databaseName,
         string collectionName,
         MongoDBVectorSearchIndexDefinition? vectorDefinition = null,
         MongoDBSearchIndexDefinition? searchDefinition = null)
+        : this(client, databaseName, collectionName, vectorDefinition, searchDefinition, logger: null)
+    {
+    }
+
+    /// <summary>
+    /// Creates a manager over an injected client, which remains caller-owned, with an explicit logger for
+    /// structured operation telemetry. See the database constructor's logger-overload remarks on why
+    /// <paramref name="vectorDefinition"/>/<paramref name="searchDefinition"/> are required here.
+    /// </summary>
+    public MongoDBRAGIndexManager(
+        IMongoClient client,
+        string databaseName,
+        string collectionName,
+        MongoDBVectorSearchIndexDefinition? vectorDefinition,
+        MongoDBSearchIndexDefinition? searchDefinition,
+        ILogger<MongoDBRAGIndexManager>? logger)
         : this(
             (client ?? throw new ArgumentNullException(nameof(client)))
                 .GetDatabase(RequireText(databaseName, nameof(databaseName))),
             collectionName,
             vectorDefinition,
-            searchDefinition)
+            searchDefinition,
+            logger)
     {
     }
 
@@ -75,6 +138,7 @@ public sealed class MongoDBRAGIndexManager : IAsyncDisposable
     /// under a distinct, more privileged identity than the runtime <see cref="MongoDBRAGProvider"/> connects with
     /// (docs/spec/features/index-management.md's least-privilege table).
     /// </summary>
+    /// <remarks>See the database constructor's remarks on why this overload's signature must stay exact.</remarks>
     public MongoDBRAGIndexManager(
         string connectionString,
         string databaseName,
@@ -82,6 +146,25 @@ public sealed class MongoDBRAGIndexManager : IAsyncDisposable
         MongoDBVectorSearchIndexDefinition? vectorDefinition = null,
         MongoDBSearchIndexDefinition? searchDefinition = null)
         : this(connectionString, databaseName, collectionName, vectorDefinition, searchDefinition, clientFactory: null)
+    {
+    }
+
+    /// <summary>
+    /// Creates a manager-owned client from a connection string, with an explicit logger for structured operation
+    /// telemetry. See the collection constructor's remarks on the least-privilege rationale, and the database
+    /// constructor's logger-overload remarks on why <paramref name="vectorDefinition"/>/
+    /// <paramref name="searchDefinition"/> are required here.
+    /// </summary>
+    public MongoDBRAGIndexManager(
+        string connectionString,
+        string databaseName,
+        string collectionName,
+        MongoDBVectorSearchIndexDefinition? vectorDefinition,
+        MongoDBSearchIndexDefinition? searchDefinition,
+        ILogger<MongoDBRAGIndexManager>? logger)
+        : this(
+            connectionString, databaseName, collectionName, vectorDefinition, searchDefinition,
+            clientFactory: null, logger: logger)
     {
     }
 
@@ -98,8 +181,9 @@ public sealed class MongoDBRAGIndexManager : IAsyncDisposable
         string collectionName,
         MongoDBVectorSearchIndexDefinition? vectorDefinition,
         MongoDBSearchIndexDefinition? searchDefinition,
-        Func<string, IMongoClient>? clientFactory)
-        : this(Connect(connectionString, databaseName, collectionName, vectorDefinition, searchDefinition, clientFactory))
+        Func<string, IMongoClient>? clientFactory,
+        ILogger<MongoDBRAGIndexManager>? logger = null)
+        : this(Connect(connectionString, databaseName, collectionName, vectorDefinition, searchDefinition, clientFactory), logger)
     {
     }
 
@@ -107,8 +191,9 @@ public sealed class MongoDBRAGIndexManager : IAsyncDisposable
         (OwnedResource<IMongoClient> Client,
          IMongoCollection<BsonDocument> Collection,
          MongoDBVectorSearchIndexDefinition? VectorDefinition,
-         MongoDBSearchIndexDefinition? SearchDefinition) connected)
-        : this(connected.Collection, connected.VectorDefinition, connected.SearchDefinition)
+         MongoDBSearchIndexDefinition? SearchDefinition) connected,
+        ILogger<MongoDBRAGIndexManager>? logger)
+        : this(connected.Collection, connected.VectorDefinition, connected.SearchDefinition, logger)
     {
         _client = connected.Client;
     }
@@ -123,8 +208,21 @@ public sealed class MongoDBRAGIndexManager : IAsyncDisposable
     public MongoDBSearchIndexDefinition? SearchDefinition { get; }
 
     /// <summary>Lists every Search/Vector Search index on the collection, never mutating MongoDB.</summary>
-    public async Task<IReadOnlyList<MongoDBIndexInfo>> ListIndexesAsync(
-        CancellationToken cancellationToken = default)
+    public Task<IReadOnlyList<MongoDBIndexInfo>> ListIndexesAsync(
+        CancellationToken cancellationToken = default) =>
+        MongoDBTelemetry.TrackAsync(
+            _logger,
+            MongoDBTelemetryFeature.Rag,
+            MongoDBTelemetryOperation.List,
+            mode: null,
+            () => ListIndexesCoreAsync(cancellationToken),
+            static indexes => new MongoDBTelemetryResult(
+                indexes.Count > 0 ? MongoDBTelemetryOutcome.Success : MongoDBTelemetryOutcome.Empty,
+                indexes.Count,
+                CandidateBucket: null),
+            cancellationToken);
+
+    private async Task<IReadOnlyList<MongoDBIndexInfo>> ListIndexesCoreAsync(CancellationToken cancellationToken)
     {
         IReadOnlyList<BsonDocument> indexes = await MongoDBSearchIndexes.ListAllAsync(
             _collection.SearchIndexes,
@@ -134,7 +232,20 @@ public sealed class MongoDBRAGIndexManager : IAsyncDisposable
     }
 
     /// <summary>Inspects the configured Vector Search index, returning <see langword="null"/> if it does not exist.</summary>
-    public async Task<MongoDBIndexInfo?> GetVectorSearchIndexAsync(CancellationToken cancellationToken = default)
+    public Task<MongoDBIndexInfo?> GetVectorSearchIndexAsync(CancellationToken cancellationToken = default) =>
+        MongoDBTelemetry.TrackAsync(
+            _logger,
+            MongoDBTelemetryFeature.Rag,
+            MongoDBTelemetryOperation.List,
+            mode: null,
+            () => GetVectorSearchIndexCoreAsync(cancellationToken),
+            static index => new MongoDBTelemetryResult(
+                index is not null ? MongoDBTelemetryOutcome.Success : MongoDBTelemetryOutcome.Empty,
+                index is not null ? 1 : 0,
+                CandidateBucket: null),
+            cancellationToken);
+
+    private async Task<MongoDBIndexInfo?> GetVectorSearchIndexCoreAsync(CancellationToken cancellationToken)
     {
         BsonDocument? index = await FindAsync(RequireVectorDefinition().IndexName, cancellationToken)
             .ConfigureAwait(false);
@@ -142,7 +253,20 @@ public sealed class MongoDBRAGIndexManager : IAsyncDisposable
     }
 
     /// <summary>Inspects the configured Search index, returning <see langword="null"/> if it does not exist.</summary>
-    public async Task<MongoDBIndexInfo?> GetSearchIndexAsync(CancellationToken cancellationToken = default)
+    public Task<MongoDBIndexInfo?> GetSearchIndexAsync(CancellationToken cancellationToken = default) =>
+        MongoDBTelemetry.TrackAsync(
+            _logger,
+            MongoDBTelemetryFeature.Rag,
+            MongoDBTelemetryOperation.List,
+            mode: null,
+            () => GetSearchIndexCoreAsync(cancellationToken),
+            static index => new MongoDBTelemetryResult(
+                index is not null ? MongoDBTelemetryOutcome.Success : MongoDBTelemetryOutcome.Empty,
+                index is not null ? 1 : 0,
+                CandidateBucket: null),
+            cancellationToken);
+
+    private async Task<MongoDBIndexInfo?> GetSearchIndexCoreAsync(CancellationToken cancellationToken)
     {
         BsonDocument? index = await FindAsync(RequireSearchDefinition().IndexName, cancellationToken)
             .ConfigureAwait(false);
@@ -157,9 +281,20 @@ public sealed class MongoDBRAGIndexManager : IAsyncDisposable
     /// <exception cref="MongoDBIndexMissingException">The configured index does not exist.</exception>
     /// <exception cref="MongoDBIndexMismatchException">The index does not match <see cref="VectorDefinition"/>.</exception>
     /// <exception cref="MongoDBIndexNotReadyException"><paramref name="requireReady"/> is <see langword="true"/> and the index is not queryable.</exception>
-    public async Task<MongoDBIndexComparison> ValidateVectorSearchIndexAsync(
+    public Task<MongoDBIndexComparison> ValidateVectorSearchIndexAsync(
         bool requireReady = true,
         CancellationToken cancellationToken = default) =>
+        MongoDBTelemetry.TrackAsync(
+            _logger,
+            MongoDBTelemetryFeature.Rag,
+            MongoDBTelemetryOperation.ValidateIndex,
+            mode: null,
+            () => ValidateVectorSearchIndexCoreAsync(requireReady, cancellationToken),
+            static _ => new MongoDBTelemetryResult(MongoDBTelemetryOutcome.Success, null, null),
+            cancellationToken);
+
+    private async Task<MongoDBIndexComparison> ValidateVectorSearchIndexCoreAsync(
+        bool requireReady, CancellationToken cancellationToken) =>
         (await ValidateVectorSnapshotAsync(requireReady, cancellationToken).ConfigureAwait(false)).Comparison;
 
     /// <summary>
@@ -171,28 +306,52 @@ public sealed class MongoDBRAGIndexManager : IAsyncDisposable
     /// <exception cref="MongoDBIndexMissingException">The configured index does not exist.</exception>
     /// <exception cref="MongoDBIndexMismatchException">The index does not match <see cref="SearchDefinition"/>.</exception>
     /// <exception cref="MongoDBIndexNotReadyException"><paramref name="requireReady"/> is <see langword="true"/> and the index is not queryable.</exception>
-    public async Task<MongoDBIndexComparison> ValidateSearchIndexAsync(
+    public Task<MongoDBIndexComparison> ValidateSearchIndexAsync(
         bool requireReady = true,
         CancellationToken cancellationToken = default) =>
+        MongoDBTelemetry.TrackAsync(
+            _logger,
+            MongoDBTelemetryFeature.Rag,
+            MongoDBTelemetryOperation.ValidateIndex,
+            mode: null,
+            () => ValidateSearchIndexCoreAsync(requireReady, cancellationToken),
+            static _ => new MongoDBTelemetryResult(MongoDBTelemetryOutcome.Success, null, null),
+            cancellationToken);
+
+    private async Task<MongoDBIndexComparison> ValidateSearchIndexCoreAsync(
+        bool requireReady, CancellationToken cancellationToken) =>
         (await ValidateSearchSnapshotAsync(requireReady, cancellationToken).ConfigureAwait(false)).Comparison;
 
     /// <summary>
     /// Validates that both the configured Vector Search and Search indexes exist and match their definitions --
     /// the combination <see cref="MongoDBSearchMode.HybridRrf"/> requires. Both <see cref="VectorDefinition"/> and
     /// <see cref="SearchDefinition"/> must be configured, or this fails fast with
-    /// <see cref="MongoDBConfigurationException"/> rather than silently validating only one branch.
+    /// <see cref="MongoDBConfigurationException"/> rather than silently validating only one branch. This calls
+    /// the uninstrumented Vector/Search validation cores directly (not the public
+    /// <see cref="ValidateVectorSearchIndexAsync"/>/<see cref="ValidateSearchIndexAsync"/> methods), so this
+    /// single Hybrid validation records exactly one telemetry activity/log, not three.
     /// </summary>
     /// <exception cref="MongoDBConfigurationException">Either definition is not configured.</exception>
     /// <exception cref="MongoDBIndexMissingException">Either configured index does not exist.</exception>
     /// <exception cref="MongoDBIndexMismatchException">Either index does not match its definition.</exception>
     /// <exception cref="MongoDBIndexNotReadyException"><paramref name="requireReady"/> is <see langword="true"/> and either index is not queryable.</exception>
-    public async Task ValidateHybridAsync(
+    public Task ValidateHybridAsync(
         bool requireReady = true,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        MongoDBTelemetry.TrackAsync(
+            _logger,
+            MongoDBTelemetryFeature.Rag,
+            MongoDBTelemetryOperation.ValidateIndex,
+            mode: null,
+            () => ValidateHybridCoreAsync(requireReady, cancellationToken),
+            static () => new MongoDBTelemetryResult(MongoDBTelemetryOutcome.Success, null, null),
+            cancellationToken);
+
+    private async Task ValidateHybridCoreAsync(bool requireReady, CancellationToken cancellationToken)
     {
         RequireHybridDefinitions();
-        await ValidateVectorSearchIndexAsync(requireReady, cancellationToken).ConfigureAwait(false);
-        await ValidateSearchIndexAsync(requireReady, cancellationToken).ConfigureAwait(false);
+        await ValidateVectorSearchIndexCoreAsync(requireReady, cancellationToken).ConfigureAwait(false);
+        await ValidateSearchIndexCoreAsync(requireReady, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Creates the configured Vector Search index. Fails immediately if it already exists.</summary>
@@ -201,7 +360,17 @@ public sealed class MongoDBRAGIndexManager : IAsyncDisposable
     /// <exception cref="MongoDBIndexMismatchException">The created index does not match <see cref="VectorDefinition"/>.</exception>
     /// <exception cref="MongoDBIndexFailedException">The created index reports a terminal build failure.</exception>
     /// <exception cref="MongoDBIndexPrivilegeException">The connected identity lacks index-creation privileges.</exception>
-    public async Task<MongoDBIndexInfo> CreateVectorSearchIndexAsync(CancellationToken cancellationToken = default)
+    public Task<MongoDBIndexInfo> CreateVectorSearchIndexAsync(CancellationToken cancellationToken = default) =>
+        MongoDBTelemetry.TrackAsync(
+            _logger,
+            MongoDBTelemetryFeature.Rag,
+            MongoDBTelemetryOperation.EnsureIndex,
+            mode: null,
+            () => CreateVectorSearchIndexCoreAsync(cancellationToken),
+            static _ => new MongoDBTelemetryResult(MongoDBTelemetryOutcome.Success, null, null),
+            cancellationToken);
+
+    private async Task<MongoDBIndexInfo> CreateVectorSearchIndexCoreAsync(CancellationToken cancellationToken)
     {
         MongoDBVectorSearchIndexDefinition definition = RequireVectorDefinition();
         BsonDocument index = await MongoDBSearchIndexes.CreateOnlyAsync(
@@ -223,7 +392,17 @@ public sealed class MongoDBRAGIndexManager : IAsyncDisposable
     /// <exception cref="MongoDBIndexMismatchException">The created index does not match <see cref="SearchDefinition"/>.</exception>
     /// <exception cref="MongoDBIndexFailedException">The created index reports a terminal build failure.</exception>
     /// <exception cref="MongoDBIndexPrivilegeException">The connected identity lacks index-creation privileges.</exception>
-    public async Task<MongoDBIndexInfo> CreateSearchIndexAsync(CancellationToken cancellationToken = default)
+    public Task<MongoDBIndexInfo> CreateSearchIndexAsync(CancellationToken cancellationToken = default) =>
+        MongoDBTelemetry.TrackAsync(
+            _logger,
+            MongoDBTelemetryFeature.Rag,
+            MongoDBTelemetryOperation.EnsureIndex,
+            mode: null,
+            () => CreateSearchIndexCoreAsync(cancellationToken),
+            static _ => new MongoDBTelemetryResult(MongoDBTelemetryOutcome.Success, null, null),
+            cancellationToken);
+
+    private async Task<MongoDBIndexInfo> CreateSearchIndexCoreAsync(CancellationToken cancellationToken)
     {
         MongoDBSearchIndexDefinition definition = RequireSearchDefinition();
         BsonDocument index = await MongoDBSearchIndexes.CreateOnlyAsync(
@@ -248,11 +427,22 @@ public sealed class MongoDBRAGIndexManager : IAsyncDisposable
     /// caller winning a create race against one of the indexes after this preflight check (but before this
     /// call's own create attempt) is still rejected by <see cref="CreateVectorSearchIndexAsync"/>/
     /// <see cref="CreateSearchIndexAsync"/>'s own create-only semantics; only the up-front "one obviously already
-    /// exists" case is prevented here.
+    /// exists" case is prevented here. This calls the uninstrumented Vector/Search create cores directly, so this
+    /// single Hybrid create records exactly one telemetry activity/log.
     /// </summary>
     /// <exception cref="MongoDBConfigurationException">Either definition is not configured.</exception>
     /// <exception cref="MongoDBIndexAlreadyExistsException">Either configured index already exists.</exception>
-    public async Task CreateHybridAsync(CancellationToken cancellationToken = default)
+    public Task CreateHybridAsync(CancellationToken cancellationToken = default) =>
+        MongoDBTelemetry.TrackAsync(
+            _logger,
+            MongoDBTelemetryFeature.Rag,
+            MongoDBTelemetryOperation.EnsureIndex,
+            mode: null,
+            () => CreateHybridCoreAsync(cancellationToken),
+            static () => new MongoDBTelemetryResult(MongoDBTelemetryOutcome.Success, null, null),
+            cancellationToken);
+
+    private async Task CreateHybridCoreAsync(CancellationToken cancellationToken)
     {
         RequireHybridDefinitions();
         MongoDBVectorSearchIndexDefinition vectorDefinition = RequireVectorDefinition();
@@ -268,8 +458,8 @@ public sealed class MongoDBRAGIndexManager : IAsyncDisposable
             throw MapAlreadyExistsException(searchDefinition.IndexName, raceException: null);
         }
 
-        await CreateVectorSearchIndexAsync(cancellationToken).ConfigureAwait(false);
-        await CreateSearchIndexAsync(cancellationToken).ConfigureAwait(false);
+        await CreateVectorSearchIndexCoreAsync(cancellationToken).ConfigureAwait(false);
+        await CreateSearchIndexCoreAsync(cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Creates the configured Vector Search index if missing, and optionally waits until queryable.</summary>
@@ -282,7 +472,21 @@ public sealed class MongoDBRAGIndexManager : IAsyncDisposable
         bool waitUntilReady = false,
         TimeSpan? timeout = null,
         TimeSpan? pollInterval = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        MongoDBTelemetry.TrackAsync(
+            _logger,
+            MongoDBTelemetryFeature.Rag,
+            MongoDBTelemetryOperation.EnsureIndex,
+            mode: null,
+            () => EnsureVectorSearchIndexCoreAsync(waitUntilReady, timeout, pollInterval, cancellationToken),
+            static _ => new MongoDBTelemetryResult(MongoDBTelemetryOutcome.Success, null, null),
+            cancellationToken);
+
+    private Task<MongoDBIndexInfo> EnsureVectorSearchIndexCoreAsync(
+        bool waitUntilReady,
+        TimeSpan? timeout,
+        TimeSpan? pollInterval,
+        CancellationToken cancellationToken)
     {
         MongoDBVectorSearchIndexDefinition definition = RequireVectorDefinition();
         return EnsureAsync(
@@ -292,7 +496,7 @@ public sealed class MongoDBRAGIndexManager : IAsyncDisposable
             index => MongoDBSearchIndexes.CanReconcile(index, VectorSearchIndexEquivalence.CheckIndexType),
             index => VectorSearchIndexEquivalence.Compare(MongoDBSearchIndexes.GetDefinition(index), definition).IsCompatible,
             index => ValidateVector(index, definition, requireReady: false),
-            () => WaitUntilVectorSearchIndexReadyAsync(timeout, pollInterval, cancellationToken),
+            () => WaitUntilVectorSearchIndexReadyCoreAsync(timeout, pollInterval, cancellationToken),
             waitUntilReady,
             cancellationToken);
     }
@@ -307,7 +511,21 @@ public sealed class MongoDBRAGIndexManager : IAsyncDisposable
         bool waitUntilReady = false,
         TimeSpan? timeout = null,
         TimeSpan? pollInterval = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        MongoDBTelemetry.TrackAsync(
+            _logger,
+            MongoDBTelemetryFeature.Rag,
+            MongoDBTelemetryOperation.EnsureIndex,
+            mode: null,
+            () => EnsureSearchIndexCoreAsync(waitUntilReady, timeout, pollInterval, cancellationToken),
+            static _ => new MongoDBTelemetryResult(MongoDBTelemetryOutcome.Success, null, null),
+            cancellationToken);
+
+    private Task<MongoDBIndexInfo> EnsureSearchIndexCoreAsync(
+        bool waitUntilReady,
+        TimeSpan? timeout,
+        TimeSpan? pollInterval,
+        CancellationToken cancellationToken)
     {
         MongoDBSearchIndexDefinition definition = RequireSearchDefinition();
         return EnsureAsync(
@@ -317,7 +535,7 @@ public sealed class MongoDBRAGIndexManager : IAsyncDisposable
             index => MongoDBSearchIndexes.CanReconcile(index, SearchIndexEquivalence.CheckIndexType),
             index => SearchIndexEquivalence.Compare(MongoDBSearchIndexes.GetDefinition(index), definition).Comparison.IsCompatible,
             index => ValidateSearch(index, definition, requireReady: false),
-            () => WaitUntilSearchIndexReadyAsync(timeout, pollInterval, cancellationToken),
+            () => WaitUntilSearchIndexReadyCoreAsync(timeout, pollInterval, cancellationToken),
             waitUntilReady,
             cancellationToken);
     }
@@ -330,15 +548,31 @@ public sealed class MongoDBRAGIndexManager : IAsyncDisposable
     /// monotonic deadline for both indexes' waits combined, not a full independent timeout applied to each: the
     /// Vector Search index is waited on first against the full <paramref name="timeout"/>, and the Search index
     /// is then waited on against only whatever budget remains, so this call's total wall-clock bound never
-    /// exceeds <paramref name="timeout"/> regardless of how the two indexes individually behave.
+    /// exceeds <paramref name="timeout"/> regardless of how the two indexes individually behave. This calls the
+    /// uninstrumented Vector/Search ensure cores directly, so this single Hybrid ensure (including any internal
+    /// wait) records exactly one telemetry activity/log.
     /// </summary>
     /// <exception cref="MongoDBConfigurationException">Either definition is not configured.</exception>
     /// <exception cref="MongoDBTimeoutException"><paramref name="waitUntilReady"/> is <see langword="true"/> and the shared deadline elapsed.</exception>
-    public async Task EnsureHybridAsync(
+    public Task EnsureHybridAsync(
         bool waitUntilReady = false,
         TimeSpan? timeout = null,
         TimeSpan? pollInterval = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        MongoDBTelemetry.TrackAsync(
+            _logger,
+            MongoDBTelemetryFeature.Rag,
+            MongoDBTelemetryOperation.EnsureIndex,
+            mode: null,
+            () => EnsureHybridCoreAsync(waitUntilReady, timeout, pollInterval, cancellationToken),
+            static () => new MongoDBTelemetryResult(MongoDBTelemetryOutcome.Success, null, null),
+            cancellationToken);
+
+    private async Task EnsureHybridCoreAsync(
+        bool waitUntilReady,
+        TimeSpan? timeout,
+        TimeSpan? pollInterval,
+        CancellationToken cancellationToken)
     {
         RequireHybridDefinitions();
 
@@ -346,9 +580,9 @@ public sealed class MongoDBRAGIndexManager : IAsyncDisposable
         {
             // timeout/pollInterval only ever affect WaitUntilReadyAsync's polling; the create/update mutation
             // itself is never time-bounded, so there is no shared-deadline concern to apply here.
-            await EnsureVectorSearchIndexAsync(waitUntilReady: false, timeout, pollInterval, cancellationToken)
+            await EnsureVectorSearchIndexCoreAsync(waitUntilReady: false, timeout, pollInterval, cancellationToken)
                 .ConfigureAwait(false);
-            await EnsureSearchIndexAsync(waitUntilReady: false, timeout, pollInterval, cancellationToken)
+            await EnsureSearchIndexCoreAsync(waitUntilReady: false, timeout, pollInterval, cancellationToken)
                 .ConfigureAwait(false);
             return;
         }
@@ -356,7 +590,7 @@ public sealed class MongoDBRAGIndexManager : IAsyncDisposable
         TimeSpan overallTimeout = timeout ?? TimeSpan.FromSeconds(60);
         Stopwatch elapsed = Stopwatch.StartNew();
 
-        await EnsureVectorSearchIndexAsync(waitUntilReady: true, overallTimeout, pollInterval, cancellationToken)
+        await EnsureVectorSearchIndexCoreAsync(waitUntilReady: true, overallTimeout, pollInterval, cancellationToken)
             .ConfigureAwait(false);
 
         TimeSpan remaining = overallTimeout - elapsed.Elapsed;
@@ -374,14 +608,24 @@ public sealed class MongoDBRAGIndexManager : IAsyncDisposable
                     $"The shared {overallTimeout} Hybrid deadline elapsed before the Search index could be checked."));
         }
 
-        await EnsureSearchIndexAsync(waitUntilReady: true, remaining, pollInterval, cancellationToken)
+        await EnsureSearchIndexCoreAsync(waitUntilReady: true, remaining, pollInterval, cancellationToken)
             .ConfigureAwait(false);
     }
 
     /// <summary>Replaces the configured Vector Search index's definition in place. The index must already exist.</summary>
     /// <exception cref="MongoDBConfigurationException"><see cref="VectorDefinition"/> is not configured.</exception>
     /// <exception cref="MongoDBIndexMissingException">The configured index does not exist.</exception>
-    public async Task UpdateVectorSearchIndexAsync(CancellationToken cancellationToken = default)
+    public Task UpdateVectorSearchIndexAsync(CancellationToken cancellationToken = default) =>
+        MongoDBTelemetry.TrackAsync(
+            _logger,
+            MongoDBTelemetryFeature.Rag,
+            MongoDBTelemetryOperation.EnsureIndex,
+            mode: null,
+            () => UpdateVectorSearchIndexCoreAsync(cancellationToken),
+            static () => new MongoDBTelemetryResult(MongoDBTelemetryOutcome.Success, null, null),
+            cancellationToken);
+
+    private async Task UpdateVectorSearchIndexCoreAsync(CancellationToken cancellationToken)
     {
         MongoDBVectorSearchIndexDefinition definition = RequireVectorDefinition();
         await RequireIndexAsync(definition.IndexName, cancellationToken).ConfigureAwait(false);
@@ -396,7 +640,17 @@ public sealed class MongoDBRAGIndexManager : IAsyncDisposable
     /// <summary>Replaces the configured Search index's definition in place. The index must already exist.</summary>
     /// <exception cref="MongoDBConfigurationException"><see cref="SearchDefinition"/> is not configured.</exception>
     /// <exception cref="MongoDBIndexMissingException">The configured index does not exist.</exception>
-    public async Task UpdateSearchIndexAsync(CancellationToken cancellationToken = default)
+    public Task UpdateSearchIndexAsync(CancellationToken cancellationToken = default) =>
+        MongoDBTelemetry.TrackAsync(
+            _logger,
+            MongoDBTelemetryFeature.Rag,
+            MongoDBTelemetryOperation.EnsureIndex,
+            mode: null,
+            () => UpdateSearchIndexCoreAsync(cancellationToken),
+            static () => new MongoDBTelemetryResult(MongoDBTelemetryOutcome.Success, null, null),
+            cancellationToken);
+
+    private async Task UpdateSearchIndexCoreAsync(CancellationToken cancellationToken)
     {
         MongoDBSearchIndexDefinition definition = RequireSearchDefinition();
         await RequireIndexAsync(definition.IndexName, cancellationToken).ConfigureAwait(false);
@@ -417,7 +671,26 @@ public sealed class MongoDBRAGIndexManager : IAsyncDisposable
     public Task<MongoDBIndexInfo> WaitUntilVectorSearchIndexReadyAsync(
         TimeSpan? timeout = null,
         TimeSpan? pollInterval = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        MongoDBTelemetry.TrackAsync(
+            _logger,
+            MongoDBTelemetryFeature.Rag,
+            MongoDBTelemetryOperation.EnsureIndex,
+            mode: null,
+            () => WaitUntilVectorSearchIndexReadyCoreAsync(timeout, pollInterval, cancellationToken),
+            static _ => new MongoDBTelemetryResult(MongoDBTelemetryOutcome.Success, null, null),
+            cancellationToken);
+
+    /// <summary>
+    /// The uninstrumented core, called both by the public <see cref="WaitUntilVectorSearchIndexReadyAsync"/>
+    /// (which wraps it in its own telemetry) and internally by <see cref="EnsureVectorSearchIndexCoreAsync"/>
+    /// when it needs to wait -- so <see cref="EnsureVectorSearchIndexAsync"/> calling into a wait never produces
+    /// a second, nested telemetry activity/log for the same outer operation.
+    /// </summary>
+    private Task<MongoDBIndexInfo> WaitUntilVectorSearchIndexReadyCoreAsync(
+        TimeSpan? timeout,
+        TimeSpan? pollInterval,
+        CancellationToken cancellationToken)
     {
         MongoDBVectorSearchIndexDefinition definition = RequireVectorDefinition();
         return WaitUntilReadyAsync(
@@ -437,7 +710,21 @@ public sealed class MongoDBRAGIndexManager : IAsyncDisposable
     public Task<MongoDBIndexInfo> WaitUntilSearchIndexReadyAsync(
         TimeSpan? timeout = null,
         TimeSpan? pollInterval = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        MongoDBTelemetry.TrackAsync(
+            _logger,
+            MongoDBTelemetryFeature.Rag,
+            MongoDBTelemetryOperation.EnsureIndex,
+            mode: null,
+            () => WaitUntilSearchIndexReadyCoreAsync(timeout, pollInterval, cancellationToken),
+            static _ => new MongoDBTelemetryResult(MongoDBTelemetryOutcome.Success, null, null),
+            cancellationToken);
+
+    /// <summary>See <see cref="WaitUntilVectorSearchIndexReadyCoreAsync"/>'s remarks; mirrors it for Search.</summary>
+    private Task<MongoDBIndexInfo> WaitUntilSearchIndexReadyCoreAsync(
+        TimeSpan? timeout,
+        TimeSpan? pollInterval,
+        CancellationToken cancellationToken)
     {
         MongoDBSearchIndexDefinition definition = RequireSearchDefinition();
         return WaitUntilReadyAsync(
@@ -450,27 +737,43 @@ public sealed class MongoDBRAGIndexManager : IAsyncDisposable
 
     /// <summary>Drops the configured Vector Search index. Already being absent is a successful no-op.</summary>
     /// <exception cref="MongoDBConfigurationException"><see cref="VectorDefinition"/> is not configured.</exception>
-    public Task DropVectorSearchIndexAsync(CancellationToken cancellationToken = default)
-    {
-        MongoDBVectorSearchIndexDefinition definition = RequireVectorDefinition();
-        return MongoDBSearchIndexes.DropAsync(
-            _collection.SearchIndexes,
-            definition.IndexName,
-            exception => MapMutationException(exception, definition.IndexName, "drop"),
+    public Task DropVectorSearchIndexAsync(CancellationToken cancellationToken = default) =>
+        MongoDBTelemetry.TrackAsync(
+            _logger,
+            MongoDBTelemetryFeature.Rag,
+            MongoDBTelemetryOperation.Delete,
+            mode: null,
+            () =>
+            {
+                MongoDBVectorSearchIndexDefinition definition = RequireVectorDefinition();
+                return MongoDBSearchIndexes.DropAsync(
+                    _collection.SearchIndexes,
+                    definition.IndexName,
+                    exception => MapMutationException(exception, definition.IndexName, "drop"),
+                    cancellationToken);
+            },
+            static () => new MongoDBTelemetryResult(MongoDBTelemetryOutcome.Success, null, null),
             cancellationToken);
-    }
 
     /// <summary>Drops the configured Search index. Already being absent is a successful no-op.</summary>
     /// <exception cref="MongoDBConfigurationException"><see cref="SearchDefinition"/> is not configured.</exception>
-    public Task DropSearchIndexAsync(CancellationToken cancellationToken = default)
-    {
-        MongoDBSearchIndexDefinition definition = RequireSearchDefinition();
-        return MongoDBSearchIndexes.DropAsync(
-            _collection.SearchIndexes,
-            definition.IndexName,
-            exception => MapMutationException(exception, definition.IndexName, "drop"),
+    public Task DropSearchIndexAsync(CancellationToken cancellationToken = default) =>
+        MongoDBTelemetry.TrackAsync(
+            _logger,
+            MongoDBTelemetryFeature.Rag,
+            MongoDBTelemetryOperation.Delete,
+            mode: null,
+            () =>
+            {
+                MongoDBSearchIndexDefinition definition = RequireSearchDefinition();
+                return MongoDBSearchIndexes.DropAsync(
+                    _collection.SearchIndexes,
+                    definition.IndexName,
+                    exception => MapMutationException(exception, definition.IndexName, "drop"),
+                    cancellationToken);
+            },
+            static () => new MongoDBTelemetryResult(MongoDBTelemetryOutcome.Success, null, null),
             cancellationToken);
-    }
 
     /// <inheritdoc />
     public async ValueTask DisposeAsync()
