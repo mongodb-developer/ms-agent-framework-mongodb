@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <NoWarn>MAAI001</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      Deliberately NOT a ProjectReference: this project proves MongoDB.AgentFramework installs and runs as an
+      ordinary NuGet consumer would receive it, restored from a packed .nupkg through nuget.config's local
+      feed (see ../../scripts/verify-package.ps1), not compiled directly from this repository's source tree.
+      Bump this version alongside src/MongoDB.AgentFramework/MongoDB.AgentFramework.csproj's Version property.
+    -->
+    <PackageReference Include="MongoDB.AgentFramework" Version="0.1.0-preview.1" />
+  </ItemGroup>
+</Project>
