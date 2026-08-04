@@ -31,9 +31,14 @@ readiness surfaces:
 | `integration-memory`, `integration-history`, `integration-rag-vector`, `integration-rag-search`, `integration-rag-hybrid`, `integration-index-management`, `integration-persistence` | protected-environment credentialed integration categories; may wait for approval |
 
 Configure branch protection for `build/dotnet-packaging-release` to require all
-applicable statuses above. The integration environment must restrict this
-branch and supply `MONGODB_URI` and `MONGODB_DATABASE`; declining approval is
-not equivalent to passing integration readiness.
+applicable statuses above, including the exact stable status name
+`.NET manifest release readiness`. That aggregate uses `always()` so a failed,
+skipped, or cancelled dependency cannot skip the required status; it then fails
+explicitly unless both `dotnet-quality` and
+`dotnet-agent-framework-compat` report `success`, and only afterward runs
+manifest/version/package validation. The integration environment must restrict
+this branch and supply `MONGODB_URI` and `MONGODB_DATABASE`; declining approval
+is not equivalent to passing integration readiness.
 
 After a reviewed manifest change reaches `main`, **.NET release coordinator**
 starts automatically because its push trigger is path-filtered to

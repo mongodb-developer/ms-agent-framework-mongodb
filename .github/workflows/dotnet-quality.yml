@@ -200,7 +200,10 @@ jobs:
 
   dotnet-manifest-readiness:
     name: .NET manifest release readiness
-    if: github.event_name == 'push' && github.ref == 'refs/heads/build/dotnet-packaging-release'
+    if: >-
+      always() &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/build/dotnet-packaging-release'
     needs: [dotnet-quality, dotnet-agent-framework-compat]
     runs-on: ubuntu-24.04
     permissions:
@@ -211,6 +214,16 @@ jobs:
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
+
+      - name: Require every readiness dependency to succeed
+        shell: pwsh
+        env:
+          DOTNET_QUALITY_RESULT: ${{ needs.dotnet-quality.result }}
+          COMPATIBILITY_RESULT: ${{ needs.dotnet-agent-framework-compat.result }}
+        run: >
+          ./dotnet/scripts/assert-required-job-results.ps1
+          -DotNetQualityResult $env:DOTNET_QUALITY_RESULT
+          -CompatibilityResult $env:COMPATIBILITY_RESULT
 
       - name: Set up .NET SDKs
         uses: actions/setup-dotnet@d4c94342e560b34958eacfc5d055d21461ed1c5d # v5.0.0

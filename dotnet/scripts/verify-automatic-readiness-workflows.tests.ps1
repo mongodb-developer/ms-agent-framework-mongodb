@@ -20,6 +20,21 @@ foreach ($name in @('dotnet-quality.yml', 'dotnet-security.yml', 'dotnet-sbom-pr
 
 $quality = $workflows['dotnet-quality.yml']
 Assert-True ($quality -match 'dotnet-manifest-readiness:') 'Quality workflow exposes explicit manifest readiness status'
+Assert-True ($quality -match '(?m)^\s+name: \.NET manifest release readiness\s*$') `
+    'Stable required status check is named .NET manifest release readiness'
+Assert-True ($quality -match '(?ms)dotnet-manifest-readiness:.*?if:\s*>-\s+always\(\).*?github\.event_name') `
+    'Manifest readiness aggregate runs after failed, skipped, or cancelled dependencies'
+Assert-True ($quality -match 'assert-required-job-results\.ps1') `
+    'Manifest readiness explicitly rejects every nonsuccess dependency result'
+Assert-True (
+    $quality -match 'needs\.dotnet-quality\.result' -and
+    $quality -match 'needs\.dotnet-agent-framework-compat\.result'
+) 'Manifest readiness validates both required dependency results'
+Assert-True (
+    $quality.IndexOf('assert-required-job-results.ps1') -lt
+    $quality.IndexOf('verify-build-release-readiness.ps1') -and
+    $quality -notmatch 'continue-on-error'
+) 'Dependency assertion is mandatory and runs before manifest validation'
 Assert-True ($quality -match 'verify-build-release-readiness\.ps1') 'Manifest readiness uses the tested helper'
 Assert-True ($quality -match 'needs:\s*\[?dotnet-quality') 'Manifest readiness depends on complete package quality'
 Assert-True ($quality -match 'invoke-test-projects-with-trx\.ps1') 'Quality runs every credential-free project with unique TRX'

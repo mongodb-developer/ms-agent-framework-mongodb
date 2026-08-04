@@ -385,6 +385,10 @@ human-readable tag next to the pinned commit SHA):
   dynamic compatibility, then uses `verify-build-release-readiness.ps1` to
   canonicalize the manifest with `NuGet.Versioning`, verify the packed
   package's expected `dotnet-v<version>`, and reject a conflicting remote tag.
+  The stable aggregate job uses `always()` and explicitly requires both needed
+  job results to equal `success`; dependency failure, skip, or cancellation
+  therefore makes the aggregate fail instead of disappearing as a skipped
+  required check. Manifest/package validation runs only after that assertion.
   The helper has no tag or publication operation.
 - **`dotnet-agent-framework-compat`** (a job within `dotnet-quality.yml`,
   matrixed over the dynamically resolved latest and immediately previous
