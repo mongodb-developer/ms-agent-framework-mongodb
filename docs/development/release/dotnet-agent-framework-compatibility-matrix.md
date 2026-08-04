@@ -74,46 +74,72 @@ that reference is explicit, not merely transitive).
 matrix locally:
 
 ```powershell
-pwsh dotnet/scripts/verify-agent-framework-compatibility.ps1
+pwsh dotnet/scripts/verify-agent-framework-compatibility.ps1 -Configuration Release
 ```
+
+`-Configuration` defaults to `Release` (matching `verify-package.ps1` and
+every `dotnet test`/`dotnet build` invocation in CI), so it can be omitted
+locally, but CI passes it explicitly so the exact documented invocation is
+what actually runs.
 
 For each of `1.13.0` and `1.16.0` (overridable via `-Versions`), it:
 
 1. Cleans `src/MongoDB.AgentFramework` and
-   `tests/MongoDB.AgentFramework.Tests`'s `bin`/`obj` (a stale
-   `project.assets.json` from a previously pinned version would otherwise
-   mask a real restore failure).
-2. Restores and builds `MongoDB.AgentFramework.csproj` (Release) with
-   `-p:AgentFrameworkVersion=<version>`.
-3. Reads the resulting `project.assets.json` and asserts
+   `tests/MongoDB.AgentFramework.Tests`'s `bin`/`obj`, and any leftover TRX
+   results from a previous run (a stale `project.assets.json` or TRX file
+   from a previously pinned version would otherwise mask a real
+   restore/test failure, or a false "passed" reading).
+2. Restores `MongoDB.AgentFramework.Tests.csproj` with
+   `-p:AgentFrameworkVersion=<version>` -- NuGet's restore graph follows its
+   `<ProjectReference>` to `MongoDB.AgentFramework.csproj` automatically, so
+   this single restore covers the exact pinned version for both the package
+   under test and its test suite.
+3. Builds (Release) both `MongoDB.AgentFramework.csproj` (the exact thing
+   that gets packed) and `MongoDB.AgentFramework.Tests.csproj`, each with
+   `--no-restore` (restore already happened in step 2).
+4. Reads the resulting `project.assets.json` and asserts
    `Microsoft.Agents.AI.Abstractions` and `Microsoft.Agents.AI.Workflows`
    both resolved to *exactly* the requested version (not merely "a version
    satisfying the range") and prints the resolved transitive
    `Microsoft.Extensions.Logging.Abstractions` version so a reviewer can
    confirm it stayed within this package's own declared
    `[10.0.9, 11.0.0)` range at both matrix bounds.
-4. Runs `dotnet test` against `MongoDB.AgentFramework.Tests.csproj` (Release)
-   with the same override -- proving behavior, not just compilation.
-5. Cleans `bin`/`obj` again at the end, so a subsequent plain
-   `dotnet build`/`dotnet pack` resolves the tracked range exactly as before.
+5. Runs `dotnet test` against `MongoDB.AgentFramework.Tests.csproj` with
+   `--no-build --no-restore` (the build already happened in step 3, so this
+   can only execute already-built tests, never silently no-op through an
+   implicit rebuild) and a TRX logger, then parses the produced TRX file's
+   `<ResultSummary><Counters>` element and asserts its `executed` attribute
+   is strictly greater than zero. This is deliberate: `dotnet test
+   --no-restore` alone against an unrestored/stale test project can exit `0`
+   having executed **zero** tests (MSBuild silently no-ops the VSTest target
+   when it cannot evaluate the test SDK's `IsTestProject` property from a
+   missing restore) -- a console-output or exit-code check alone would never
+   catch this. Skipped credentialed integration tests count toward the TRX's
+   `total`, not its `executed` count, so they never mask a genuine
+   zero-unit-tests-executed failure.
+6. Cleans `bin`/`obj` and the TRX results directory again at the end, so a
+   subsequent plain `dotnet build`/`dotnet pack` resolves the tracked range
+   exactly as before.
 
 Both matrix bounds were verified locally: `Microsoft.Agents.AI.Abstractions`
 and `Microsoft.Agents.AI.Workflows` each resolved to the exact requested
 version (`1.13.0`/`1.16.0`), `Microsoft.Extensions.Logging.Abstractions`
 resolved to `10.0.9` at both bounds (within the declared
 `[10.0.9, 11.0.0)` range), and the full `MongoDB.AgentFramework.Tests` unit
-suite passed at both bounds.
+suite passed at both bounds with **974 tests executed per TRX** (984 total,
+10 skipped credentialed integration tests) -- a real, TRX-derived count, not
+a console-output heuristic.
 
 ## CI: `dotnet-agent-framework-compat`
 
 `.github/workflows/dotnet-quality.yml` runs a `dotnet-agent-framework-compat`
 job, matrixed over `agent-framework-version: ["1.13.0", "1.16.0"]`, invoking
 the same `verify-agent-framework-compatibility.ps1` script with
-`-Versions "<matrix bound>"`. It is a separate job (not an extra
-`dotnet-quality` matrix dimension) because it re-restores/re-builds against a
-genuinely different dependency version per entry, rather than exercising the
-`dotnet-quality` job's own OS/tooling variance. It requires no secrets and
-runs on every pull request, including from forks.
+`-Configuration Release -Versions "<matrix bound>"`. It is a separate job
+(not an extra `dotnet-quality` matrix dimension) because it re-restores/
+re-builds against a genuinely different dependency version per entry, rather
+than exercising the `dotnet-quality` job's own OS/tooling variance. It
+requires no secrets and runs on every pull request, including from forks.
 
 ## Microsoft.Extensions.* transitive compatibility
 

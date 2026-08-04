@@ -148,4 +148,4 @@ jobs:
       - name: Verify Agent Framework compatibility matrix bound
         shell: pwsh
         working-directory: dotnet
-        run: ./scripts/verify-agent-framework-compatibility.ps1 -Versions "${{ matrix.agent-framework-version }}"
+        run: ./scripts/verify-agent-framework-compatibility.ps1 -Configuration Release -Versions "${{ matrix.agent-framework-version }}"

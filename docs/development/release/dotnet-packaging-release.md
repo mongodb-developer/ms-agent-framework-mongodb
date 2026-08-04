@@ -376,14 +376,18 @@ recorded output.
   correct classification [`Missing`/`Unexpected`/`MultiplicityMismatch`];
   two independently random `psmdcp` GUIDs both normalize and pass; a
   malformed non-GUID `psmdcp` filename fails -- all 17 passed).
-- `dotnet/scripts/verify-agent-framework-compatibility.ps1` (builds and
-  tests `src`/`tests` with `-p:AgentFrameworkVersion` overridden to both
-  `1.13.0` and `1.16.0`; asserts the exact resolved
-  `Microsoft.Agents.AI.Abstractions`/`Workflows` versions at each bound from
-  `project.assets.json`; confirms transitive
-  `Microsoft.Extensions.Logging.Abstractions` stays at `10.0.9` -- within
-  its declared range -- at both bounds; runs the full unit test suite at
-  each bound -- both bounds passed).
+- `dotnet/scripts/verify-agent-framework-compatibility.ps1 -Configuration
+  Release` (restores `MongoDB.AgentFramework.Tests.csproj` -- which pulls in
+  `MongoDB.AgentFramework.csproj` via `ProjectReference` -- and builds both
+  projects with `-p:AgentFrameworkVersion` overridden to both `1.13.0` and
+  `1.16.0`; asserts the exact resolved `Microsoft.Agents.AI.Abstractions`/
+  `Workflows` versions at each bound from `project.assets.json`; confirms
+  transitive `Microsoft.Extensions.Logging.Abstractions` stays at `10.0.9`
+  -- within its declared range -- at both bounds; runs
+  `dotnet test --no-build --no-restore` with a TRX logger and asserts the
+  TRX's `executed` counter is nonzero [974 executed / 984 total / 10
+  skipped at both bounds] rather than trusting console output or exit code
+  alone -- both bounds passed).
 - Explicit `dotnet build --configuration Release` of every one of the nine
   sample projects under `dotnet/samples/` individually (0 errors each), and
   separately via `dotnet-quality.yml`'s per-project loop step (`dotnet
