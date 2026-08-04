@@ -27,9 +27,10 @@ def _pypi_payload() -> dict[str, object]:
             "1.11.0": [{"yanked": False}],
             "1.12.0": [{"yanked": False}],
             "1.13.0": [{"yanked": False}],
-            "1.14.0rc1": [{"yanked": False}],
-            "1.14.0b1": [{"yanked": True}],
-            "1.15.0.dev1": [],
+            "1.14.0": [{"yanked": False}],
+            "1.15.0rc1": [{"yanked": False}],
+            "1.15.0b1": [{"yanked": True}],
+            "1.16.0.dev1": [],
             "not-a-version": [{"yanked": False}],
         }
     }
@@ -41,8 +42,25 @@ def test_framework_resolution_distinguishes_stable_preview_and_yanked() -> None:
     matrix = resolver.resolve_matrix(_pypi_payload(), include_preview=True)
 
     assert matrix == [
+        {"label": "latest-stable", "version": "1.14.0", "channel": "stable"},
+        {"label": "previous-stable", "version": "1.13.0", "channel": "stable"},
+        {"label": "latest-preview", "version": "1.15.0rc1", "channel": "preview"},
+    ]
+
+
+def test_framework_resolution_supports_a_single_published_stable_release() -> None:
+    resolver = _load_script("resolve_framework_versions")
+    payload = _pypi_payload()
+    payload["releases"] = {
+        "1.12.0": [{"yanked": False}],
+        "1.13.0": [{"yanked": False}],
+        "1.14.0rc1": [{"yanked": False}],
+    }
+
+    matrix = resolver.resolve_matrix(payload, include_preview=True)
+
+    assert matrix == [
         {"label": "latest-stable", "version": "1.13.0", "channel": "stable"},
-        {"label": "previous-stable", "version": "1.12.0", "channel": "stable"},
         {"label": "latest-preview", "version": "1.14.0rc1", "channel": "preview"},
     ]
 
@@ -51,7 +69,14 @@ def test_framework_resolution_rejects_yanked_or_unknown_exact_version() -> None:
     resolver = _load_script("resolve_framework_versions")
 
     with pytest.raises(ValueError, match="absent, yanked"):
-        resolver.resolve_matrix(_pypi_payload(), exact="1.14.0b1")
+        resolver.resolve_matrix(_pypi_payload(), exact="1.15.0b1")
+
+
+def test_framework_resolution_rejects_exact_version_outside_supported_range() -> None:
+    resolver = _load_script("resolve_framework_versions")
+
+    with pytest.raises(ValueError, match="outside the supported range"):
+        resolver.resolve_matrix(_pypi_payload(), exact="1.12.0")
 
 
 def test_framework_resolution_deduplicates_an_exact_selected_version() -> None:
@@ -59,7 +84,7 @@ def test_framework_resolution_deduplicates_an_exact_selected_version() -> None:
 
     matrix = resolver.resolve_matrix(_pypi_payload(), exact="1.13.0")
 
-    assert [item["version"] for item in matrix] == ["1.13.0", "1.12.0"]
+    assert [item["version"] for item in matrix] == ["1.14.0", "1.13.0"]
 
 
 def test_release_rehearsal_dry_run_is_non_publishing() -> None:
@@ -76,7 +101,7 @@ def test_release_rehearsal_dry_run_is_non_publishing() -> None:
     assert "pytest" in completed.stdout
     assert "--cov=agent_framework_mongodb" in completed.stdout
     assert "build" in completed.stdout
-    assert "latest-stable and previous-stable" in completed.stdout
+    assert "up to the latest two supported stable" in completed.stdout
     assert "No upload or publication command is present." in completed.stdout
     assert "twine upload" not in completed.stdout
 

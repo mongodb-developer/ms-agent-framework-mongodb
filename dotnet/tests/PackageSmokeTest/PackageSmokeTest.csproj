@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <!--
+      Multi-targets every TFM MongoDB.AgentFramework itself ships (src/MongoDB.AgentFramework.csproj's
+      TargetFrameworks). verify-package.ps1 runs `dotnet run -f <tfm>` once per TFM against the isolated
+      packed-package cache, proving the package actually restores and runs on every shipped target, not just
+      that it compiles against the newest one.
+    -->
+    <TargetFrameworks>net8.0;net9.0;net10.0</TargetFrameworks>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <NoWarn>MAAI001</NoWarn>
+    <AgentFrameworkVersion Condition="'$(AgentFrameworkVersion)' == ''"></AgentFrameworkVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      Deliberately NOT a ProjectReference: this project proves MongoDB.AgentFramework installs and runs as an
+      ordinary NuGet consumer would receive it, restored from a packed .nupkg through nuget.config's local
+      feed (see ../../scripts/verify-package.ps1), not compiled directly from this repository's source tree.
+      Bump this version alongside src/MongoDB.AgentFramework/MongoDB.AgentFramework.csproj's Version property.
+    -->
+    <PackageReference Include="MongoDB.AgentFramework" Version="0.1.0-preview.1" />
+    <!-- Compatibility runs set this property so the packed package's actual two upstream contracts are pinned
+         in the consumer graph too; ordinary package verification leaves it empty and tests the declared range. -->
+    <PackageReference Include="Microsoft.Agents.AI.Abstractions"
+                      Version="$(AgentFrameworkVersion)"
+                      Condition="'$(AgentFrameworkVersion)' != ''" />
+    <PackageReference Include="Microsoft.Agents.AI.Workflows"
+                      Version="$(AgentFrameworkVersion)"
+                      Condition="'$(AgentFrameworkVersion)' != ''" />
+  </ItemGroup>
+</Project>

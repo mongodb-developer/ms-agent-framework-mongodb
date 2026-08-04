@@ -9,6 +9,12 @@ __pycache__/
 build/
 dist/
 *.egg-info/
+bin/
+obj/
+artifacts/
+.env
+.env.*
+!.env.example
 .artifact-*/
 .audit-venv/
 .dependency-*/

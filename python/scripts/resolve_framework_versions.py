@@ -10,9 +10,21 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from packaging.requirements import Requirement
+from packaging.specifiers import SpecifierSet
 from packaging.version import InvalidVersion, Version
 
+_ROOT = Path(__file__).resolve().parents[1]
 _PYPI_URL = "https://pypi.org/pypi/agent-framework-core/json"
+
+
+def supported_framework_specifier(pyproject: Path = _ROOT / "pyproject.toml") -> SpecifierSet:
+    """Read the package's declared Agent Framework Core compatibility range."""
+    for line in pyproject.read_text(encoding="utf-8").splitlines():
+        dependency = line.strip().removesuffix(",").strip('"')
+        if dependency.startswith("agent-framework-core"):
+            return Requirement(dependency).specifier
+    raise ValueError(f"{pyproject} does not declare agent-framework-core")
 
 
 def available_versions(payload: dict[str, Any]) -> list[Version]:
@@ -38,19 +50,23 @@ def resolve_matrix(
     *,
     include_preview: bool = False,
     exact: str | None = None,
+    supported: SpecifierSet | None = None,
 ) -> list[dict[str, str]]:
     """Build a de-duplicated compatibility matrix from PyPI release metadata."""
-    versions = available_versions(payload)
+    supported = supported or supported_framework_specifier()
+    available = available_versions(payload)
+    versions = [version for version in available if supported.contains(version, prereleases=True)]
     stable = [
         version for version in versions if not version.is_prerelease and not version.is_devrelease
     ]
-    if len(stable) < 2:
-        raise ValueError("PyPI must contain at least two non-yanked stable releases")
+    if not stable:
+        raise ValueError(
+            f"PyPI does not contain a non-yanked stable release in supported range {supported}"
+        )
 
-    selected: list[tuple[str, Version]] = [
-        ("latest-stable", stable[0]),
-        ("previous-stable", stable[1]),
-    ]
+    selected: list[tuple[str, Version]] = [("latest-stable", stable[0])]
+    if len(stable) > 1:
+        selected.append(("previous-stable", stable[1]))
     if include_preview:
         previews = [
             version for version in versions if version.is_prerelease or version.is_devrelease
@@ -63,8 +79,10 @@ def resolve_matrix(
             exact_version = Version(exact)
         except InvalidVersion as exc:
             raise ValueError(f"invalid exact PEP 440 version: {exact}") from exc
-        if exact_version not in versions:
+        if exact_version not in available:
             raise ValueError(f"exact version is absent, yanked, or has no distributions: {exact}")
+        if exact_version not in supported:
+            raise ValueError(f"exact version {exact} is outside the supported range {supported}")
         selected.append(("exact", exact_version))
 
     matrix: list[dict[str, str]] = []

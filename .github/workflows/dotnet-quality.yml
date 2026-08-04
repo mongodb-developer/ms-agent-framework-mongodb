@@ -1,0 +1,249 @@
+name: .NET build, test, and package quality
+
+# Implements the "dotnet-quality" job from docs/spec/quality-release.md's CI workflow topology: restore, build
+# every target framework with warnings as errors, formatting/analyzer validation, unit tests, pack, and a NuGet
+# install/runtime smoke test from the produced package (not a project reference). Credentialed Search-capable
+# deployment integration tests are covered separately by dotnet-integration.yml, gated behind an approved
+# environment/secrets per that same spec section; this workflow only ever runs credential-free checks, so it is
+# safe to run on every pull request, including from forks.
+#
+# TFM matrix note: every .NET target framework this package ships (net8.0/net9.0/net10.0) already builds from a
+# single multi-targeted `dotnet build`/`dotnet pack` invocation (see src/MongoDB.AgentFramework/MongoDB.AgentFramework.csproj's
+# <TargetFrameworks>), so a second matrix dimension over TFMs would not add real coverage here. The OS axis below
+# is the dimension that does: it exercises this workflow's own tooling (the .NET SDK, `dotnet format`, PowerShell
+# `verify-package.ps1`) on both of this repository's supported development platforms.
+#
+# Supply-chain note: every action below is pinned to an immutable full commit SHA (not a mutable tag) with a
+# trailing `# vX.Y.Z` comment recording the release that SHA corresponds to, matching dotnet-security.yml.
+#
+# Compatibility-matrix note: the dotnet-agent-framework-compat job below is a separate credential-free job (not
+# an extra dotnet-quality matrix dimension) because it deliberately re-restores/builds/tests against a *different*
+# Agent Framework version per matrix entry via an MSBuild property override, rather than exercising this
+# workflow's own OS/tooling variance; see dotnet/scripts/verify-agent-framework-compatibility.ps1.
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - build/dotnet-packaging-release
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dotnet-quality:
+    name: dotnet-quality (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+            10.0.x
+
+      - name: Restore
+        working-directory: dotnet
+        run: dotnet restore MongoDB.AgentFramework.slnx
+
+      # Covers "formatting/analyzer validation" from docs/spec/quality-release.md's .NET quality gates. Analyzer
+      # diagnostics (including the PublicAPI analyzer's RS0016/RS0017 for undeclared public API surface changes)
+      # are separately promoted to build errors by each project's TreatWarningsAsErrors, so the build step below
+      # catches those; this step catches whitespace/style formatting drift specifically.
+      - name: Verify formatting (no changes)
+        working-directory: dotnet
+        run: dotnet format MongoDB.AgentFramework.slnx --verify-no-changes --verbosity diagnostic
+
+      - name: Build all target frameworks (Release, warnings as errors)
+        working-directory: dotnet
+        run: dotnet build MongoDB.AgentFramework.slnx --configuration Release --no-restore
+
+      # Every project in the solution sets TreatWarningsAsErrors, so a clean exit code here already proves zero
+      # warnings; Search-capable-deployment integration tests (Trait Category integration-*) skip cleanly (not
+      # fail) without MONGODB_URI/MONGODB_DATABASE, exactly as they do for a local contributor without credentials.
+      - name: Unit tests (Release, every credential-free project with unique TRX)
+        shell: pwsh
+        working-directory: dotnet
+        run: >
+          ./scripts/invoke-test-projects-with-trx.ps1 -Configuration Release -NoBuild
+          -ResultsDirectory "artifacts/quality-test-results/${{ runner.os }}"
+
+      - name: Upload quality TRX evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dotnet-quality-trx-${{ runner.os }}
+          path: dotnet/artifacts/quality-test-results/${{ runner.os }}/*.trx
+          if-no-files-found: error
+          retention-days: 14
+
+      # Pack, package-content allowlist, reproducibility (double-pack comparison), and the clean isolated NuGet
+      # consumer smoke test (tests/PackageSmokeTest) all live in one script so local and CI runs exercise
+      # identically; see dotnet/scripts/verify-package.ps1 for the full step-by-step rationale.
+      - name: Pack and verify the package (allowlist, reproducibility, consumer smoke)
+        shell: pwsh
+        working-directory: dotnet
+        run: ./scripts/verify-package.ps1 -Configuration Release
+
+      # `dotnet build` only ever accepts one project or solution argument (MSB1008: "Only one project can
+      # be specified" if given several csproj paths on one command line), so every sample must be built in its
+      # own invocation. This loop discovers every directory under samples/ instead of hardcoding a project list,
+      # so a future new/removed/renamed sample can never silently drift out of sync with this check.
+      - name: Build all sample projects
+        shell: pwsh
+        working-directory: dotnet
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $samples = Get-ChildItem -Path samples -Directory | Select-Object -ExpandProperty Name
+          if ($samples.Count -eq 0) { throw 'No sample projects found under samples/.' }
+          foreach ($sample in $samples) {
+            Write-Output "== Building sample: $sample =="
+            dotnet build "samples/$sample/$sample.csproj" --configuration Release --no-restore
+            if ($LASTEXITCODE -ne 0) { throw "Sample '$sample' failed to build (exit code $LASTEXITCODE)." }
+          }
+          Write-Output "All $($samples.Count) sample projects built successfully."
+
+      - name: Upload packed artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nuget-packages-${{ matrix.os }}
+          path: |
+            dotnet/artifacts/packages/*.nupkg
+            dotnet/artifacts/packages/*.snupkg
+          if-no-files-found: error
+          retention-days: 14
+
+  resolve-agent-framework-versions:
+    name: Resolve latest and previous stable Agent Framework versions
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.resolve.outputs.matrix }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Setup .NET
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
+        with:
+          dotnet-version: 10.0.x
+      - name: Resolve common listed stable versions from official NuGet V3 APIs
+        id: resolve
+        shell: pwsh
+        working-directory: dotnet
+        run: ./scripts/resolve-agent-framework-versions.ps1 -Mode StablePair
+      - name: Upload machine-readable and Markdown resolution report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: agent-framework-version-resolution
+          path: dotnet/artifacts/agent-framework-version-resolution/*
+          if-no-files-found: error
+          retention-days: 14
+
+  dotnet-agent-framework-compat:
+    name: dotnet-agent-framework-compat (${{ matrix.agent-framework-version }})
+    runs-on: ubuntu-latest
+    needs: resolve-agent-framework-versions
+    # Compatibility-matrix gate for docs/spec/compatibility-migration.md: MongoDB.AgentFramework.csproj and
+    # MongoDB.AgentFramework.Tests.csproj both reference Microsoft.Agents.AI.Abstractions/Workflows through a
+    # single $(AgentFrameworkVersion) MSBuild property that defaults to the tracked [1.13.0,1.17.0) range. This
+    # job overrides that property to the dynamically resolved latest and immediately previous common listed
+    # stable versions from official NuGet V3 APIs. This is drift evidence, not a support-range widening, and uses
+    # `-p:AgentFrameworkVersion=<exact version>` on restore/build/test -- it never edits a tracked .csproj, and
+    # the package's own default range is unaffected (see dotnet/scripts/verify-agent-framework-compatibility.ps1,
+    # which this job runs, for the full step-by-step rationale and local-repro instructions). Credential-free:
+    # safe to run on every pull request, including from forks.
+    strategy:
+      fail-fast: false
+      matrix:
+        agent-framework-version: ${{ fromJSON(needs.resolve-agent-framework-versions.outputs.matrix) }}
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+            10.0.x
+
+      - name: Verify Agent Framework compatibility matrix bound
+        shell: pwsh
+        working-directory: dotnet
+        run: ./scripts/verify-agent-framework-compatibility.ps1 -Configuration Release -Versions "${{ matrix.agent-framework-version }}"
+
+      - name: Upload TRX and compatibility reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: agent-framework-compat-${{ matrix.agent-framework-version }}
+          path: dotnet/artifacts/agent-framework-compat-results/*
+          if-no-files-found: error
+          retention-days: 14
+
+  dotnet-manifest-readiness:
+    name: .NET manifest release readiness
+    if: >-
+      always() &&
+      ((github.event_name == 'push' &&
+      github.ref == 'refs/heads/build/dotnet-packaging-release') ||
+      (github.event_name == 'pull_request' &&
+      github.base_ref == 'build/dotnet-packaging-release'))
+    needs: [dotnet-quality, dotnet-agent-framework-compat]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Check out exact build-branch commit
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Require every readiness dependency to succeed
+        shell: pwsh
+        env:
+          DOTNET_QUALITY_RESULT: ${{ needs.dotnet-quality.result }}
+          COMPATIBILITY_RESULT: ${{ needs.dotnet-agent-framework-compat.result }}
+        run: >
+          ./dotnet/scripts/assert-required-job-results.ps1
+          -DotNetQualityResult $env:DOTNET_QUALITY_RESULT
+          -CompatibilityResult $env:COMPATIBILITY_RESULT
+
+      - name: Set up .NET SDKs
+        uses: actions/setup-dotnet@d4c94342e560b34958eacfc5d055d21461ed1c5d # v5.0.0
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+            10.0.x
+
+      - name: Validate manifest, package, and remote tag readiness
+        shell: pwsh
+        run: ./dotnet/scripts/verify-build-release-readiness.ps1
+
+      - name: Upload manifest readiness report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dotnet-build-release-readiness-${{ github.sha }}
+          path: dotnet/artifacts/build-release-readiness/
+          if-no-files-found: error
+          retention-days: 14

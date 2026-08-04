@@ -8,6 +8,7 @@
     "user_id": null,
     "session_id": "session-a"
   },
+  "expected_scope_discriminator": "1bbff7b67561867e7649b74994ba59f43c2c04a67feed41daf6699cac0e990cc",
   "max_messages": 2,
   "messages": [
     {"role": "user", "message_id": "message-1", "text": "first"},

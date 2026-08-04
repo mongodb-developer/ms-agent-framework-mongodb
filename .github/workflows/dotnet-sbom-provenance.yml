@@ -1,0 +1,217 @@
+name: .NET package SBOM (credential-free verification)
+
+# Implements the SBOM portion of docs/spec/quality-release.md's "Package build and provenance" release-
+# engineering requirements for the .NET package:
+#
+#   - "Generate an SBOM for each release or repository release bundle."
+#
+# (Build-provenance ATTESTATION and NuGet signing live entirely in the SEPARATE, privileged
+# `.github/workflows/dotnet-release-attestation.yml` workflow -- see that file's header comment for the full
+# rationale. This file holds NO `id-token`/`attestations`/`artifact-metadata` permissions anywhere, on any job,
+# because GitHub Actions resolves and runs an ENTIRE workflow file's job graph -- every job's own
+# `permissions:`/`needs:`/`if:` definitions, not merely the scripts a job happens to invoke -- using the exact
+# file content present at whatever ref triggered that specific run. For `pull_request`/`push`/`workflow_dispatch`
+# [this file's only triggers], that ref is always either an operator-selected branch/tag or a pushed ref/commit
+# -- content this repository does not unilaterally control the review of before the run starts. A job in THIS
+# file that held elevated OIDC/attestation permissions could therefore have its own job definition -- not just
+# the scripts it calls -- silently rewritten by whoever controls that ref, regardless of how carefully any
+# individual step were written; a prior revision of this workflow attempted to close that gap with an in-file
+# "trusted main checkout" validator job, which is INSUFFICIENT, because the validator job's own `permissions:`/
+# `needs:`/`if:` wiring is itself sourced from the same untrusted ref. Splitting the elevated job into a wholly
+# separate file triggered only by `workflow_run` -- the one event GitHub's own documentation guarantees always
+# resolves and runs the reacting workflow's file exactly as it exists on the repository's default branch,
+# regardless of what ref/event triggered the upstream run it reacts to -- is the only trigger-level guarantee
+# that actually closes this class of bug; see dotnet-release-attestation.yml's header comment for the full
+# citation and design.)
+#
+# `sbom` runs dotnet/scripts/verify-package.ps1 (the same script dotnet-quality.yml runs) to pack and verify the
+# library, then generates both an SPDX and a CycloneDX SBOM with anchore/sbom-action (a widely used, actively
+# maintained tool that wraps Syft; SHA-pinned below like every other action in this repository) over that exact,
+# already-verified primary .nupkg/.snupkg -- never an independent, unverified `dotnet pack`. On a `dotnet-v*` tag
+# push (this workflow's `on:` is the only one of this repository's .NET workflows that triggers on a tag push at
+# all) or a manual workflow_dispatch, it runs verify-package.ps1's FULL verification (allowlist, nuspec metadata,
+# double-pack reproducibility, and the multi-TFM isolated consumer smoke test); for pull_request/push-to-main it
+# runs the faster pack+allowlist+metadata-only path, since dotnet-quality.yml already runs the full script for
+# those triggers. It also asserts, for a tag push only, that the packed .nuspec's <version> exactly matches
+# `dotnet-v<version>` for the triggering tag (dotnet/scripts/verify-release-tag.ps1) before anything is uploaded
+# -- a main-branch manual workflow_dispatch only records the version, while a coordinator dispatch against an
+# immutable release tag enforces the same exact tag/package match as a tag push. This job requires no secrets and no elevated permissions beyond `contents: read`, so it
+# is safe to run on every pull request, including from forks. Note that a SUCCESSFUL run of this job here --
+# regardless of which ref/event triggered it, including an untrusted fork's pull_request -- fires a
+# `workflow_run` event; `dotnet-release-attestation.yml` independently re-validates (using its own,
+# always-default-branch-sourced scripts, never anything from this file or the ref that triggered THIS run)
+# whether that upstream event/ref/commit is genuinely eligible before ever attesting anything, and rebuilds the
+# package fresh from its own validated, ancestry-verified checkout rather than trusting any artifact this job
+# uploads -- this job's uploaded `.nupkg`/SBOM/checksums remain a purely informational, early feedback signal for
+# maintainers, never the thing that gets attested.
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - build/dotnet-packaging-release
+    tags:
+      - "dotnet-v*"
+  workflow_dispatch:
+    inputs:
+      release_sha:
+        description: Immutable main-reachable commit to build; supplied only by the release coordinator
+        required: false
+        type: string
+      release_tag:
+        description: Matching immutable dotnet-v tag; supplied only by the release coordinator
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  sbom:
+    name: SBOM (credential-free)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ inputs.release_sha || github.sha }}
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+            10.0.x
+
+      # A `dotnet-v*` tag push and an operator-initiated workflow_dispatch both run the FULL verify-package.ps1
+      # (pack, exact-match allowlist, nuspec metadata, double-pack reproducibility, and the multi-TFM isolated
+      # consumer smoke test) -- this workflow is the only one that ever runs on a tag push (dotnet-quality.yml's
+      # `on:` only covers pull_request/push-to-main/workflow_dispatch), so it cannot rely on that other workflow
+      # having already verified a tag-pushed artifact. A plain pull_request/push-to-main run here uses the faster
+      # pack+allowlist+metadata-only path (still never a naked/unverified `dotnet pack`) since dotnet-quality.yml
+      # already runs the full script for those triggers on both OS matrix legs. Regardless of depth, this job's
+      # output is never itself the artifact `dotnet-release-attestation.yml` attests -- that privileged workflow
+      # always rebuilds fresh from its own independently validated, ancestry-verified checkout.
+      #
+      # `github.event_name`/`github.ref` are passed through step-level `env:` values, never interpolated directly
+      # into this script's source text: GitHub Actions substitutes `${{ }}` expressions into the YAML string
+      # BEFORE the shell ever parses it, so a ref containing a quote, a `$()` subexpression, or a semicolon could
+      # otherwise break out of the intended string literal and execute arbitrary code on the runner. A tag name
+      # is not restricted to "safe" characters by git itself (only a handful of characters are forbidden, and
+      # `$`, `(`, `)`, backticks, and quotes are all still legal in a git ref), so this is a real injection
+      # surface, not a theoretical one -- see dotnet/scripts/ReleaseVersionTag.ps1's Test-ValidReleaseTagGrammar
+      # doc comment for the identical rationale already applied to the tag/version-match step further below.
+      - name: Determine verification depth
+        id: verify-depth
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+        run: |
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]] || \
+             { [[ "$EVENT_NAME" == "push" ]] && [[ "$REF" == refs/tags/dotnet-v* ]]; }; then
+            echo "full=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "full=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Pack, package-content allowlist, nuspec metadata, and (on a trusted tag push or manual dispatch)
+      # reproducibility + consumer smoke all live in the one script dotnet-quality.yml also runs, so this job's
+      # SBOM/checksum/upload/attestation subject is always the exact same *verified* primary .nupkg/.snupkg this
+      # script already checked -- never an independent, unverified `dotnet pack` invocation. verify-package.ps1
+      # never cleans dotnet/artifacts/packages itself (only its own scratch reproducibility-comparison directory),
+      # so the primary artifacts it just packed remain on disk for every step below.
+      - name: Pack and verify the package (allowlist, metadata; full verification on a trusted tag push/dispatch)
+        shell: pwsh
+        working-directory: dotnet
+        env:
+          # Passed through env, not interpolated into this script's source text, for the same reason as every
+          # other `${{ github.* }}`/`${{ steps.*.outputs.* }}` value in this workflow -- see this job's first
+          # step's comment. This particular value only ever contains the literal string "true" or "false" (this
+          # workflow's own prior step produced it), so it carries no realistic injection payload today, but is
+          # still passed this way so the pattern remains uniform and does not silently regress if that prior
+          # step's logic ever changes to derive this value from less-trusted input.
+          VERIFY_DEPTH_FULL: ${{ steps.verify-depth.outputs.full }}
+        run: |
+          # NOTE: switches must be splatted from a hashtable (@{ Name = $true }), never a string array of
+          # '-Name' tokens -- array splatting only maps to *positional* parameters and would otherwise pass
+          # these dashed strings straight through as positional arguments, which verify-package.ps1 has none of.
+          $extraArgs = @{}
+          if ($env:VERIFY_DEPTH_FULL -ne 'true') {
+            $extraArgs['SkipReproducibility'] = $true
+            $extraArgs['SkipConsumerSmoke'] = $true
+          }
+          ./scripts/verify-package.ps1 -Configuration Release @extraArgs
+
+      # Best-effort, informational: refuses to let the tag name and this JOB's own record diverge for a tag
+      # push, and prints the version otherwise. `dotnet-release-attestation.yml` independently re-derives and
+      # re-verifies this exact match from its own trusted, rebuilt artifact before ever attesting anything --
+      # this step's PASS/FAIL only affects this job's own SBOM/checksum artifacts, never attestation eligibility.
+      # See dotnet/scripts/verify-release-tag.ps1/ReleaseVersionTag.ps1 for the pure comparison logic and
+      # dotnet/scripts/verify-release-tag.tests.ps1 for its match/mismatch/pre-release self-test.
+      - name: Verify tag matches package version (dotnet-v* tag push)
+        if: >-
+          startsWith(github.ref, 'refs/tags/dotnet-v') &&
+          (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+        shell: pwsh
+        working-directory: dotnet
+        env:
+          # Passed as an environment variable, never interpolated into the script's source text below: a ref
+          # name containing a quote, `$()`, or a semicolon must be treated purely as inert data, not re-parsed
+          # as PowerShell syntax. See verify-release-tag.ps1's header comment for the full rationale.
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $nupkg = Get-ChildItem artifacts/packages -Filter *.nupkg | Select-Object -First 1 -ExpandProperty FullName
+          ./scripts/verify-release-tag.ps1 -NupkgPath $nupkg -RefName $env:RELEASE_TAG -EnforceMatch
+
+      # A main-branch manual workflow_dispatch has no tag; coordinator tag dispatches use the enforced step above.
+      - name: Record package version for this run (main workflow_dispatch, no tag to match)
+        if: github.event_name == 'workflow_dispatch' && !startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        working-directory: dotnet
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $nupkg = Get-ChildItem artifacts/packages -Filter *.nupkg | Select-Object -First 1 -ExpandProperty FullName
+          ./scripts/verify-release-tag.ps1 -NupkgPath $nupkg -RefName $env:RELEASE_TAG
+
+      - name: Generate SPDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          path: dotnet/artifacts/packages
+          format: spdx-json
+          output-file: dotnet/artifacts/packages/MongoDB.AgentFramework.sbom.spdx.json
+          upload-artifact: false
+
+      - name: Generate CycloneDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          path: dotnet/artifacts/packages
+          format: cyclonedx-json
+          output-file: dotnet/artifacts/packages/MongoDB.AgentFramework.sbom.cyclonedx.json
+          upload-artifact: false
+
+      - name: Checksum manifest
+        working-directory: dotnet/artifacts/packages
+        shell: pwsh
+        run: |
+          Get-ChildItem -File | ForEach-Object {
+            $hash = Get-FileHash -Path $_.FullName -Algorithm SHA256
+            "$($hash.Hash)  $($_.Name)"
+          } | Set-Content -Path checksums.sha256.txt
+          Get-Content checksums.sha256.txt
+
+      - name: Upload packages, SBOMs, and checksums (informational -- never the artifact that gets attested)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nuget-sbom-and-package
+          path: |
+            dotnet/artifacts/packages/*.nupkg
+            dotnet/artifacts/packages/*.snupkg
+            dotnet/artifacts/packages/*.sbom.*.json
+            dotnet/artifacts/packages/checksums.sha256.txt
+          if-no-files-found: error
+          retention-days: 14
