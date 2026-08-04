@@ -279,6 +279,7 @@ async def test_hybrid_search_uses_native_rank_fusion_with_filters_in_both_inputs
                 "_ragScoreDetails": {"$meta": "scoreDetails"},
             }
         },
+        {"$match": {"_ragScore": {"$gt": 0}}},
         {"$sort": {"_ragScore": -1, "document_id": 1}},
         {
             "$group": {
