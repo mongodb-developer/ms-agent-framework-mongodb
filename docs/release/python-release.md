@@ -16,7 +16,10 @@ explains the implementation.
 2. Change the static `project.version` in `python/pyproject.toml` and the
    `baseline_version` in `python/api-baseline.json` together. Use PEP 440 and
    choose the next independent package version; do not copy the Agent Framework
-   version.
+   version. The publishable grammar requires exactly `MAJOR.MINOR.PATCH` and
+   permits canonical `a`, `b`, `rc`, and `.dev` prerelease forms. It rejects
+   two-part versions, noncanonical spellings, epochs, local versions, post
+   releases, and release tuples with other than three components.
 3. Update release notes and compatibility evidence, run the local rehearsal,
    and merge the reviewed branch to `main`.
 4. Merge the reviewed pull request with its intentional
@@ -30,6 +33,8 @@ reachable from `origin/main`, version/baseline mismatches, and an existing tag
 that points elsewhere. It creates the annotated tag itself. The same workflow
 then checks out the immutable commit and continues the build; it does **not**
 expect a `GITHUB_TOKEN` tag push to recursively start another workflow.
+The exact shared validator used by the clean build runs before tag push, so an
+immutable tag cannot be created under a grammar that downstream jobs reject.
 
 Manual dispatch remains a recovery path. Supply the original full main SHA (or
 `main` when it still identifies that commit); `publish` defaults false and must

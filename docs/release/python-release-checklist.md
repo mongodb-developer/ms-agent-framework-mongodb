@@ -10,6 +10,8 @@ not authorize publication.
 - [ ] `pyproject.toml` and `api-baseline.json` contain the same reviewed release
   version. The explicit `main` release workflow creates or verifies the
   protected `python-v<version>` tag at that reachable commit.
+- [ ] Version is canonical `MAJOR.MINOR.PATCH` PEP 440 with only supported
+  `a`/`b`/`rc`/`.dev` prerelease segments; it has no epoch, local, or post part.
 - [ ] Distribution/import identities, README, MIT license, author, classifiers,
   dependencies, and source URL match repository facts.
 - [ ] `api-baseline.json` names the first published version and intentional API

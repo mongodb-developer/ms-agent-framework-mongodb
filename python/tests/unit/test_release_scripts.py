@@ -16,6 +16,7 @@ def _load_script(name: str) -> ModuleType:
     spec = importlib.util.spec_from_file_location(name, path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -122,6 +123,60 @@ def test_version_readiness_requires_canonical_pep440_and_matching_tag(
     pyproject.write_text('[project]\nversion = "1.2.0-rc1"\n', encoding="utf-8")
     with pytest.raises(ValueError, match="canonical PEP 440"):
         validator.validate_version_readiness(pyproject, baseline)
+
+
+@pytest.mark.parametrize(
+    "version",
+    [
+        "1.0.0",
+        "1.0.0a1",
+        "1.0.0b2",
+        "1.0.0rc1",
+        "1.0.0.dev1",
+        "1.0.0rc1.dev2",
+    ],
+)
+def test_publishable_version_contract_accepts_semver_shaped_pep440(
+    version: str,
+    tmp_path: Path,
+) -> None:
+    validator = _load_script("validate_version_readiness")
+    release_validator = _load_script("validate_release_tag")
+    pyproject = tmp_path / "pyproject.toml"
+    baseline = tmp_path / "api-baseline.json"
+    pyproject.write_text(f'[project]\nversion = "{version}"\n', encoding="utf-8")
+    baseline.write_text(f'{{"baseline_version": "{version}"}}\n', encoding="utf-8")
+
+    assert validator.validate_publishable_version(version) == version
+    assert (
+        release_validator.validate_release_tag(
+            f"python-v{version}",
+            pyproject,
+            baseline,
+        )
+        == version
+    )
+
+
+@pytest.mark.parametrize(
+    ("version", "error"),
+    [
+        ("1.0", "MAJOR.MINOR.PATCH"),
+        ("1.0.0-rc1", "canonical PEP 440"),
+        ("1.0.0.post1", "post release"),
+        ("1!1.0.0", "epoch"),
+        ("1.0.0+linux", "local version"),
+        ("1.0.0.0", "MAJOR.MINOR.PATCH"),
+    ],
+)
+def test_publishable_version_contract_rejects_non_release_forms(
+    version: str,
+    error: str,
+) -> None:
+    validator = _load_script("validate_version_readiness")
+
+    with pytest.raises(ValueError, match=error):
+        validator.validate_publishable_version(version)
 
 
 def test_version_readiness_rejects_baseline_and_tag_mismatches(tmp_path: Path) -> None:

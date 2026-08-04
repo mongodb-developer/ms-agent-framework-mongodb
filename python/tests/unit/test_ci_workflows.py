@@ -126,6 +126,10 @@ def test_python_release_creates_main_reachable_tag_and_requires_explicit_publish
     assert "environment: ${{ vars.PYPI_ENVIRONMENT }}" in workflow
     assert "id-token: write" in workflow
     assert "validate_release_tag.py" in workflow
+    assert workflow.count("python scripts/validate_release_tag.py") >= 2
+    assert workflow.index("python scripts/validate_release_tag.py") < workflow.index(
+        'git push origin "refs/tags/$TAG"'
+    )
     assert ".release-smoke-wheel" in workflow
     assert ".release-smoke-sdist" in workflow
     assert workflow.count("scripts/smoke_public_api.py") >= 4

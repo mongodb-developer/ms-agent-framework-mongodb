@@ -27,6 +27,21 @@ The package is currently a pre-release (`0.1.0.dev0`). The classifiers advertise
 only Python 3.10 because it is the only runtime in the current release gate.
 `py.typed` declares the shipped inline typing information.
 
+The publishable version contract is the SemVer-shaped subset of canonical
+PEP 440: exactly `MAJOR.MINOR.PATCH`, optionally followed by canonical `a`, `b`,
+`rc`, and/or `.dev` prerelease segments. `1.0` and noncanonical spellings such
+as `1.0.0-rc1` are rejected. Epochs, local versions, post releases, and release
+tuples with other than three components are also rejected: epochs and post
+releases conflict with the repository's SemVer increment policy, while PyPI
+does not accept local versions for public publication. Corrections use a new
+patch/prerelease version rather than a post release.
+
+`scripts/validate_version_readiness.py` owns this contract.
+`scripts/validate_release_tag.py` calls that same helper, and the release
+coordinator runs the latter before pushing a tag and again in the clean build.
+Readiness, tag creation, and downstream release validation therefore cannot
+accept different version grammars.
+
 ## Artifact boundary
 
 Hatch builds the wheel from `src/agent_framework_mongodb`. The source

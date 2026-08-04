@@ -276,7 +276,9 @@ def test_release_tag_rejects_unreviewed_version() -> None:
     )
 
     assert result.returncode == 1
-    assert "tag version 0.1.0 does not match reviewed package version 0.1.0.dev0" in result.stderr
+    assert (
+        "expected tag python-v0.1.0 does not match manifest tag python-v0.1.0.dev0" in result.stderr
+    )
 
 
 def test_public_smoke_rejects_unexpected_installed_version() -> None:

@@ -14,6 +14,26 @@ from packaging.version import InvalidVersion, Version
 _PROJECT_VERSION = re.compile(r'^version = "([^"]+)"$', re.MULTILINE)
 
 
+def validate_publishable_version(raw_version: str) -> str:
+    """Return the canonical version allowed by the repository release contract."""
+    try:
+        parsed = Version(raw_version)
+    except InvalidVersion as exc:
+        raise ValueError(f"project version is not valid PEP 440: {raw_version}") from exc
+    canonical_version = str(parsed)
+    if raw_version != canonical_version:
+        raise ValueError(f"project version must use canonical PEP 440 form: {canonical_version}")
+    if len(parsed.release) != 3:
+        raise ValueError("publishable versions require exactly MAJOR.MINOR.PATCH")
+    if parsed.epoch:
+        raise ValueError("publishable versions must not contain a PEP 440 epoch")
+    if parsed.post is not None:
+        raise ValueError("publishable versions must not contain a post release")
+    if parsed.local is not None:
+        raise ValueError("publishable versions must not contain a local version")
+    return canonical_version
+
+
 def validate_version_readiness(
     pyproject: Path,
     baseline: Path,
@@ -24,13 +44,7 @@ def validate_version_readiness(
     if len(matches) != 1:
         raise ValueError("pyproject.toml must contain exactly one static project version")
     raw_version = matches[0]
-    try:
-        parsed = Version(raw_version)
-    except InvalidVersion as exc:
-        raise ValueError(f"project version is not valid PEP 440: {raw_version}") from exc
-    canonical_version = str(parsed)
-    if raw_version != canonical_version:
-        raise ValueError(f"project version must use canonical PEP 440 form: {canonical_version}")
+    canonical_version = validate_publishable_version(raw_version)
     baseline_version = json.loads(baseline.read_text(encoding="utf-8")).get("baseline_version")
     if baseline_version != canonical_version:
         raise ValueError(

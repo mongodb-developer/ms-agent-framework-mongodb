@@ -64,6 +64,8 @@ jobs:
           TAG="$(python scripts/validate_version_readiness.py \
             --pyproject pyproject.toml --baseline api-baseline.json --output tag)"
           VERSION="${TAG#python-v}"
+          python scripts/validate_release_tag.py "$TAG" \
+            --pyproject pyproject.toml --baseline api-baseline.json
           if git ls-remote --exit-code --tags origin "refs/tags/$TAG" > /dev/null; then
             git fetch --no-tags origin "refs/tags/$TAG:refs/tags/$TAG"
             test "$(git rev-list -n 1 "$TAG")" = "$SHA"
