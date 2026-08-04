@@ -233,9 +233,30 @@ async def test_rag_context_facade_manages_vector_and_search_indexes_independentl
 
     vector = await provider.create_vector_search_index()
     search = await provider.create_search_index()
+    collection.search_indexes.append(
+        {
+            "name": "unrelated_memory_vector",
+            "type": "vectorSearch",
+            "status": "READY",
+            "queryable": True,
+            "latestDefinition": {
+                "fields": [
+                    {
+                        "type": "vector",
+                        "path": "embedding",
+                        "numDimensions": 3,
+                        "similarity": "cosine",
+                    }
+                ]
+            },
+        }
+    )
     assert vector.definition.index_type == "vectorSearch"
     assert search.definition.index_type == "search"
-    assert len(await provider.list_indexes()) == 2
+    assert [result.definition.name for result in await provider.list_indexes()] == [
+        "knowledge_vector",
+        "knowledge_search",
+    ]
 
     await provider.update_vector_search_index()
     await provider.update_search_index()

@@ -269,6 +269,7 @@ class MongoDBRAGProvider:
                     }
                 },
                 {"$set": score_fields},
+                {"$match": {"_ragScore": {"$gt": 0}}},
                 {"$sort": {"_ragScore": -1, self.options.id_field: 1}},
                 {
                     "$group": {
@@ -910,9 +911,17 @@ class MongoDBRAGContextProvider(ContextProvider):
         """List configured RAG Search and Vector Search indexes."""
         results: list[MongoDBIndexResult] = []
         if self.provider.options.vector_index_name is not None:
-            results.extend(await self.provider.list_vector_search_indexes())
+            results.extend(
+                result
+                for result in await self.provider.list_vector_search_indexes()
+                if result.definition.name == self.provider.options.vector_index_name
+            )
         if self.provider.options.search_index_name is not None:
-            results.extend(await self.provider.list_search_indexes())
+            results.extend(
+                result
+                for result in await self.provider.list_search_indexes()
+                if result.definition.name == self.provider.options.search_index_name
+            )
         return tuple(results)
 
     async def inspect_vector_search_index(self) -> MongoDBIndexResult:

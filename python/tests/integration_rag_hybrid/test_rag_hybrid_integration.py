@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import uuid
 from collections.abc import Awaitable, Sequence
@@ -174,7 +175,12 @@ async def test_hybrid_rrf_deduplicates_weights_and_excludes_cross_tenant_candida
             ]
         )
         try:
-            parent_results = await parent_search.search("parentkeyword")
+            parent_results = []
+            for _ in range(60):
+                parent_results = await parent_search.search("parentkeyword")
+                if parent_results:
+                    break
+                await asyncio.sleep(2)
         except MongoDBCapabilityError as exc:
             pytest.skip(
                 "native hybrid deployment capability positively detected as unavailable: "
