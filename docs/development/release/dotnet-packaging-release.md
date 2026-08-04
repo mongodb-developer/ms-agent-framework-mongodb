@@ -486,7 +486,22 @@ human-readable tag next to the pinned commit SHA):
     trusted checkout's own git history, that a claimed tag genuinely exists
     and points at the exact claimed commit (GitHub's `workflow_run` payload
     cannot otherwise distinguish "a tag named X" from "a branch named X" by
-    the bare `head_branch` name alone). A second step,
+    the bare `head_branch` name alone). This same script (`verify-workflow-run-
+    attestation-ref.ps1`) is the SOLE authoritative source of the job's
+    `is-tag-push`/`tag-name` outputs: it writes them directly to
+    `$env:GITHUB_OUTPUT` itself (when set) immediately after computing
+    eligibility, rather than the workflow YAML re-deriving the same branch
+    logic a second time. (An earlier revision of this workflow duplicated that
+    branch logic inline in the YAML and then wired the job's `outputs:` map to
+    the wrong step ID -- one that never actually set those keys, which GitHub
+    Actions silently evaluates as an empty string rather than an error. That
+    silently disabled the downstream tag/version-match gate on every run.
+    Centralizing derivation in the script removes the duplicate-and-diverge
+    failure mode structurally, not just the specific wrong reference; see the
+    structural + behavioral regression proof in
+    `scripts/verify-release-attestation-job-wiring.tests.ps1`, which exercises
+    the real script's real `$env:GITHUB_OUTPUT` writes end-to-end for both a
+    tag push and a `workflow_dispatch`.) A second step,
     **Validate commit is reachable from origin/main (ancestry check)**, then
     proves the claimed commit is real, ancestry-verified history of
     `origin/main` (`git merge-base --is-ancestor`) using the upstream run's
@@ -516,11 +531,38 @@ human-readable tag next to the pinned commit SHA):
     history, so rebuilding from it is provably equivalent in trust to
     building any other ordinary, reviewed commit in this repository. It then
     independently re-verifies the tag/package-version match from this fresh
-    rebuild's own artifact (for a tag-push-derived ref) before requesting a
-    GitHub build-provenance attestation via `actions/attest-build-provenance`
-    (`id-token: write`, `attestations: write`, `artifact-metadata: write`,
-    `contents: read` -- the exact permissions that action's own documentation
-    requires, nothing broader) over the freshly rebuilt `.nupkg`/`.snupkg`.
+    rebuild's own artifact (for a tag-push-derived ref) before generating and
+    attesting a **custom SLSA v1.0 provenance predicate**. It deliberately
+    does **not** use `actions/attest-build-provenance`'s default
+    auto-provenance mode: that action derives its predicate's build source
+    solely from the job's own ambient `GITHUB_SHA`/`GITHUB_REF`, which GitHub
+    documents as "Last commit on default branch"/"Default branch" under a
+    `workflow_run` trigger -- this workflow's own trigger context (`main`'s
+    tip), never the validated, possibly older/tagged commit actually checked
+    out and rebuilt two steps earlier. Checking out a different commit does
+    not change these ambient values or the OIDC token claims derived from
+    them, so the stock action would silently attest provenance for the wrong
+    commit. Instead, `scripts/write-release-provenance-predicate.ps1`
+    (backed by the pure, self-tested `New-ReleaseProvenancePredicate` in
+    `scripts/ReleaseProvenancePredicate.ps1`) hand-builds a SLSA v1.0
+    `buildDefinition`/`runDetails` predicate whose `resolvedDependencies[0]`
+    explicitly binds `digest.gitCommit`/`uri` to the trusted
+    `validate-attestation-eligibility`-supplied `validated-sha` output (never
+    `github.sha`/`github.ref`), while `runDetails.builder.id` still honestly
+    identifies this workflow file/ref as the builder identity. That predicate
+    file is then attested with the generic, pinned
+    `actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1` action
+    (the actively-maintained, general-purpose action that
+    `attest-build-provenance` itself is now a thin wrapper over as of v4)
+    using its documented `predicate-type`/`predicate-path` custom-attestation
+    inputs (`id-token: write`, `attestations: write`, `artifact-metadata:
+    write`, `contents: read` -- the same permissions either action requires,
+    nothing broader) over the freshly rebuilt `.nupkg`/`.snupkg`. See
+    `scripts/verify-workflow-attestation-structure.tests.ps1` for the
+    structural proof that no workflow file anywhere actually invokes the
+    stock action, that the predicate-generation step sources only the
+    trusted `validated-sha` output, and that step ordering is rebuild ->
+    predicate generation -> attest.
 
     The `dotnet-release-attestation` GitHub Environment (protection
     rules/required reviewers an owner must configure) remains a genuine,
@@ -799,14 +841,63 @@ recorded output.
   `validated-sha` output [never `github.ref`/`github.sha`/
   `github.event.workflow_run.head_sha` directly], and rebuilds fresh via
   `verify-package.ps1` rather than downloading the upstream `sbom` job's
-  artifact. Also includes a "malicious selected-ref validator" fixture
-  proving a forged validator COULD report a false "eligible" verdict --
-  concretely justifying why the structural assertions matter -- and a
-  functional regression assertion that `workflow_dispatch` against a real,
-  validly-formed release tag is rejected. All 27 assertions passed against
-  the current two-file design; a genuine bug in this rewrite itself was
-  caught and fixed during this round -- see "PowerShell single-element-list
-  flattening regression" below.
+  artifact; (4) **[added this round]** no workflow file anywhere actually
+  invokes (`uses:`) the stock `actions/attest-build-provenance` action
+  [mentioning it only in explanatory comments is fine and does not fail the
+  check], `provenance-attestation` instead uses the pinned, generic
+  `actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d` with
+  `predicate-type: https://slsa.dev/provenance/v1` and a `predicate-path:`
+  pointing at a generated `release-provenance-predicate.json` file [never an
+  inline literal], its `generate-predicate` step sources the commit binding
+  exclusively from `needs.validate-attestation-eligibility.outputs.validated-
+  sha` [never `github.sha`/`github.ref`] via
+  `write-release-provenance-predicate.ps1`, and step ordering is strictly
+  rebuild (`verify-package.ps1`) -> predicate generation -> attest. Also
+  includes a "malicious selected-ref validator" fixture proving a forged
+  validator COULD report a false "eligible" verdict -- concretely justifying
+  why the structural assertions matter -- and a functional regression
+  assertion that `workflow_dispatch` against a real, validly-formed release
+  tag is rejected. All 43 assertions passed against the current design; a
+  genuine bug in this rewrite itself was caught and fixed during an earlier
+  round -- see "PowerShell single-element-list flattening regression" below.
+- `dotnet/scripts/ReleaseProvenancePredicate.tests.ps1` (new self-test for
+  `New-ReleaseProvenancePredicate` in `ReleaseProvenancePredicate.ps1` and its
+  CLI wrapper `write-release-provenance-predicate.ps1`: 30 assertions --
+  happy-path predicate generation binds `resolvedDependencies[0].digest.
+  gitCommit`/`.uri` to the exact supplied validated SHA; two different SHAs
+  produce two different bindings [proving the binding is not a hardcoded
+  literal]; malformed `ValidatedSha` [not 40 lowercase-hex characters] and
+  malformed `RepositorySlug` [not `owner/repo` shaped] are both rejected;
+  `IsTagPush=$true` with an empty `TagName` is rejected; the CLI wrapper
+  strictly validates `-IsTagPush` is exactly the string `"true"`/`"false"`
+  [rejecting e.g. `"yes"`]; an end-to-end CLI invocation writes valid JSON to
+  `-OutputPath`; and a schema-shape assertion confirms the written JSON's
+  top-level keys are EXACTLY `buildDefinition,runDetails` with no outer
+  in-toto Statement envelope [`_type`/`subject`/`predicateType`, which
+  `actions/attest` fills in itself from its own `subject-path`/
+  `predicate-type` inputs] -- all 30 passed).
+- `dotnet/scripts/verify-release-attestation-job-wiring.tests.ps1` (new
+  structural + behavioral regression proof for the job-output wiring bug
+  this round fixes: 21 assertions -- STATIC: the real committed workflow's
+  job `outputs:` map wires `is-tag-push`/`tag-name` to
+  `steps.validate-ref.outputs.*` [the step that actually sets them, via
+  `verify-workflow-run-attestation-ref.ps1`'s own `$env:GITHUB_OUTPUT`
+  writes] rather than the historically-wrong `steps.record-sha.outputs.*`
+  [which only ever sets `sha`]; a "self-test of the self-test" fixture
+  reproducing the exact historical buggy wiring proves the assertion logic
+  above would have failed against it, so the check is non-vacuous; BEHAVIORAL:
+  invokes the REAL `verify-workflow-run-attestation-ref.ps1` script against a
+  real scratch git repository with `$env:GITHUB_OUTPUT` pointed at a real
+  file, reads back genuinely-emitted `is-tag-push=true`/`tag-name=<value>`
+  for a tag push and `is-tag-push=false`/empty `tag-name` for
+  `workflow_dispatch` of `main`, then feeds the real emitted `tag-name` into
+  a REAL `verify-release-tag.ps1 -EnforceMatch` call against a fixture
+  `.nupkg` -- proving a mismatched tag/package-version pair is REJECTED and
+  a matching pair PASSES end-to-end through the fixed wiring; and a direct
+  proof that `record-sha`'s own real `run:` block content only ever writes
+  `sha=<commit>` and never `is-tag-push=`/`tag-name=`, concretely confirming
+  the historical bug's exact always-empty-string failure mode -- all 21
+  passed).
 - Explicit `dotnet build --configuration Release` of every one of the nine
   sample projects under `dotnet/samples/` individually (0 errors each), and
   separately via `dotnet-quality.yml`'s per-project loop step (`dotnet
@@ -854,4 +945,31 @@ recorded output.
   list itself); the self-test was re-run and all 27 assertions pass. This
   is recorded here as a genuine defect this round's own tooling introduced
   and then caught via its own execution, not merely a design note.
+- **This round's two fixes, validated together:** (1) the job-output wiring
+  bug [`is-tag-push`/`tag-name` silently always empty because they were
+  wired to `steps.record-sha.outputs.*`, a step that never sets those keys]
+  is fixed by both correcting the job `outputs:` map reference AND
+  centralizing derivation entirely inside
+  `verify-workflow-run-attestation-ref.ps1` [it now writes
+  `is-tag-push`/`tag-name` to `$env:GITHUB_OUTPUT` itself], removing the
+  duplicated inline YAML branch logic that had diverged from its wiring in
+  the first place; (2) the misleading-provenance bug [the stock
+  `actions/attest-build-provenance` action's auto-provenance mode derives its
+  predicate's build source from ambient `GITHUB_SHA`/`GITHUB_REF`, which
+  under `workflow_run` describe `main`'s tip, never the validated commit
+  actually rebuilt] is fixed by replacing it with a hand-built, self-tested
+  custom SLSA v1.0 predicate [`ReleaseProvenancePredicate.ps1`] whose
+  `resolvedDependencies[0]` explicitly binds `digest.gitCommit` to the
+  trusted `validated-sha` job output, attested via the generic
+  `actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d` action's
+  `predicate-type`/`predicate-path` custom-attestation inputs. All seven
+  attestation-related self-tests
+  (`resolve-workflow-run-attestation-ref.tests.ps1`,
+  `verify-workflow-run-attestation-ref.tests.ps1`,
+  `verify-attestation-ref.tests.ps1`, `verify-release-tag.tests.ps1`,
+  `verify-workflow-attestation-structure.tests.ps1` [43 assertions],
+  `ReleaseProvenancePredicate.tests.ps1` [30 assertions], and
+  `verify-release-attestation-job-wiring.tests.ps1` [21 assertions]) were
+  re-run together and all passed, and all five workflow files re-parsed
+  cleanly with `python -c "import yaml; yaml.safe_load(...)"`.
 - `git diff --cached --check` (no whitespace errors) before committing.

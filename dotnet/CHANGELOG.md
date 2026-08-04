@@ -53,11 +53,12 @@ establish a public API compatibility baseline in the SemVer sense -- see
   `dotnet-sbom-provenance.yml` (credential-free SPDX + CycloneDX SBOM,
   checksum manifest; holds no elevated permissions and is safe against
   untrusted fork pull requests), and `dotnet-release-attestation.yml`
-  (GitHub build-provenance attestation, triggered exclusively by
+  (custom SLSA v1.0 provenance attestation binding the attested package to an
+  independently ancestry-validated commit SHA, triggered exclusively by
   `workflow_run` reacting to `dotnet-sbom-provenance.yml` so its privileged
   job graph is always sourced from the default branch; rebuilds and
-  re-verifies the package fresh from an independently ancestry-validated
-  commit before attesting; documented-but-disabled NuGet signing step).
+  re-verifies the package fresh from that validated commit before generating
+  and attesting the predicate; documented-but-disabled NuGet signing step).
 
 ### Known limitations
 

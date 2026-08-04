@@ -40,6 +40,24 @@
     sourced from the default branch since the enclosing workflow's only trigger is `workflow_run`) -- used only
     to confirm a claimed tag candidate genuinely resolves to -UpstreamHeadSha, never to execute any code from it.
 
+.OUTPUTS
+    Exit code only (0 = eligible, 1 = not). When $env:GITHUB_OUTPUT is set (i.e. running as an actual GitHub
+    Actions step), this script is also the SOLE, authoritative writer of that step's `is-tag-push`/`tag-name`
+    outputs -- `dotnet-release-attestation.yml`'s `validate-attestation-eligibility` job outputs must read these
+    from `steps.validate-ref.outputs.*` (the step that runs this script), never from a different step (e.g.
+    `record-sha`, which only ever writes its own unrelated `sha` output) -- see
+    verify-release-attestation-job-wiring.tests.ps1's static + behavioral regression proof for exactly the class
+    of bug this centralization exists to make structurally impossible: previously the workflow YAML duplicated
+    this branch's `push`-vs-other-event logic inline in a separate `run:` block, and that duplicate copy's
+    outputs were then wired to the WRONG step id in the job's `outputs:` map, silently emitting an empty string
+    for `is-tag-push`/`tag-name` on every run (a GitHub Actions expression referencing a step output the
+    referenced step never actually sets always evaluates to an empty string, not an error) -- which meant the
+    `provenance-attestation` job's "Verify tag matches the freshly rebuilt package version" step's `if:
+    needs...outputs.is-tag-push == 'true'` condition was ALWAYS false, silently skipping the one check that
+    exists specifically to refuse attesting a tag/package-version mismatch. Centralizing the derivation here,
+    with the workflow's job `outputs:` map reading directly from this script's own step id, removes the
+    duplicated logic entirely rather than merely correcting which step id it happened to reference.
+
 .EXAMPLE
     pwsh dotnet/scripts/verify-workflow-run-attestation-ref.ps1 -UpstreamEventName push -UpstreamHeadBranch "dotnet-v1.2.3" -UpstreamHeadSha <sha> -RepositoryRoot .
 
@@ -92,4 +110,20 @@ if (-not $result.Eligible) {
 
 Write-Host "[ OK ] $($result.Reason)" -ForegroundColor Green
 Write-Host "Resolved and verified attestation ref: $candidateRef"
+
+# The SOLE, authoritative emission of is-tag-push/tag-name -- see this script's .OUTPUTS doc comment for why
+# `dotnet-release-attestation.yml`'s job `outputs:` map MUST read these from THIS step (`validate-ref`), never
+# from a different step id. $UpstreamHeadBranch is already independently confirmed above (for the 'push' case)
+# to be the exact, real tag name that resolves to $UpstreamHeadSha -- never merely echoed back unverified.
+if ($env:GITHUB_OUTPUT) {
+    if ($UpstreamEventName -ceq 'push') {
+        Add-Content -Path $env:GITHUB_OUTPUT -Value "is-tag-push=true"
+        Add-Content -Path $env:GITHUB_OUTPUT -Value "tag-name=$UpstreamHeadBranch"
+    }
+    else {
+        Add-Content -Path $env:GITHUB_OUTPUT -Value "is-tag-push=false"
+        Add-Content -Path $env:GITHUB_OUTPUT -Value "tag-name="
+    }
+}
+
 exit 0

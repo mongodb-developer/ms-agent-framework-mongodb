@@ -61,10 +61,19 @@ name: .NET release provenance attestation
 #     checkout -- it never trusts or downloads the upstream `sbom` job's own uploaded artifact, so the attested
 #     bytes are provably produced by this trusted, always-default-branch-sourced workflow from ancestry-verified
 #     content, not by a job whose own workflow-file trust this design no longer relies on. It independently
-#     re-verifies the tag/package-version match (for a tag-push-derived ref) before ever attesting, then requests
-#     a GitHub build-provenance attestation (`actions/attest-build-provenance`) over the freshly built artifact.
-#     The `dotnet-release-attestation` GitHub Environment (an owner-configured protection gate) remains a
-#     genuine, additional, independent layer of defense-in-depth, not this design's primary or sole gate.
+#     re-verifies the tag/package-version match (for a tag-push-derived ref) before ever attesting, then generates
+#     a CUSTOM SLSA v1.0 provenance predicate (dotnet/scripts/ReleaseProvenancePredicate.ps1) that explicitly
+#     binds `resolvedDependencies` to the validated commit SHA, and requests an attestation over it via
+#     `actions/attest`'s custom-predicate mode -- deliberately NOT the stock `actions/attest-build-provenance`
+#     auto-provenance mode, which would derive its predicate's build-source solely from this job's own ambient
+#     `GITHUB_SHA`/`GITHUB_REF` (documented by GitHub, for `workflow_run`, as "Last commit on default branch"/
+#     "Default branch" -- i.e. this workflow's own trigger context, never the validated release commit actually
+#     checked out and rebuilt; checking out a different commit does not alter those ambient values). Using the
+#     stock mode here would silently attest misleading provenance. `runDetails.builder.id` inside the custom
+#     predicate still correctly and honestly identifies this workflow/ref as the actual builder, which it
+#     genuinely is. The `dotnet-release-attestation` GitHub Environment (an owner-configured protection gate)
+#     remains a genuine, additional, independent layer of defense-in-depth, not this design's primary or sole
+#     gate.
 #
 # NuGet package signing (Authenticode-style code signing over the .nupkg itself, distinct from the SLSA-style
 # build attestation above) remains BLOCKED: it requires an owner-issued, organization-approved code-signing
@@ -76,6 +85,8 @@ name: .NET release provenance attestation
 # documented inline; see dotnet/README.md's Status section for the same blocker surfaced to package consumers.
 #
 # Supply-chain note: actions pinned exactly as in dotnet-security.yml/dotnet-quality.yml/dotnet-sbom-provenance.yml.
+# `actions/attest` (not `actions/attest-build-provenance`, which this workflow never uses -- see above) is pinned
+# to its own exact release commit SHA the same way.
 on:
   workflow_run:
     workflows: [".NET package SBOM (credential-free verification)"]
@@ -93,8 +104,8 @@ jobs:
       contents: read
     outputs:
       validated-sha: ${{ steps.record-sha.outputs.sha }}
-      is-tag-push: ${{ steps.record-sha.outputs.is-tag-push }}
-      tag-name: ${{ steps.record-sha.outputs.tag-name }}
+      is-tag-push: ${{ steps.validate-ref.outputs.is-tag-push }}
+      tag-name: ${{ steps.validate-ref.outputs.tag-name }}
     steps:
       # Explicit and auditable alongside (never a substitute for) this workflow's own `workflow_run` trigger,
       # which GitHub guarantees already resolves this entire workflow's job graph from the default branch
@@ -113,7 +124,12 @@ jobs:
       # reconstructs a candidate full ref from those bare fields and independently verifies -- using ONLY this
       # trusted `main` checkout's real git history, never anything from the upstream run's own ref -- that a
       # claimed tag genuinely exists and matches the claimed commit, then applies the same
-      # Test-AttestationRefEligible gate the previous (now-decommissioned) in-file validator used.
+      # Test-AttestationRefEligible gate the previous (now-decommissioned) in-file validator used. This script is
+      # ALSO the sole, authoritative writer of this step's `is-tag-push`/`tag-name` outputs (see its own .OUTPUTS
+      # doc comment) -- the job's `outputs:` map below MUST read them from `steps.validate-ref.outputs.*`, never
+      # from a different step id (a prior revision mis-wired this to `record-sha`, a step that never sets either
+      # value, silently emitting an empty string and skipping the tag/version match check on every run; see
+      # verify-release-attestation-job-wiring.tests.ps1's regression proof).
       - name: Validate upstream event/ref/commit is eligible
         id: validate-ref
         shell: pwsh
@@ -128,14 +144,6 @@ jobs:
             -UpstreamHeadBranch $env:UPSTREAM_HEAD_BRANCH `
             -UpstreamHeadSha $env:UPSTREAM_HEAD_SHA `
             -RepositoryRoot ${{ github.workspace }}
-
-          if ($env:UPSTREAM_EVENT_NAME -ceq 'push') {
-            echo "is-tag-push=true" >> $env:GITHUB_OUTPUT
-            echo "tag-name=$env:UPSTREAM_HEAD_BRANCH" >> $env:GITHUB_OUTPUT
-          } else {
-            echo "is-tag-push=false" >> $env:GITHUB_OUTPUT
-            echo "tag-name=" >> $env:GITHUB_OUTPUT
-          }
 
       # Ancestry/commit validation: proves the actual upstream commit is reachable from origin/main's history,
       # not merely that its ref NAME matched the expected shape above -- catching e.g. a `dotnet-v*` tag pushed
@@ -217,15 +225,55 @@ jobs:
           $nupkg = Get-ChildItem artifacts/packages -Filter *.nupkg | Select-Object -First 1 -ExpandProperty FullName
           ./scripts/verify-release-tag.ps1 -NupkgPath $nupkg -RefName $env:RELEASE_TAG -EnforceMatch
 
-      # SLSA-style build provenance over this workflow run's own (real, GitHub-issued) OIDC identity -- distinct
-      # from, and not a substitute for, the NuGet package signing documented as blocked below. Attests the
-      # freshly rebuilt artifact above, never anything the upstream sbom job produced or uploaded.
-      - name: Attest build provenance for the freshly rebuilt artifacts
-        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+      # SLSA-style CUSTOM build provenance predicate, explicitly binding the attestation's subject artifacts to
+      # the validated commit SHA above -- see dotnet/scripts/ReleaseProvenancePredicate.ps1's header comment for
+      # the full rationale. The stock `actions/attest-build-provenance` action's default auto-provenance mode is
+      # DELIBERATELY NEVER USED in this workflow: it would populate its predicate's build-source information
+      # solely from this job's own ambient GITHUB_SHA/GITHUB_REF, which GitHub's own `workflow_run` documentation
+      # defines as "Last commit on default branch"/"Default branch" -- i.e. THIS workflow's own trigger context
+      # (main's tip), never the validated release commit checked out and rebuilt above (checking out a different
+      # commit does not alter those ambient values or the OIDC claims derived from them). Using that stock mode
+      # here would silently attest misleading provenance -- a signed statement whose claimed source commit is
+      # unrelated to the artifact's real, validated origin. This step runs the custom-predicate generator ONLY
+      # after the validated checkout, rebuild, and tag/version re-verification above -- it can never be reached
+      # with unvalidated content, and `IS_TAG_PUSH`/`RELEASE_TAG_NAME` are read from the SAME trusted
+      # `validate-attestation-eligibility` job outputs the tag/version check above already used.
+      - name: Generate custom release-provenance predicate binding the validated commit
+        id: generate-predicate
+        shell: pwsh
+        working-directory: dotnet
+        env:
+          VALIDATED_SHA: ${{ needs.validate-attestation-eligibility.outputs.validated-sha }}
+          REPOSITORY_SLUG: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          IS_TAG_PUSH: ${{ needs.validate-attestation-eligibility.outputs.is-tag-push }}
+          RELEASE_TAG_NAME: ${{ needs.validate-attestation-eligibility.outputs.tag-name }}
+        run: |
+          ./scripts/write-release-provenance-predicate.ps1 `
+            -ValidatedSha $env:VALIDATED_SHA `
+            -RepositorySlug $env:REPOSITORY_SLUG `
+            -RunId $env:RUN_ID `
+            -RunAttempt $env:RUN_ATTEMPT `
+            -IsTagPush $env:IS_TAG_PUSH `
+            -TagName $env:RELEASE_TAG_NAME `
+            -OutputPath artifacts/release-provenance-predicate.json
+
+      # Attests the freshly rebuilt artifact using the CUSTOM predicate generated above (never the stock
+      # `actions/attest-build-provenance` auto-provenance mode -- see the step above's rationale). `actions/attest`
+      # is the generic, lower-level action `actions/attest-build-provenance` is itself now merely a thin wrapper
+      # over (per its own README); it exposes the documented `predicate-type`/`predicate-path` custom-attestation
+      # inputs `attest-build-provenance` does not. `runDetails.builder.id` inside the predicate content still
+      # correctly and honestly identifies this workflow/ref as the actual builder, which it genuinely is
+      # (workflow_run guarantees this file's own content is always sourced from main).
+      - name: Attest custom release provenance (binds validated commit, never the stock auto-provenance mode)
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         with:
           subject-path: |
             dotnet/artifacts/packages/*.nupkg
             dotnet/artifacts/packages/*.snupkg
+          predicate-type: https://slsa.dev/provenance/v1
+          predicate-path: dotnet/artifacts/release-provenance-predicate.json
 
       # BLOCKED (see file header): no owner-issued NuGet code-signing certificate or ADR 0013 acceptance exists
       # yet. This step is intentionally never executed (`if: false`); it documents the exact command a future,

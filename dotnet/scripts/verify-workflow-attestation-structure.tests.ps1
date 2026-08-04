@@ -275,6 +275,60 @@ Assert-True (
     $attestationBlock -match 'verify-package\.ps1'
 ) "provenance-attestation rebuilds the package via verify-package.ps1 from the validated checkout"
 
+# --- Custom SLSA provenance predicate: never the stock actions/attest-build-provenance auto-provenance mode ------
+# The stock action's default mode derives its predicate's build-source solely from the job's own ambient
+# GITHUB_SHA/GITHUB_REF (documented by GitHub, for workflow_run, as "Last commit on default branch"/"Default
+# branch" -- this workflow's own trigger context, never the validated release commit actually checked out and
+# rebuilt above). This repository's policy therefore forbids using that stock auto-provenance mode ANYWHERE, and
+# instead generates a custom predicate that explicitly binds resolvedDependencies to the validated commit SHA.
+foreach ($workflowFile in $allWorkflowFiles) {
+    $fileText = Get-Content -Path $workflowFile.FullName -Raw
+    Assert-True (
+        $fileText -notmatch 'uses:\s*actions/attest-build-provenance'
+    ) "$($workflowFile.Name) never ACTUALLY USES the stock actions/attest-build-provenance action (it would derive misleading provenance under workflow_run -- see ReleaseProvenancePredicate.ps1's rationale; mentioning it only in explanatory comments is fine)"
+}
+
+Assert-True (
+    $attestationBlock -match 'uses:\s*actions/attest@[0-9a-f]{40}\s*#\s*v4\.\d+\.\d+'
+) "provenance-attestation uses the generic, pinned actions/attest action (exact commit SHA + version comment)"
+Assert-True (
+    $attestationBlock -match 'predicate-type:\s*https://slsa\.dev/provenance/v1'
+) "provenance-attestation's actions/attest step declares predicate-type https://slsa.dev/provenance/v1"
+Assert-True (
+    $attestationBlock -match 'predicate-path:\s*\S+release-provenance-predicate\.json'
+) "provenance-attestation's actions/attest step reads predicate-path from a generated release-provenance-predicate.json file (never an inline literal predicate)"
+
+# The predicate-generation step must derive its binding from the SAME trusted validated-sha/is-tag-push/tag-name
+# job outputs the tag/version check already uses -- never github.sha/github.ref/github.event.workflow_run.head_sha
+# directly (which would reintroduce exactly the untrusted-binding problem this design exists to avoid).
+$generatePredicateStepPattern = '(?s)id:\s*generate-predicate.*?(?=\r?\n\r?\n\s*-\s*name:|\z)'
+$generatePredicateMatch = [regex]::Match($attestationBlock, $generatePredicateStepPattern)
+Assert-True $generatePredicateMatch.Success "Found the 'generate-predicate' step's block text"
+if ($generatePredicateMatch.Success) {
+    $generatePredicateStepText = $generatePredicateMatch.Value
+    Assert-True (
+        $generatePredicateStepText -match [regex]::Escape('needs.validate-attestation-eligibility.outputs.validated-sha')
+    ) "generate-predicate step sources its commit binding from needs.validate-attestation-eligibility.outputs.validated-sha (the trusted, ancestry-verified value), never an unvalidated github.sha/ref"
+    Assert-True (
+        $generatePredicateStepText -notmatch '\bgithub\.sha\b' -and $generatePredicateStepText -notmatch '\bgithub\.ref\b'
+    ) "generate-predicate step never references github.sha/github.ref directly (only the validated job output)"
+    Assert-True (
+        $generatePredicateStepText -match 'write-release-provenance-predicate\.ps1'
+    ) "generate-predicate step invokes write-release-provenance-predicate.ps1 (the tested CLI wrapper), not inline ad hoc JSON construction"
+}
+
+# Ordering: rebuild -> predicate generation -> attest, never attest before the predicate exists, and never
+# predicate generation before the validated rebuild.
+$rebuildIndex = $attestationBlock.IndexOf('verify-package.ps1')
+$predicateGenIndex = $attestationBlock.IndexOf('write-release-provenance-predicate.ps1')
+$attestIndex = $attestationBlock.IndexOf('actions/attest@')
+Assert-True (
+    $rebuildIndex -ge 0 -and $predicateGenIndex -gt $rebuildIndex
+) "Predicate generation occurs AFTER the validated rebuild (verify-package.ps1), never before it"
+Assert-True (
+    $predicateGenIndex -ge 0 -and $attestIndex -gt $predicateGenIndex
+) "The actions/attest step occurs AFTER predicate generation, never before the predicate file exists"
+
 # --- Malicious selected-ref validator regression proof -----------------------------------------------------------
 # Demonstrates concretely why trigger isolation (assertion 1) and trusted-main-first checkout (assertion 3)
 # matter: if a validator function WERE sourced from a compromised/selected ref, its own verdict could trivially
