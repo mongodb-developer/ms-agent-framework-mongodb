@@ -44,9 +44,9 @@
          they do in every other CI run; this script does not filter them out, and skipped tests are excluded from
          the asserted `executed` count (they count toward `total`, not `executed`).
 
-    Never edits a tracked file, never touches artifacts/packages, and restores the default (un-pinned) build
-    state afterwards by cleaning bin/obj again -- a plain `dotnet build` after running this script keeps
-    resolving the tracked `[1.13.0,1.17.0)` range exactly as before.
+    It also packs the library and restores/runs the isolated package consumer against each exact version. TRX,
+    JSON, and Markdown reports are retained under artifacts/agent-framework-compat-results. It never edits a
+    tracked file and restores the default (un-pinned) build state afterwards by cleaning bin/obj.
 
 .PARAMETER Versions
     The exact Agent Framework versions to verify. Defaults to the documented matrix bounds: 1.13.0 and 1.16.0.
@@ -73,7 +73,9 @@ $ErrorActionPreference = "Stop"
 $DotnetRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $SrcProject = Join-Path $DotnetRoot "src/MongoDB.AgentFramework/MongoDB.AgentFramework.csproj"
 $TestProject = Join-Path $DotnetRoot "tests/MongoDB.AgentFramework.Tests/MongoDB.AgentFramework.Tests.csproj"
+$SmokeProject = Join-Path $DotnetRoot "tests/PackageSmokeTest/PackageSmokeTest.csproj"
 $ResultsDir = Join-Path $DotnetRoot "artifacts/agent-framework-compat-results"
+$PackagesDir = Join-Path $DotnetRoot "artifacts/packages"
 
 $script:FailureCount = 0
 
@@ -102,8 +104,13 @@ function Clear-ProjectOutputs() {
     Clear-PathIfExists (Join-Path $DotnetRoot "src/MongoDB.AgentFramework/obj")
     Clear-PathIfExists (Join-Path $DotnetRoot "tests/MongoDB.AgentFramework.Tests/bin")
     Clear-PathIfExists (Join-Path $DotnetRoot "tests/MongoDB.AgentFramework.Tests/obj")
-    Clear-PathIfExists $ResultsDir
+    Clear-PathIfExists (Join-Path $DotnetRoot "tests/PackageSmokeTest/bin")
+    Clear-PathIfExists (Join-Path $DotnetRoot "tests/PackageSmokeTest/obj")
 }
+
+Clear-PathIfExists $ResultsDir
+New-Item -ItemType Directory -Path $ResultsDir -Force | Out-Null
+$reportRows = [System.Collections.Generic.List[object]]::new()
 
 function Get-ResolvedPackageVersion([string]$AssetsPath, [string]$PackageId) {
     $assets = Get-Content $AssetsPath -Raw | ConvertFrom-Json
@@ -167,7 +174,6 @@ foreach ($version in $Versions) {
     }
     Write-Ok "$version -- MongoDB.AgentFramework.Tests built"
 
-    New-Item -ItemType Directory -Path $ResultsDir -Force | Out-Null
     $trxFileName = "agent-framework-compat-$version.trx"
     $trxPath = Join-Path $ResultsDir $trxFileName
 
@@ -179,11 +185,13 @@ foreach ($version in $Versions) {
     $executedCount = Get-TrxExecutedCount -TrxPath $trxPath
     if ($null -eq $executedCount) {
         Write-Failure "$version -- no TRX result file found at $trxPath; cannot confirm any test actually executed"
+        $reportRows.Add([pscustomobject]@{ version = $version; result = 'failed'; executed = $executedCount; consumerSmoke = $false })
         continue
     }
 
     if ($testExitCode -ne 0) {
         Write-Failure "$version -- unit tests failed with exit code $testExitCode ($executedCount executed per TRX)"
+        $reportRows.Add([pscustomobject]@{ version = $version; result = 'failed'; executed = $executedCount; consumerSmoke = $false })
         continue
     }
 
@@ -198,11 +206,53 @@ foreach ($version in $Versions) {
     }
 
     Write-Ok "$version -- MongoDB.AgentFramework.Tests unit suite passed ($executedCount tests executed per TRX)"
+
+    Clear-PathIfExists $PackagesDir
+    & dotnet pack $SrcProject --configuration $Configuration "-p:AgentFrameworkVersion=$version" `
+        -p:ContinuousIntegrationBuild=true -p:CI=true -p:PackageOutputPath=$PackagesDir --no-restore
+    if ($LASTEXITCODE -ne 0) {
+        Write-Failure "$version -- package build failed with exit code $LASTEXITCODE"
+        $reportRows.Add([pscustomobject]@{ version = $version; result = 'failed'; executed = $executedCount; consumerSmoke = $false })
+        continue
+    }
+    Write-Ok "$version -- package built against the exact Agent Framework version"
+
+    $previousNugetPackages = $env:NUGET_PACKAGES
+    $consumerCache = Join-Path $DotnetRoot "artifacts/agent-framework-compat-consumer-cache/$version"
+    Clear-PathIfExists $consumerCache
+    $env:NUGET_PACKAGES = $consumerCache
+    try {
+        & dotnet restore $SmokeProject --force --no-cache "-p:AgentFrameworkVersion=$version"
+        if ($LASTEXITCODE -ne 0) { throw "$version -- package consumer restore failed with exit code $LASTEXITCODE" }
+
+        & dotnet run --project $SmokeProject --configuration $Configuration --framework net8.0 `
+            "-p:AgentFrameworkVersion=$version" --no-restore
+        if ($LASTEXITCODE -ne 0) { throw "$version -- package consumer smoke failed with exit code $LASTEXITCODE" }
+    }
+    finally {
+        $env:NUGET_PACKAGES = $previousNugetPackages
+    }
+    Write-Ok "$version -- local-feed package consumer smoke passed with both Agent Framework dependencies pinned"
+    $reportRows.Add([pscustomobject]@{ version = $version; result = 'passed'; executed = $executedCount; consumerSmoke = $true })
 }
 
 # Restore the default, un-pinned build state so a subsequent plain `dotnet build`/`dotnet pack` resolves the
 # tracked range again, not whichever matrix version ran last.
 Clear-ProjectOutputs
+
+$reportRows | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $ResultsDir "compatibility-report.json")
+$markdownRows = $reportRows | ForEach-Object {
+    "| $($_.version) | $($_.result) | $($_.executed) | $($_.consumerSmoke) |"
+}
+@"
+# MongoDB.AgentFramework compatibility report
+
+The package range remains `[1.13.0,1.17.0)`. These rows are drift/test evidence only and do not widen it.
+
+| Exact Agent Framework version | Result | Tests executed | Local-feed consumer smoke |
+| --- | --- | ---: | --- |
+$($markdownRows -join [Environment]::NewLine)
+"@ | Set-Content (Join-Path $ResultsDir "compatibility-report.md")
 
 Write-Section "Summary"
 if ($script:FailureCount -gt 0) {

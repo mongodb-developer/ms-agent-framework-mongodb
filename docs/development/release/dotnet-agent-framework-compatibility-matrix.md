@@ -132,14 +132,23 @@ a console-output heuristic.
 
 ## CI: `dotnet-agent-framework-compat`
 
-`.github/workflows/dotnet-quality.yml` runs a `dotnet-agent-framework-compat`
-job, matrixed over `agent-framework-version: ["1.13.0", "1.16.0"]`, invoking
-the same `verify-agent-framework-compatibility.ps1` script with
-`-Configuration Release -Versions "<matrix bound>"`. It is a separate job
+`.github/workflows/dotnet-quality.yml` first resolves the latest and immediately
+previous common listed stable versions from the official NuGet V3 registration
+APIs, then runs a `dotnet-agent-framework-compat` matrix invoking the same
+`verify-agent-framework-compatibility.ps1` script with
+`-Configuration Release -Versions "<exact version>"`. It is a separate job
 (not an extra `dotnet-quality` matrix dimension) because it re-restores/
 re-builds against a genuinely different dependency version per entry, rather
 than exercising the `dotnet-quality` job's own OS/tooling variance. It
-requires no secrets and runs on every pull request, including from forks.
+requires no secrets and runs on every pull request, including from forks. This
+is upstream drift evidence and does not silently widen `[1.13.0,1.17.0)`.
+
+The manual/scheduled `dotnet-agent-framework-compatibility.yml` workflow tests
+latest stable, latest preview if one exists, and an optional exact common
+listed version. Missing preview is explicit, never a stable substitution.
+Every row now also packs and local-feed consumer-smokes the package, retaining
+TRX plus machine-readable JSON and Markdown reports. See
+[release operations](dotnet-release-operations.md).
 
 ## Microsoft.Extensions.* transitive compatibility
 

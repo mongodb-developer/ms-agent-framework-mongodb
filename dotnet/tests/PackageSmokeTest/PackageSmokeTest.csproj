@@ -13,6 +13,7 @@
     <IsPackable>false</IsPackable>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <NoWarn>MAAI001</NoWarn>
+    <AgentFrameworkVersion Condition="'$(AgentFrameworkVersion)' == ''"></AgentFrameworkVersion>
   </PropertyGroup>
 
   <ItemGroup>
@@ -23,5 +24,13 @@
       Bump this version alongside src/MongoDB.AgentFramework/MongoDB.AgentFramework.csproj's Version property.
     -->
     <PackageReference Include="MongoDB.AgentFramework" Version="0.1.0-preview.1" />
+    <!-- Compatibility runs set this property so the packed package's actual two upstream contracts are pinned
+         in the consumer graph too; ordinary package verification leaves it empty and tests the declared range. -->
+    <PackageReference Include="Microsoft.Agents.AI.Abstractions"
+                      Version="$(AgentFrameworkVersion)"
+                      Condition="'$(AgentFrameworkVersion)' != ''" />
+    <PackageReference Include="Microsoft.Agents.AI.Workflows"
+                      Version="$(AgentFrameworkVersion)"
+                      Condition="'$(AgentFrameworkVersion)' != ''" />
   </ItemGroup>
 </Project>
