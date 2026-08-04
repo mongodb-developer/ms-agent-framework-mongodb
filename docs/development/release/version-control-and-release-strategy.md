@@ -15,10 +15,17 @@ build branches.
 | `main` | Reviewed integration and release source | The only branch from which release tags may be created |
 
 Changes are developed and validated on the appropriate build branch, merged through a
-reviewed pull request to `main`, and released from the resulting `main` commit. A release
-workflow must reject a requested commit that is not reachable from `main`. This keeps the
-build branches useful as pre-release proving grounds without making them alternate release
-lines.
+reviewed pull request to `main`, and released from the resulting `main` commit. Every push to
+a build branch runs that language's complete credential-free readiness suite. Credentialed
+integration jobs may require approval, but are triggered by the same push so their result is
+part of the release evidence.
+
+A change is release-bearing only when it changes that language's package-version manifest.
+After the reviewed build branch is merged, the `main` push for that manifest automatically
+starts the corresponding language release coordinator. The coordinator must bind the tag to
+the immutable `main` event SHA and reject a commit that is not reachable from `origin/main`.
+This keeps the build branches useful as pre-release proving grounds without making them
+alternate release lines.
 
 Do not rebase a published release tag. If an artifact is wrong, fix it on a branch, merge the
 fix to `main`, increment the package version, and create a new tag.
@@ -49,22 +56,36 @@ Both packages apply [Semantic Versioning 2.0.0](https://semver.org/):
 
 ## GitHub Actions release flow
 
-1. The build branch runs credential-free quality, package, compatibility, and local-install
-   tests. It uploads artifacts and reports but cannot publish.
-2. A reviewed pull request merges the exact changes into `main`.
-3. A maintainer starts the language release workflow on `main`. The workflow validates the
-   manifest version, verifies that the selected commit is `main` or an ancestor of `main`,
-   and creates the matching annotated tag.
-4. The protected tag triggers a clean artifact build. The workflow reruns release gates
-   against the tagged commit; it never reuses a developer-machine artifact.
-5. A protected GitHub Environment requires approval before package publication.
-6. After publication, the workflow downloads the exact package from PyPI or NuGet, verifies
+1. A push to `build/python-packaging-release` or `build/dotnet-packaging-release` starts the
+   language's quality, full credential-free tests, version validation, current/previous
+   stable compatibility, package/consumer smoke, security, vulnerability, and SBOM checks.
+2. Branch protection requires every readiness check before the build branch can be merged.
+   Credentialed integration checks use a protected test environment and are required when
+   release policy marks them available.
+3. A reviewed pull request merges the exact build-branch commit into `main`, including one
+   intentional package-manifest version change.
+4. The manifest path change automatically starts only that language's release coordinator.
+   The coordinator validates the immutable event SHA, canonical manifest version, tag
+   uniqueness, and `origin/main` ancestry before creating the annotated tag.
+5. Because a tag created with `GITHUB_TOKEN` does not recursively start a tag-push workflow,
+   the coordinator explicitly invokes or continues the trusted release jobs for that exact
+   SHA and tag.
+6. The release graph rebuilds from the tagged commit and reruns the release gates; it never
+   reuses build-branch or developer-machine artifacts.
+7. A protected GitHub Environment requires approval before package publication. Publishing
+   also remains disabled until the language's governance approval variable is explicitly set.
+8. After publication, the workflow downloads the exact package from PyPI or NuGet, verifies
    it, and creates or updates the GitHub Release with checksums, SBOM, provenance, and test
    reports.
 
+Manual dispatch remains available for a failed-run recovery or an on-demand compatibility
+report. It must apply the same SHA, version, ancestry, governance, and environment checks as
+the automatic path; it is not a bypass.
+
 GitHub only runs `workflow_dispatch` workflows that exist on the default branch, so release
 and on-demand compatibility workflows become operational after their build-branch changes
-are merged to `main`. See GitHub's
+are merged to `main`. Automatic `push` triggers use the workflow definition present in the
+pushed commit. See GitHub's
 [manual workflow documentation](https://docs.github.com/actions/managing-workflow-runs/manually-running-a-workflow)
 and [workflow trigger reference](https://docs.github.com/actions/using-workflows/events-that-trigger-workflows).
 
@@ -150,11 +171,12 @@ tag on `main`.
 
 - [ ] Version changed in exactly one language manifest.
 - [ ] Changelog and compatibility documentation describe the release.
-- [ ] Build-branch quality, package, stable-current, and stable-previous jobs pass.
+- [ ] Build-branch quality, full tests, version, package, security, SBOM, stable-current, and
+      stable-previous jobs pass.
 - [ ] On-demand stable/preview report is reviewed when preparing a release.
 - [ ] Build branch is merged to `main` without changing generated artifacts.
-- [ ] Tag workflow is run from `main`; tag and manifest versions match.
+- [ ] The manifest-changing `main` merge starts the expected language release and no other.
+- [ ] Automatic tag and manifest versions match the immutable `main` merge SHA.
 - [ ] Protected publishing environment is approved.
 - [ ] Published artifact is downloaded and verified.
 - [ ] GitHub Release contains checksums, SBOM/provenance, compatibility report, and notes.
-
