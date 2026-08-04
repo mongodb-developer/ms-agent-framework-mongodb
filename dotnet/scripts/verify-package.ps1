@@ -12,11 +12,18 @@
          internal implementation file leaks into the shipped artifact.
       3. Asserts the embedded .nuspec metadata (id, version, authors, license, readme, project/repository URLs,
          description, release notes, copyright, tags) is present and well-formed.
-      4. Packs a second time from a clean build and compares the two artifacts, normalizing the OPC packaging
-         metadata that `dotnet pack` regenerates with a new random identifier on every invocation (the
-         `package/services/metadata/core-properties/*.psmdcp` part name and the `_rels/.rels` relationship ids)
-         and per-entry zip timestamps, since neither reflects package *content*. Every real payload entry (dll,
-         xml docs, nuspec, README) must be byte-identical across the two runs.
+      4. Packs a second time from a clean build and compares the two artifacts. `dotnet pack` regenerates two OPC
+         wrapper identifiers on every invocation that never reflect package *content* -- the
+         `package/services/metadata/core-properties/*.psmdcp` part's random GUID file name, and `_rels/.rels`'s
+         `Relationship Id="R..."` attributes (and its `Target` reference to that GUID file name) -- so only those
+         specific generated-identifier substrings are normalized to a fixed placeholder before comparing. Every
+         entry's resulting (normalized) bytes must then be identical across the two packs, including the full
+         content of `_rels/.rels` and every `*.psmdcp` entry, not merely their presence: a genuine content
+         difference inside either file (e.g. a wrong embedded creator/identifier, or a relationship pointing at
+         the wrong target) still fails this check exactly like a real payload (dll/xml/nuspec/README) difference
+         would. See dotnet/scripts/PackageReproducibility.ps1 and
+         dotnet/scripts/verify-package.reproducibility.tests.ps1 for the pure comparison function and its
+         fixtures.
       5. Restores and runs the isolated consumer smoke test (tests/PackageSmokeTest) against the packed artifact
          through a local NuGet feed and an isolated NUGET_PACKAGES cache directory (cleared before every restore)
          -- never a ProjectReference, and never the developer machine's shared global package cache --
@@ -61,6 +68,7 @@ $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 . (Join-Path $PSScriptRoot "PackageAllowlist.ps1")
 . (Join-Path $PSScriptRoot "PackageMetadataAssertions.ps1")
+. (Join-Path $PSScriptRoot "PackageReproducibility.ps1")
 . (Join-Path $PSScriptRoot "ConsumerCacheVerification.ps1")
 
 $DotnetRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
@@ -240,39 +248,28 @@ else {
     Write-Section "Step 4: reproducibility (pack twice, compare)"
     $second = Invoke-Pack -OutputDir $ReproDir
 
+    # Test-PackageReproducibility (dotnet/scripts/PackageReproducibility.ps1) is the single source of truth for
+    # both this real run and verify-package.reproducibility.tests.ps1's self-test, which proves a genuine content
+    # difference inside _rels/.rels or a *.psmdcp entry (not merely the generated GUID/relationship-id noise
+    # those two files legitimately carry between pack invocations) still fails this check -- those two entries
+    # are normalized and compared byte-for-byte, never excluded from the comparison outright.
     function Compare-PackageReproducibility([string]$PathA, [string]$PathB, [string]$Label) {
         $entriesA = Get-ZipEntryTexts $PathA
         $entriesB = Get-ZipEntryTexts $PathB
+        $result = Test-PackageReproducibility -EntriesA $entriesA -EntriesB $entriesB
 
-        # The OPC core-properties part name is a fresh random GUID on every `dotnet pack` invocation (NuGet.Client
-        # behavior, not a build nondeterminism -- see the psmdcp/_rels comparison below, which proves their
-        # *content* -- other than that GUID and the _rels relationship ids that reference it -- is identical).
-        # Normalize the key so entry-set comparison does not spuriously fail on that GUID alone.
-        $normalize = { param($name) $name -replace '(core-properties/)[0-9a-f]{32}(\.psmdcp)', '$1{guid}$2' }
-        $namesA = $entriesA.Keys | ForEach-Object { & $normalize $_ } | Sort-Object
-        $namesB = $entriesB.Keys | ForEach-Object { & $normalize $_ } | Sort-Object
-        if (($namesA -join "|") -ne ($namesB -join "|")) {
-            Write-Failure "$Label entry sets differ: [$($namesA -join ', ')] vs [$($namesB -join ', ')]"
+        if ($result.EntrySetMismatch) {
+            Write-Failure "$Label entry sets differ (after normalizing only the generated OPC core-properties GUID part name): [$($result.NamesA -join ', ')] vs [$($result.NamesB -join ', ')]"
             return
         }
 
-        $realKeysA = $entriesA.Keys | Where-Object { $_ -ne "_rels/.rels" -and $_ -notmatch "\.psmdcp$" }
-        $mismatches = @()
-        foreach ($key in $realKeysA) {
-            $bytesA = $entriesA[$key]
-            $bytesB = $entriesB[$key]
-            if ($null -eq $bytesB -or -not [System.Linq.Enumerable]::SequenceEqual([byte[]]$bytesA, [byte[]]$bytesB)) {
-                $mismatches += $key
-            }
-        }
-
-        if ($mismatches.Count -gt 0) {
-            Write-Failure "$Label real payload entries differ between the two packs: $($mismatches -join ', ')"
+        if ($result.ContentMismatches.Count -gt 0) {
+            Write-Failure "$Label entries differ (after normalizing only the generated OPC core-properties GUID part name and _rels relationship ids) between the two packs: $($result.ContentMismatches -join ', ')"
             return
         }
 
-        Write-Ok "$Label`: every real payload entry (dll/xml/nuspec/README) is byte-identical across two packs"
-        Write-Host "         (only the OPC core-properties part name and _rels/.rels relationship ids -- neither of which is package content -- differ, which is expected NuGet.Client `dotnet pack` OPC packaging behavior, not build nondeterminism)"
+        Write-Ok "$Label`: every entry -- including the full content of _rels/.rels and every *.psmdcp entry, not just their presence -- is byte-identical across two packs once only the generated OPC core-properties GUID part name and _rels relationship ids are normalized"
+        Write-Host "         (only those generated identifiers -- never real package content -- differ, which is expected NuGet.Client `dotnet pack` OPC packaging behavior, not build nondeterminism)"
     }
 
     Compare-PackageReproducibility -PathA $primary.Nupkg -PathB $second.Nupkg -Label "nupkg"
