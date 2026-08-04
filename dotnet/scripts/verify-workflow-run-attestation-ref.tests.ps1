@@ -106,6 +106,9 @@ try {
     $exit5 = Invoke-VerifyWorkflowRunRef -EventName "workflow_dispatch" -HeadBranch "main" -HeadSha $differentSha
     Assert-True ($exit5 -eq 0) "workflow_dispatch + head_branch 'main' -> eligible (got exit $exit5)"
 
+    $exit5b = Invoke-VerifyWorkflowRunRef -EventName "workflow_dispatch" -HeadBranch "dotnet-v9.9.9-fixture" -HeadSha $realTagSha
+    Assert-True ($exit5b -eq 0) "workflow_dispatch + real coordinator release tag + exact SHA -> eligible (got exit $exit5b)"
+
     # --- Case 6: workflow_dispatch + an arbitrary non-main branch -> rejected ---------------------------------
     $exit6 = Invoke-VerifyWorkflowRunRef -EventName "workflow_dispatch" -HeadBranch "feature/some-topic-branch" -HeadSha $differentSha
     Assert-True ($exit6 -ne 0) "workflow_dispatch + an arbitrary non-main branch -> rejected (got exit $exit6)"

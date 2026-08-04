@@ -48,6 +48,9 @@ Assert-True ($pushMainResult -ceq "refs/tags/main") "push upstream event with he
 $dispatchResult = Resolve-WorkflowRunAttestationRef -UpstreamEventName "workflow_dispatch" -UpstreamHeadBranch "main"
 Assert-True ($dispatchResult -ceq "refs/heads/main") "workflow_dispatch upstream event reconstructs 'refs/heads/main' (got '$dispatchResult')"
 
+$dispatchTagResult = Resolve-WorkflowRunAttestationRef -UpstreamEventName "workflow_dispatch" -UpstreamHeadBranch "dotnet-v1.2.3"
+Assert-True ($dispatchTagResult -ceq "refs/tags/dotnet-v1.2.3") "coordinator workflow_dispatch against an immutable release tag reconstructs the tag ref (got '$dispatchTagResult')"
+
 $dispatchFeatureResult = Resolve-WorkflowRunAttestationRef -UpstreamEventName "workflow_dispatch" -UpstreamHeadBranch "feature/some-topic-branch"
 Assert-True ($dispatchFeatureResult -ceq "refs/heads/feature/some-topic-branch") "workflow_dispatch upstream event reconstructs the full ref for an arbitrary branch too -- rejection of non-main branches is Test-AttestationRefEligible's job, not this function's (got '$dispatchFeatureResult')"
 

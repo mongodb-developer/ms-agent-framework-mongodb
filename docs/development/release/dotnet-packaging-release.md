@@ -506,11 +506,10 @@ human-readable tag next to the pinned commit SHA):
     proves the claimed commit is real, ancestry-verified history of
     `origin/main` (`git merge-base --is-ancestor`) using the upstream run's
     `head_sha` -- catching a tag pushed against a commit that was never
-    actually merged. Manual attestation remains restricted to a
-    `workflow_dispatch` of the upstream `sbom` workflow against **exactly**
-    `refs/heads/main` (never a tag), for the same reason documented on
-    `Test-AttestationRefEligible`: there is no equivalent trusted tag/
-    package-version match check for a manual dispatch. The upstream event's
+    actually merged. Ordinary manual attestation remains main-only; the release
+    coordinator dispatches against its newly created immutable tag, which this
+    trusted validator independently resolves to the exact event SHA and the
+    downstream rebuild verifies against the package version. The upstream event's
     `event`/`head_branch`/`head_sha` fields are always passed to this script
     through step-level `env:` values, never interpolated directly into
     shell/PowerShell source, for the same injection-surface reason documented
@@ -587,7 +586,8 @@ dispatches the credential-free release build. This explicit dispatch is
 required because a tag created with `GITHUB_TOKEN` does not recursively trigger
 a tag-push workflow. Publication then remains inside the default-branch-sourced
 `workflow_run` trust graph and requires the environment named by
-`NUGET_ENVIRONMENT`; see
+`NUGET_ENVIRONMENT` plus `NUGET_PUBLISHING_APPROVED == true`. Governance
+owners must leave that approval unset until ADR 0013 is accepted; see
 [.NET release operations](dotnet-release-operations.md).
 When a `dotnet-v*` tag is eventually pushed, `dotnet-sbom-provenance.yml`'s
 `sbom` job asserts the packed `.nuspec`'s `<version>` exactly matches that

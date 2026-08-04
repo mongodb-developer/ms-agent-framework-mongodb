@@ -87,8 +87,8 @@ Assert-NotEligible "workflow_dispatch" "refs/heads/release/1.x" "workflow_dispat
 # (unlike a real tag push) that the tag's claimed version actually matches the packed artifact's real version --
 # e.g. a `dotnet-v1.2.3` tag could point at a main-branch commit whose packed .nuspec is really `0.1.0-preview.1`.
 # Main-only manual dispatch closes this gap entirely rather than requiring a second, parallel version-match check.
-Assert-NotEligible "workflow_dispatch" "refs/tags/dotnet-v1.2.3" "workflow_dispatch targeting a validly-formed release tag (tag/package-version mismatch regression -- manual dispatch is main-only)"
-Assert-NotEligible "workflow_dispatch" "refs/tags/dotnet-v0.1.0-preview.1" "workflow_dispatch targeting a validly-formed pre-release-shaped tag (still rejected -- manual dispatch is main-only)"
+Assert-Eligible "workflow_dispatch" "refs/tags/dotnet-v1.2.3" "workflow_dispatch targeting a validated coordinator-created release tag"
+Assert-Eligible "workflow_dispatch" "refs/tags/dotnet-v0.1.0-preview.1" "workflow_dispatch targeting a validated coordinator-created prerelease tag"
 Assert-NotEligible "workflow_dispatch" "refs/tags/v1.2.3" "workflow_dispatch targeting a tag missing the required 'dotnet-v' prefix"
 Assert-NotEligible "workflow_dispatch" "refs/tags/dotnet-v1.2.3`$(rm -rf /)" "workflow_dispatch targeting a tag-shaped ref embedding a `$() subexpression"
 Assert-NotEligible "workflow_dispatch" 'refs/tags/dotnet-v1.2.3"; rm -rf /' "workflow_dispatch targeting a tag-shaped ref embedding a quote and semicolon"

@@ -255,7 +255,7 @@ Assert-True (
 
 # needs/output wiring: provenance-attestation must depend on the validator and check out ONLY its output.
 Assert-True (
-    $attestationBlock -match [regex]::Escape('needs: validate-attestation-eligibility')
+    $attestationBlock -match 'needs:\s*(?:validate-attestation-eligibility|\[[^\]]*validate-attestation-eligibility[^\]]*\])'
 ) "provenance-attestation's 'needs:' includes validate-attestation-eligibility"
 Assert-True (
     $attestationBlock -match [regex]::Escape('needs.validate-attestation-eligibility.outputs.validated-sha')
@@ -346,12 +346,12 @@ Assert-True (
     $forged.Eligible
 ) "Regression proof: a validator sourced from a compromised/selected ref COULD forge an 'eligible' verdict for an otherwise-ineligible ref -- exactly the class of bug the trigger-isolation and trusted-main-checkout structural assertions above close"
 
-# --- Functional regression: manual dispatch of a real, validly-formed tag is rejected ----------------------------
+# --- Functional regression: coordinator dispatch of a release tag is eligible for deeper git/version checks -----
 . (Join-Path $PSScriptRoot "ReleaseVersionTag.ps1")
 $tagDispatchResult = Test-AttestationRefEligible -EventName "workflow_dispatch" -Ref "refs/tags/dotnet-v1.2.3"
 Assert-True (
-    -not $tagDispatchResult.Eligible
-) "Regression proof: workflow_dispatch targeting a real, validly-formed release tag is rejected -- manual dispatch is main-only, so a tag whose NAME claims one version while the packed artifact actually contains a different one can never reach attestation via this path"
+    $tagDispatchResult.Eligible
+) "Regression proof: workflow_dispatch targeting a release tag reaches the validator that independently proves real tag, exact SHA, ancestry, and package-version binding"
 
 Write-Host ""
 if ($script:AssertionFailures -gt 0) {

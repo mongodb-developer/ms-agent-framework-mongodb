@@ -22,38 +22,54 @@ jobs:
       - name: Checkout main with tags
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          ref: main
+          ref: ${{ github.sha }}
           fetch-depth: 0
+      - name: Setup .NET for canonical NuGet version parsing
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
+        with:
+          dotnet-version: 10.0.x
       - name: Validate main reachability and derive manifest tag
         id: release
         shell: pwsh
         run: |
           git fetch origin main --tags
           if ($LASTEXITCODE -ne 0) { throw 'Unable to fetch origin/main and tags.' }
-          $sha = (git rev-parse HEAD).Trim()
+          $sha = '${{ github.sha }}'
+          $headSha = (git rev-parse HEAD).Trim()
+          if ($headSha -cne $sha) { throw "Checkout resolved '$headSha', expected workflow SHA '$sha'." }
           git merge-base --is-ancestor $sha origin/main
           if ($LASTEXITCODE -ne 0) { throw "Release commit $sha is not reachable from origin/main." }
           [xml]$project = Get-Content dotnet/src/MongoDB.AgentFramework/MongoDB.AgentFramework.csproj -Raw
           $version = [string]$project.Project.PropertyGroup.Version
-          if ($version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$') {
-            throw "Manifest version '$version' is not a valid repository release SemVer."
+          $sdk = (& dotnet --list-sdks | Select-Object -Last 1)
+          if ($sdk -notmatch '^(?<version>[^\s]+)\s+\[(?<path>.+)\]$') { throw 'Unable to locate NuGet.Versioning.' }
+          Add-Type -Path (Join-Path $Matches.path "$($Matches.version)/NuGet.Versioning.dll")
+          $parsed = [NuGet.Versioning.NuGetVersion]::Parse($version)
+          $canonical = $parsed.ToNormalizedString()
+          if ($canonical -cne $version) {
+            throw "Manifest version '$version' is not canonical NuGet SemVer ('$canonical')."
           }
-          $tag = "dotnet-v$version"
+          $tag = "dotnet-v$canonical"
           git show-ref --verify --quiet "refs/tags/$tag"
           if ($LASTEXITCODE -eq 0) { throw "Tag '$tag' already exists; versions are immutable." }
           "tag=$tag" | Add-Content $env:GITHUB_OUTPUT
+          "sha=$sha" | Add-Content $env:GITHUB_OUTPUT
       - name: Create and push annotated release tag
         env:
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "$RELEASE_TAG" -m "Release MongoDB.AgentFramework ${RELEASE_TAG#dotnet-v}"
+          git tag -a "$RELEASE_TAG" "${{ steps.release.outputs.sha }}" -m "Release MongoDB.AgentFramework ${RELEASE_TAG#dotnet-v}"
           git push origin "refs/tags/$RELEASE_TAG"
-      - name: Dispatch credential-free release build on main
+      - name: Dispatch credential-free release build for the immutable release SHA
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh workflow run dotnet-sbom-provenance.yml --ref main
+          RELEASE_SHA: ${{ steps.release.outputs.sha }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: >
+          gh workflow run dotnet-sbom-provenance.yml --ref "$RELEASE_TAG"
+          -f release_sha="$RELEASE_SHA" -f release_tag="$RELEASE_TAG"
       - name: Explain non-recursive chain
         run: >
           echo "Created ${{ steps.release.outputs.tag }} and explicitly dispatched the SBOM workflow.

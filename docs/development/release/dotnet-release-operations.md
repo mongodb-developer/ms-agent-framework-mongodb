@@ -26,14 +26,18 @@ existing immutable tag, and creates the annotated `dotnet-v<version>` tag.
 Only GitHub Actions creates release tags.
 
 GitHub suppresses workflow recursion for a tag created with `GITHUB_TOKEN`.
-The coordinator therefore explicitly dispatches the credential-free SBOM
-workflow on `main`; it does not wait for a tag-push event that will never
+The coordinator captures the fixed `workflow_dispatch` `github.sha`, checks out
+and tags that exact commit, freshly fetches `origin/main`, proves the SHA is
+reachable, and dispatches the credential-free SBOM workflow on the exact tag;
+it never retargets to a later mutable `main` HEAD and does not wait for a
+tag-push event that will never
 arrive. `workflow_dispatch` is a documented `GITHUB_TOKEN` trigger exception.
 Completion raises `workflow_run`, so the privileged attestation/publish graph
 is still loaded exclusively from the default branch. That graph independently
-checks main ancestry, derives the manifest tag, proves the annotated tag points
+checks tag/SHA/main ancestry, derives the manifest tag, proves the annotated tag points
 to the validated commit, rebuilds, tests, verifies, generates SBOM/provenance,
-and only then reaches protected publication.
+and dynamically tests latest/previous common stable Agent Framework versions
+for that exact release SHA before protected publication.
 
 ## Actions configuration
 
@@ -42,9 +46,11 @@ Configure repository variables:
 | Name | Meaning |
 | --- | --- |
 | `NUGET_ENVIRONMENT` | Required protected GitHub Environment name; the publish job is skipped when absent. |
-| `NUGET_SOURCE_URL` | NuGet V3 push/restore source. If absent, the workflow defaults to the official `https://api.nuget.org/v3/index.json`. |
+| `NUGET_PUBLISHING_APPROVED` | Must be exactly `true` before publication is enabled. Governance owners set it only after ADR 0013 is accepted; all other values keep publishing disabled. |
+| `NUGET_SOURCE_URL` | Must be exactly the official `https://api.nuget.org/v3/index.json`; the workflow rejects every other URL before exposing the API key. |
 
-Configure `NUGET_API_KEY` only as a secret in the environment named by
+ADR 0013 is currently proposed, so `NUGET_PUBLISHING_APPROVED` MUST remain
+unset/false. Configure `NUGET_API_KEY` only as a secret in the environment named by
 `NUGET_ENVIRONMENT`. Use a package-scoped key. Require reviewers and restrict
 the environment to `main`/release tags. The environment approval is mandatory
 before the publish job receives the key. The workflow does not accept

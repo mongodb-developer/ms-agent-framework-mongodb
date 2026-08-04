@@ -82,7 +82,7 @@ if ($null -eq $candidateRef) {
     exit 1
 }
 
-if ($UpstreamEventName -ceq 'push') {
+if ($candidateRef -like 'refs/tags/*') {
     # git itself forbids '..', '~', '^', ':', '?', '*', '[', '@{', and consecutive slashes inside a single ref
     # name component (see `git check-ref-format`), so $UpstreamHeadBranch -- a name that had to already exist as
     # a real git ref for GitHub to report it here -- cannot smuggle git revision-syntax metacharacters into
@@ -116,7 +116,7 @@ Write-Host "Resolved and verified attestation ref: $candidateRef"
 # from a different step id. $UpstreamHeadBranch is already independently confirmed above (for the 'push' case)
 # to be the exact, real tag name that resolves to $UpstreamHeadSha -- never merely echoed back unverified.
 if ($env:GITHUB_OUTPUT) {
-    if ($UpstreamEventName -ceq 'push') {
+    if ($candidateRef -like 'refs/tags/*') {
         Add-Content -Path $env:GITHUB_OUTPUT -Value "is-tag-push=true"
         Add-Content -Path $env:GITHUB_OUTPUT -Value "tag-name=$UpstreamHeadBranch"
     }

@@ -34,8 +34,8 @@ name: .NET package SBOM (credential-free verification)
 # runs the faster pack+allowlist+metadata-only path, since dotnet-quality.yml already runs the full script for
 # those triggers. It also asserts, for a tag push only, that the packed .nuspec's <version> exactly matches
 # `dotnet-v<version>` for the triggering tag (dotnet/scripts/verify-release-tag.ps1) before anything is uploaded
-# -- a manual workflow_dispatch instead only records the packed version, since there is no tag to validate
-# against in that mode. This job requires no secrets and no elevated permissions beyond `contents: read`, so it
+# -- a main-branch manual workflow_dispatch only records the version, while a coordinator dispatch against an
+# immutable release tag enforces the same exact tag/package match as a tag push. This job requires no secrets and no elevated permissions beyond `contents: read`, so it
 # is safe to run on every pull request, including from forks. Note that a SUCCESSFUL run of this job here --
 # regardless of which ref/event triggered it, including an untrusted fork's pull_request -- fires a
 # `workflow_run` event; `dotnet-release-attestation.yml` independently re-validates (using its own,
@@ -52,6 +52,15 @@ on:
     tags:
       - "dotnet-v*"
   workflow_dispatch:
+    inputs:
+      release_sha:
+        description: Immutable main-reachable commit to build; supplied only by the release coordinator
+        required: false
+        type: string
+      release_tag:
+        description: Matching immutable dotnet-v tag; supplied only by the release coordinator
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -65,6 +74,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ inputs.release_sha || github.sha }}
 
       - name: Setup .NET
         uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
@@ -141,7 +152,9 @@ jobs:
       # See dotnet/scripts/verify-release-tag.ps1/ReleaseVersionTag.ps1 for the pure comparison logic and
       # dotnet/scripts/verify-release-tag.tests.ps1 for its match/mismatch/pre-release self-test.
       - name: Verify tag matches package version (dotnet-v* tag push)
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/dotnet-v')
+        if: >-
+          startsWith(github.ref, 'refs/tags/dotnet-v') &&
+          (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
         shell: pwsh
         working-directory: dotnet
         env:
@@ -153,10 +166,9 @@ jobs:
           $nupkg = Get-ChildItem artifacts/packages -Filter *.nupkg | Select-Object -First 1 -ExpandProperty FullName
           ./scripts/verify-release-tag.ps1 -NupkgPath $nupkg -RefName $env:RELEASE_TAG -EnforceMatch
 
-      # A manual workflow_dispatch run has no tag to validate a package version against -- this step only
-      # records/prints the packed version and the ref this run happened on; it never fails for a "mismatch".
-      - name: Record package version for this run (workflow_dispatch, no tag to match)
-        if: github.event_name == 'workflow_dispatch'
+      # A main-branch manual workflow_dispatch has no tag; coordinator tag dispatches use the enforced step above.
+      - name: Record package version for this run (main workflow_dispatch, no tag to match)
+        if: github.event_name == 'workflow_dispatch' && !startsWith(github.ref, 'refs/tags/')
         shell: pwsh
         working-directory: dotnet
         env:

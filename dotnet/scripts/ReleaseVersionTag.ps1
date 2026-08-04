@@ -143,17 +143,10 @@ function Test-ValidReleaseTagGrammar {
         additionally gated, before this function is even reached, by the `sbom` job's own "Verify tag matches
         package version" step, which fails the whole run if the packed `.nuspec`'s `<version>` does not exactly
         equal the pushed tag's version.
-      - A `workflow_dispatch` event is only ever eligible for EXACTLY `refs/heads/main` (the one branch this
-        repository's ordinary branch-protection rules are expected to guard) -- NEVER a release tag, even one
-        with otherwise-valid grammar, and never an arbitrary feature/topic branch. Manual dispatch is
-        deliberately restricted to `main` only rather than also accepting a tag ref, because there is no
-        equivalent trusted tag/package-version match check performed for a manual dispatch the way there is for
-        a `push` (the "Verify tag matches package version" step above only ever runs `if: github.event_name ==
-        'push'`): allowing `workflow_dispatch` against an arbitrary existing tag would let an operator attest a
-        tag whose name claims one version (e.g. `dotnet-v1.2.3`) while the packed artifact actually contains a
-        different one (e.g. `0.1.0-preview.1`), with nothing in this function or the workflow catching that
-        mismatch. Restricting manual attestation to `main` only is the simplest policy that avoids this gap
-        entirely, since `main` has no "package version" of its own to mismatch against.
+      - A `workflow_dispatch` event is eligible for exactly `refs/heads/main` or a valid
+        `refs/tags/dotnet-v<version>` candidate. The latter is the release coordinator path: the caller must
+        independently prove the tag exists, resolves to the event's exact head SHA, is reachable from main, and
+        matches the freshly rebuilt package version. Arbitrary feature/topic branches remain ineligible.
       - Every other event (`pull_request`, or anything else) is never eligible; a fork pull_request can never
         reach this function with a `push`/`workflow_dispatch` event name in the first place, since this job's
         own `if:` condition already restricts to those two events, but this function still fails closed on
@@ -202,6 +195,12 @@ function Test-AttestationRefEligible {
     }
 
     if ($EventName -ceq 'workflow_dispatch') {
+        if ($Ref -cmatch $releaseTagRefPattern) {
+            return [pscustomobject]@{
+                Eligible = $true
+                Reason   = "workflow_dispatch targeting a real release tag candidate; the workflow_run validator must prove the tag exists, matches the claimed commit, and matches the manifest"
+            }
+        }
         if ($Ref -ceq 'refs/heads/main') {
             return [pscustomobject]@{
                 Eligible = $true
@@ -209,12 +208,6 @@ function Test-AttestationRefEligible {
             }
         }
 
-        # Deliberately NOT eligible even for a ref that matches the release-tag grammar: unlike a `push` of a
-        # tag (gated by the `sbom` job's "Verify tag matches package version" step before this function is ever
-        # reached), a manual `workflow_dispatch` against an existing tag has no equivalent trusted check that the
-        # tag's claimed version actually matches the packed artifact's real version. Restricting manual dispatch
-        # to `main` only closes that gap entirely rather than requiring a second, parallel version-match check
-        # for this path.
         return [pscustomobject]@{
             Eligible = $false
             Reason   = "workflow_dispatch targeting ref '$Ref', which is not 'refs/heads/main' -- manual dispatch is restricted to main only (even a validly-formed release tag is refused here, since a manual run has no trusted tag/package-version match check) -- refusing to attest for an arbitrary selected ref"
@@ -274,9 +267,8 @@ function Test-AttestationRefEligible {
     prefix).
 
 .OUTPUTS
-    [string] `refs/tags/<UpstreamHeadBranch>` for a `push` upstream event, `refs/heads/<UpstreamHeadBranch>` for
-    a `workflow_dispatch` upstream event, or `$null` for any other upstream event (e.g. `pull_request`) -- which
-    the caller must treat as "never eligible", the same catch-all Test-AttestationRefEligible itself applies.
+    [string] `refs/tags/<UpstreamHeadBranch>` for a push or release-tag workflow_dispatch,
+    `refs/heads/<UpstreamHeadBranch>` for other workflow_dispatch events, or `$null` for any other event.
 #>
 function Resolve-WorkflowRunAttestationRef {
     [CmdletBinding()]
@@ -290,6 +282,9 @@ function Resolve-WorkflowRunAttestationRef {
     }
 
     if ($UpstreamEventName -ceq 'workflow_dispatch') {
+        if (Test-ValidReleaseTagGrammar -RefName $UpstreamHeadBranch) {
+            return "refs/tags/$UpstreamHeadBranch"
+        }
         return "refs/heads/$UpstreamHeadBranch"
     }
 
