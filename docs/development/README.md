@@ -62,6 +62,10 @@ This documentation explains the implemented system at the code level. The
 - [.NET TLS and network-access requirements](observability-security/dotnet-tls.md)
 - [Python observability and security](operations/python-observability-security.md)
 
+## Local development
+
+- [Local build, installation, and testing](operations/local-build-install-test.md)
+
 ## Release Engineering
 
 - [.NET packaging and release engineering](release/dotnet-packaging-release.md)
