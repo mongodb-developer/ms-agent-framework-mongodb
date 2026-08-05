@@ -96,6 +96,9 @@ the documented local rehearsals never publish.
 
 This repository is maintained under [`mongo/ms-agent-framework-mongodb`](https://github.com/mongo/ms-agent-framework-mongodb). See [implementation specifications](https://github.com/mongo/ms-agent-framework-mongodb/blob/main/docs/spec/README.md), the [implementation map](https://github.com/mongo/ms-agent-framework-mongodb/blob/main/docs/spec/implementation-map.md), [architectural decisions](https://github.com/mongo/ms-agent-framework-mongodb/blob/main/docs/decisions/README.md), and [contribution requirements](https://github.com/mongo/ms-agent-framework-mongodb/blob/main/CONTRIBUTING.md).
 
+To build, install, and test both packages without publishing, follow the
+[local build, installation, and testing guide](docs/development/operations/local-build-install-test.md).
+
 Implemented provider guides:
 
 - [Python Chat History](https://github.com/mongo/ms-agent-framework-mongodb/blob/main/docs/development/history/python-history.md)
