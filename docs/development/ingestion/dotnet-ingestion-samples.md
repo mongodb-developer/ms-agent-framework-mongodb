@@ -294,17 +294,18 @@ The runnable samples are `dotnet/samples/IncrementalIngestionQuickstart`
 (four sequential runs: new/unchanged/changed+stale-deleted reconciliation for
 one source, then a "Run 4" demonstrating `SourceManifestReconciler` tombstoning
 a second source once it is omitted from a subsequent "currently known
-sources" manifest, then explicit bounded cleanup) and
+sources" manifest, then explicit bounded cleanup; `--keep-data` runs only the
+non-deleting new/unchanged path and retains its records) and
 `dotnet/samples/ParentDocumentRAGQuickstart` (parent-document ingestion,
-child-chunk search + parent hydration, then explicit cleanup of both data and
-the index). **Neither sample accepts a user-supplied Vector Search index
+child-chunk search + parent hydration, then explicit data cleanup unless
+`--keep-data` is passed). **Neither sample accepts a user-supplied Vector Search index
 name**: each always generates its own unique, sample-prefixed name (e.g.
 `agent_framework_sample_incr_<guid>` / `agent_framework_sample_pd_<guid>`) at
 startup, checks whether that generated name happens to already exist (via
 `MongoDBRAGIndexManager.GetVectorSearchIndexAsync`), provisions it via
 `EnsureVectorSearchIndexAsync(waitUntilReady: true, timeout: 3 minutes)` only
-if absent, and tracks whether *this run* created it. The `finally` block drops
-the index only when this run created it -- never an arbitrary, pre-existing,
+if absent, and tracks whether *this run* created it. The `finally` block always
+drops the index only when this run created it -- never an arbitrary, pre-existing,
 or externally configured index. (The `MONGODB_INGESTION_COLLECTION` env var
 remains configurable, since a collection is not a "created/managed resource"
 the same way an index is -- MongoDB implicitly creates collections on first

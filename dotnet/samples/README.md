@@ -4,11 +4,43 @@ These projects complement the existing quickstarts under `dotnet/samples`. Each 
 
 | Sample | Feature | Writes | Cleanup |
 | --- | --- | --- | --- |
+| `MemoryQuickstart` | semantic Memory | one scoped Memory message and explicit index ensure | retains its message, collection, and index |
 | `OnDemandRetrievalTool` | query-text-only AI tool over application-owned retrieval policy | none | none |
 | `WorkflowRetrieval` | deterministic direct retrieval inside an Agent Framework workflow step | none | none |
 | `MemoryAndRAG` | one agent combining conversational Memory and authoritative RAG | scoped Memory writes only | clears only the configured Memory session unless `--keep` |
 | `StructuredMetadataRetrieval` | typed structured-output plan translated to `MongoDBRAGFilter` | none | none |
 | `MongoDBDocumentLoader` | bounded MongoDB source paging into an ingestion-neutral document | none | none |
+| `IncrementalIngestionQuickstart` | incremental chunk ingestion | scoped chunk writes | deletes sample chunks unless `--keep-data`; always drops its temporary index |
+| `ParentDocumentRAGQuickstart` | parent-document retrieval | scoped parent and child writes | deletes sample chunks unless `--keep-data`; always drops its temporary index |
+
+## Memory quickstart
+
+Set `MONGODB_URI`, `MONGODB_DATABASE`, and optionally
+`MONGODB_MEMORY_COLLECTION`, then run:
+
+```powershell
+dotnet run --project samples\MemoryQuickstart\MemoryQuickstart.csproj
+```
+
+The first write creates a fresh collection before index provisioning. The
+sample then bounded-polls for Atlas indexing lag and prints `I prefer blue.`;
+failure to recall the stored message is a timeout error, not a successful empty
+result. The stored message, collection, and index remain for inspection.
+
+## Retained ingestion runs
+
+Set `MONGODB_URI`, `MONGODB_DATABASE`, and optionally
+`MONGODB_INGESTION_COLLECTION`. Use `--keep-data` to retain sample records:
+
+```powershell
+dotnet run --project samples\IncrementalIngestionQuickstart\IncrementalIngestionQuickstart.csproj -- --keep-data
+dotnet run --project samples\ParentDocumentRAGQuickstart\ParentDocumentRAGQuickstart.csproj -- --keep-data
+```
+
+For incremental ingestion, `--keep-data` also skips the changed/stale and
+manifest-reconciliation demonstrations because those flows intentionally
+delete records. Both samples still drop only the temporary generated Vector
+Search index that their own run created.
 
 ## On-demand retrieval tool
 

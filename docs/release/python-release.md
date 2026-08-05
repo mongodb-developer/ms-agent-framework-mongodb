@@ -3,14 +3,16 @@
 This runbook applies only to `agent-framework-mongodb`. The shared
 [version-control and release strategy](../development/release/version-control-and-release-strategy.md)
 is authoritative; the [Python packaging design](../development/release/python-packaging.md)
-explains the implementation.
+explains the implementation. Repository administrators must first apply the
+[GitHub repository configuration](github-repository-configuration.md).
 
 ## Promotion and version preparation
 
 1. Develop and prove packaging changes on `build/python-packaging-release`.
    Every relevant push automatically runs Python quality/full credential-free
    coverage, Ruff, MyPy, Pyright, API/package/clean-install checks, canonical
-   version readiness, latest/previous stable compatibility, CodeQL, credential
+   version readiness, up to the latest two supported stable compatibility
+   rows, CodeQL, credential
    scanning, and dependency vulnerability audit. This staging branch cannot
    tag or publish.
 2. Change the static `project.version` in `python/pyproject.toml` and the
@@ -93,7 +95,8 @@ deployment never uploads to PyPI. Manual dispatch additionally requires
 `Python Agent Framework compatibility` runs on relevant pull requests, pushes
 to `main` and the Python build branch, and weekly. Its default gate asks the
 official PyPI JSON API for the latest non-yanked stable
-`agent-framework-core` version and the immediately previous stable version.
+`agent-framework-core` version and, when another stable release is inside the
+declared supported range, the immediately previous supported stable version.
 Versions are ordered with `packaging.version.Version`; releases with no files or
 only yanked files are excluded.
 
@@ -118,11 +121,11 @@ python scripts\rehearse_release.py
 ```
 
 The command removes only `python/dist/rehearsal`, runs credential-free quality
-and coverage, dynamically resolves latest and previous stable Agent Framework
-Core from PyPI, and runs each exact version through the same isolated
-compatibility-row helper used by release CI. It then builds exactly one wheel
-and sdist, validates both, installs each local artifact in its own environment,
-and writes:
+and coverage, dynamically resolves up to the latest two supported stable Agent
+Framework Core releases from PyPI, and runs each exact version through the same
+isolated compatibility-row helper used by release CI. It then builds exactly
+one wheel and sdist, validates both, installs each local artifact in its own
+environment, and writes:
 
 - `dist/rehearsal/SHA256SUMS`;
 - `dist/rehearsal/tests.xml`;

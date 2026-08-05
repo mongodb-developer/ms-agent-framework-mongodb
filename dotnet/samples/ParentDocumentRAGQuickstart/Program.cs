@@ -16,6 +16,12 @@ string databaseName = Environment.GetEnvironmentVariable("MONGODB_DATABASE")
     ?? throw new InvalidOperationException("Set MONGODB_DATABASE.");
 string collectionName = Environment.GetEnvironmentVariable("MONGODB_INGESTION_COLLECTION")
     ?? "agent_framework_ingestion_chunks";
+bool keepData = args.Contains("--keep-data", StringComparer.Ordinal);
+string[] unknownArguments = args.Where(argument => argument != "--keep-data").ToArray();
+if (unknownArguments.Length > 0)
+{
+    throw new ArgumentException($"Unknown argument(s): {string.Join(", ", unknownArguments)}");
+}
 // The Vector Search index name is never user-supplied: it is always a freshly generated, sample-prefixed, unique
 // name for this run, so cleanup can only ever drop an index this run itself created -- never an arbitrary
 // pre-existing or user-configured index. (Unlike the index, collectionName remains configurable: MongoDB creates
@@ -70,8 +76,6 @@ var pipeline = new ParentDocumentIngestionPipeline(
 await SampleCleanupOrchestration.RunAsync(
     body: async () =>
     {
-        await provisioner.ProvisionAsync();
-
         Console.WriteLine("Ingesting one parent document plus its embedded child chunks.");
         var document = new SourceDocument(
             TenantId,
@@ -82,6 +86,8 @@ await SampleCleanupOrchestration.RunAsync(
             Url: "https://example.test/shipping-colors");
         IngestionResult result = await pipeline.IngestAsync(document);
         Console.WriteLine($"  upserted={result.ChunksUpserted} unchanged={result.ChunksUnchanged} deleted={result.ChunksDeleted}");
+
+        await provisioner.ProvisionAsync();
 
         var searchOptions = new MongoDBRAGProviderOptions
         {
@@ -112,6 +118,13 @@ await SampleCleanupOrchestration.RunAsync(
     },
     async () =>
     {
+        if (keepData)
+        {
+            Console.WriteLine();
+            Console.WriteLine("Authorized document cleanup skipped by --keep-data.");
+            return;
+        }
+
         Console.WriteLine();
         Console.WriteLine("Cleaning up this quickstart's own chunks.");
         IReadOnlyDictionary<string, string> remainingHashes = await store.GetExistingHashesAsync(TenantId, SourceId);

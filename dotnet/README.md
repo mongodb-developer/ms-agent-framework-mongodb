@@ -119,8 +119,10 @@ dotnet run --project samples\MemoryQuickstart\MemoryQuickstart.csproj
 
 The sample uses a deterministic three-dimensional demonstration embedding
 generator; replace it for production. It explicitly creates a Vector Search
-index and prints the closest stored message (or `No memory found.`). It leaves
-the configured collection intact; remove that collection when finished if it
+index after the first write has created the collection, bounded-polls for
+Atlas indexing lag, and prints the closest stored message. A timeout fails the
+sample rather than reporting an empty recall as success. It leaves the
+configured collection intact; remove that collection when finished only if it
 is dedicated to the sample. The MongoDB principal therefore needs collection
 read/write and Search index-management privileges. See the
 [.NET Memory developer guide](../docs/development/memory/dotnet-memory.md) and
@@ -607,7 +609,9 @@ Run the samples after setting `MONGODB_URI` and `MONGODB_DATABASE`:
 
 ```powershell
 dotnet run --project samples\IncrementalIngestionQuickstart\IncrementalIngestionQuickstart.csproj
+dotnet run --project samples\IncrementalIngestionQuickstart\IncrementalIngestionQuickstart.csproj -- --keep-data
 dotnet run --project samples\ParentDocumentRAGQuickstart\ParentDocumentRAGQuickstart.csproj
+dotnet run --project samples\ParentDocumentRAGQuickstart\ParentDocumentRAGQuickstart.csproj -- --keep-data
 ```
 
 Neither sample accepts a user-supplied Vector Search index name. Each generates its own unique, sample-prefixed
@@ -617,9 +621,10 @@ and tracks whether this run created it so cleanup never drops a pre-existing or 
 `IncrementalIngestionQuickstart` runs four steps against the same tenant: three sequential ingestions of one source
 (new, unchanged, changed+stale-deleted) printing upserted/unchanged/deleted counts, then a fourth run that ingests a
 second source and demonstrates `SourceManifestReconciler` tombstoning it once a subsequent manifest omits it; a
-`finally` block always cleans up both sources and drops the index only if this run created it.
+`finally` block cleans up both sources unless `--keep-data` is passed and drops the index only if this run created it.
+With `--keep-data`, the deletion-demonstration runs are also skipped so no existing tenant/source records are removed.
 `ParentDocumentRAGQuickstart` ingests a parent+child document, searches and hydrates the parent via
-`ParentDocumentRetriever`, and likewise always cleans up its own data and drops the index only if this run created
-it. Both samples require collection read/write and Search index-management privileges, and use a deterministic
+`ParentDocumentRetriever`, and cleans up its own data unless `--keep-data` is passed; it always drops the temporary
+index only if this run created it. Both samples require collection read/write and Search index-management privileges, and use a deterministic
 demonstration embedding generator; replace it for any real embedding model. See the
 [.NET Ingestion samples developer guide](../docs/development/ingestion/dotnet-ingestion-samples.md).
