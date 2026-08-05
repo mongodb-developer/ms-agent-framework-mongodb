@@ -3,6 +3,9 @@
 This is the operator guide for implementation-map
 [slice 20](../../spec/implementation-map.md). The normative policy is
 [version control and release strategy](version-control-and-release-strategy.md);
+GitHub branch rulesets, Actions settings, environments, variables, and secrets
+are defined in the
+[GitHub repository configuration](../../release/github-repository-configuration.md);
 package internals are described in
 [.NET packaging and release engineering](dotnet-packaging-release.md). The
 design follows ADRs [0004](../../decisions/0004-publish-independent-language-packages.md),

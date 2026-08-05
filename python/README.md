@@ -108,8 +108,9 @@ Run `samples\memory_quickstart.py` after setting `MONGODB_URI`,
 `MONGODB_DATABASE`, and `MONGODB_MEMORY_COLLECTION`. Replace its deterministic
 demonstration generator with a production embedding generator whose dimensions
 match the configured index. Runtime operations never provision indexes
-implicitly. The sample deletes only its scoped fixture messages; collection
-cleanup remains an administrator decision.
+implicitly. Pass `--keep` to retain its scoped fixture messages; without that
+flag the sample deletes only its own session. Collection cleanup remains an
+administrator decision.
 
 ## Chat History quickstart
 

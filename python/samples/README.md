@@ -13,7 +13,7 @@ read-only retrieval, index provisioning, and sample ingestion.
 
 | Sample | Feature | Writes | Cleanup |
 | --- | --- | --- | --- |
-| `memory_quickstart.py` | semantic Memory | scoped sample memory and explicit index ensure | clears its sample session; does not drop collection/index |
+| `memory_quickstart.py` | semantic Memory | scoped sample memory and explicit index ensure | clears its sample session unless `--keep`; does not drop collection/index |
 | `history_quickstart.py` | exact Chat History | scoped sample transcript and explicit indexes | optional targeted clear with `MONGODB_HISTORY_CLEAR=true` |
 | `rag_vector_quickstart.py` | vector ANN RAG | explicit index ensure only | no document cleanup |
 | `rag_full_text_quickstart.py` | full-text RAG | explicit index ensure only | no document cleanup |
@@ -43,12 +43,13 @@ explicit provisioning operation and also requires index privileges; production
 deployments should run provisioning separately.
 
 ```powershell
-python samples\memory_quickstart.py
+python samples\memory_quickstart.py --keep
 ```
 
 Expected output is zero or more recalled message texts. The sample stores one
-message under fixed demonstration application/user/session scopes, clears only
-that session, and never drops the collection or index.
+message under fixed demonstration application/user/session scopes. It clears
+only that session unless `--keep` is passed, and never drops the collection or
+index.
 
 ## Exact Chat History
 

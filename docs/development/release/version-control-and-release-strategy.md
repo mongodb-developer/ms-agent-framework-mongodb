@@ -5,6 +5,10 @@ This document defines the shared release contract for the Python
 build commands, compatibility matrices, and publishing workflows live on their respective
 build branches.
 
+Repository administrators must apply the
+[GitHub repository configuration](../../release/github-repository-configuration.md)
+before either package is published.
+
 ## Branch and promotion model
 
 | Branch | Purpose | Release authority |
