@@ -23,17 +23,53 @@ await using var memory = new MongoDBMemoryProvider(
             applicationId: "quickstart",
             userId: "user-123")));
 
-await memory.EnsureVectorSearchIndexAsync(waitUntilReady: true);
+var storageScope = new MongoDBMemoryScope(
+    applicationId: "quickstart",
+    userId: "user-123",
+    sessionId: "session-1");
+var retrievalScope = new MongoDBMemoryScope(applicationId: "quickstart", userId: "user-123");
 await memory.StoreAsync(
     [new ChatMessage(ChatRole.User, "I prefer blue.")],
-    new MongoDBMemoryScope(
-        applicationId: "quickstart",
-        userId: "user-123",
-        sessionId: "session-1"));
-IReadOnlyList<MongoDBMemorySearchResult> results = await memory.SearchAsync(
-    "What color do I prefer?",
-    new MongoDBMemoryScope(applicationId: "quickstart", userId: "user-123"));
-Console.WriteLine(results.FirstOrDefault()?.Message.Text ?? "No memory found.");
+    storageScope);
+await memory.EnsureVectorSearchIndexAsync(waitUntilReady: true);
+IReadOnlyList<MongoDBMemorySearchResult> results = await PollUntilSearchableAsync(
+    memory,
+    "blue preference",
+    retrievalScope,
+    timeout: TimeSpan.FromSeconds(30),
+    pollInterval: TimeSpan.FromSeconds(1));
+Console.WriteLine(results[0].Message.Text);
+
+static async Task<IReadOnlyList<MongoDBMemorySearchResult>> PollUntilSearchableAsync(
+    MongoDBMemoryProvider memory,
+    string query,
+    MongoDBMemoryScope scope,
+    TimeSpan timeout,
+    TimeSpan pollInterval)
+{
+    using var cts = new CancellationTokenSource(timeout);
+    try
+    {
+        while (true)
+        {
+            IReadOnlyList<MongoDBMemorySearchResult> results = await memory.SearchAsync(
+                query,
+                scope,
+                exact: true,
+                cancellationToken: cts.Token);
+            if (results.Count > 0)
+            {
+                return results;
+            }
+
+            await Task.Delay(pollInterval, cts.Token);
+        }
+    }
+    catch (OperationCanceledException) when (cts.IsCancellationRequested)
+    {
+        throw new TimeoutException("The stored memory did not become searchable within the bounded wait.");
+    }
+}
 
 sealed class SampleEmbeddingGenerator :
     IEmbeddingGenerator<string, Embedding<float>>
