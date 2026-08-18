@@ -21,3 +21,4 @@ artifacts/
 .release-smoke-*/
 .published-smoke-*/
 published/
+python/samples/.env

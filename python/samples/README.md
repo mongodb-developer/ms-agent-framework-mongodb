@@ -11,6 +11,32 @@ required environment variables before contacting MongoDB. Use unique
 sample-prefixed scopes and separate identities for runtime persistence,
 read-only retrieval, index provisioning, and sample ingestion.
 
+Copy `samples\.env.example` to `samples\.env` and enter credentials only in
+the ignored `.env` file. The template contains every variable used by these
+samples; blank values require deployment-specific credentials or embedding
+configuration. Keep `MONGODB_INGESTION_URI` separate from the read-only runtime
+identity because ingestion can write and delete sample-owned records.
+
+Load the file into the current PowerShell process before running a sample or
+credentialed integration tests:
+
+```powershell
+Get-Content samples\.env |
+  Where-Object { $_ -match '^\s*[^#][^=]*=' } |
+  ForEach-Object {
+    $name, $value = $_ -split '=', 2
+    [Environment]::SetEnvironmentVariable($name.Trim(), $value.Trim(), 'Process')
+  }
+```
+
+Values are not loaded implicitly, so importing samples remains credential-free
+and cannot unexpectedly contact MongoDB. After loading the file, run a sample
+command below or all credentialed integration groups:
+
+```powershell
+python -m pytest -m "integration_memory or integration_history or integration_rag_vector or integration_rag_search or integration_rag_hybrid or integration_indexing or integration_persistence"
+```
+
 | Sample | Feature | Writes | Cleanup |
 | --- | --- | --- | --- |
 | `memory_quickstart.py` | semantic Memory | scoped sample memory and explicit index ensure | clears its sample session unless `--keep`; does not drop collection/index |
