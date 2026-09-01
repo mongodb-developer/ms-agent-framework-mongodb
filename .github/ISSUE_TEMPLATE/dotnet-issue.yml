@@ -1,0 +1,97 @@
+name: .NET bug report
+description: Report a bug in the .NET MongoDB provider
+title: "[.NET] Bug: "
+labels: [".NET"]
+type: bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem. Remove credentials, connection strings, user content, embeddings, and retrieved documents before submitting.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Describe the observed and expected behavior.
+      placeholder: |
+        - What happened?
+        - What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Provide the smallest code sample and steps that reproduce the issue.
+      placeholder: |
+        // Redact secrets and private data.
+        // Include provider construction and the failing operation.
+      render: csharp
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Redacted errors and logs
+      description: Include the complete exception chain and relevant logs after removing sensitive values and content.
+      render: shell
+    validations:
+      required: false
+
+  - type: input
+    id: provider-version
+    attributes:
+      label: Provider version
+      placeholder: "MongoDB.AgentFramework 1.0.0"
+    validations:
+      required: true
+
+  - type: input
+    id: dependency-versions
+    attributes:
+      label: Runtime and dependency versions
+      description: Include the .NET runtime, Microsoft Agent Framework, and MongoDB.Driver versions.
+      placeholder: ".NET 8.0; Microsoft.Agents.AI 1.x; MongoDB.Driver 3.x"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: feature
+    attributes:
+      label: Feature area
+      options:
+        - Memory
+        - Chat History
+        - RAG - vector
+        - RAG - full text
+        - RAG - hybrid
+        - Index management
+        - Session Store or Workflow Checkpoint Store
+        - Packaging, samples, or documentation
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: mongodb-environment
+    attributes:
+      label: MongoDB environment
+      description: Include deployment type, server version, driver-visible topology, search mode, and index status. Do not include hostnames or credentials.
+      placeholder: |
+        Deployment: Atlas / Enterprise / Community
+        MongoDB version:
+        Search mode: ANN / ENN / full text / hybrid / not applicable
+        Index status and queryable state:
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional context
+      description: Include cancellation, ownership, filtering, or regression details that may affect diagnosis.
+    validations:
+      required: false

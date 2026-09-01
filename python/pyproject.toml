@@ -1,0 +1,92 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agent-framework-mongodb"
+version = "0.1.0.dev0"
+description = "MongoDB integrations for Microsoft Agent Framework"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Shankar Narayanan SGS" },
+]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3 :: Only",
+    "Typing :: Typed",
+]
+dependencies = [
+    "agent-framework-core>=1.13,<2",
+    "opentelemetry-api>=1.39,<2",
+    "pymongo>=4.13,<5",
+]
+
+[project.urls]
+Source = "https://github.com/mongo/ms-agent-framework-mongodb"
+
+[project.optional-dependencies]
+dev = [
+    "build>=1.2,<2",
+    "mypy>=1.17,<2",
+    "packaging>=24,<26",
+    "pyright>=1.1.403,<2",
+    "pyyaml>=6,<7",
+    "pytest>=8.4,<9",
+    "pytest-asyncio>=1.1,<2",
+    "pytest-cov>=6.2,<7",
+    "ruff>=0.12,<1",
+    "twine>=6.1,<7",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agent_framework_mongodb"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/LICENSE",
+    "/README.md",
+    "/pyproject.toml",
+    "/src/agent_framework_mongodb",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+addopts = "--strict-config --strict-markers"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+    "integration_memory: requires a credentialed MongoDB deployment with Vector Search",
+    "integration_history: requires a credentialed MongoDB deployment",
+    "integration_rag_vector: requires a credentialed MongoDB deployment with Vector Search",
+    "integration_rag_search: requires a credentialed MongoDB deployment with Search",
+    "integration_rag_hybrid: requires a credentialed MongoDB 8.0+ deployment with Search and Vector Search",
+    "integration_indexing: requires a credentialed MongoDB deployment with Search index management",
+    "integration_persistence: requires a credentialed MongoDB deployment",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+packages = ["agent_framework_mongodb"]
+mypy_path = "src"
+
+[tool.pyright]
+include = ["src", "tests"]
+pythonVersion = "3.10"
+typeCheckingMode = "strict"
+venvPath = "."
+venv = ".venv"
