@@ -118,7 +118,7 @@ jobs:
       # regardless of what triggered the upstream `sbom` run. `fetch-depth: 0` (full history, not the default
       # shallow clone) makes `origin/main` and every tag object available locally for the checks below.
       - name: Checkout trusted main
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: main
           fetch-depth: 0
@@ -209,12 +209,12 @@ jobs:
       matrix: ${{ steps.resolve.outputs.matrix }}
     steps:
       - name: Checkout validated release commit
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.validate-attestation-eligibility.outputs.validated-sha }}
           persist-credentials: false
       - name: Setup .NET
-        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: 10.0.x
       - name: Resolve latest and previous common listed stable versions
@@ -235,12 +235,12 @@ jobs:
       contents: read
     steps:
       - name: Checkout validated release commit
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.validate-attestation-eligibility.outputs.validated-sha }}
           persist-credentials: false
       - name: Setup .NET
-        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: |
             8.0.x
@@ -279,13 +279,13 @@ jobs:
       # reachable from `origin/main`, its content is, by definition, already-reviewed/merged history -- identical
       # in trust to building any other ordinary, reviewed commit in this repository.
       - name: Checkout the validated commit
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.validate-attestation-eligibility.outputs.validated-sha }}
           persist-credentials: false
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: |
             8.0.x
@@ -309,7 +309,7 @@ jobs:
         run: ./scripts/verify-package.ps1 -Configuration Release
 
       - name: Generate release SPDX SBOM
-        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
           path: dotnet/artifacts/packages
           format: spdx-json
@@ -317,7 +317,7 @@ jobs:
           upload-artifact: false
 
       - name: Generate release CycloneDX SBOM
-        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
           path: dotnet/artifacts/packages
           format: cyclonedx-json
@@ -398,7 +398,7 @@ jobs:
       # (workflow_run guarantees this file's own content is always sourced from main).
       - name: Attest custom release provenance (binds validated commit, never the stock auto-provenance mode)
         id: attest
-        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: |
             dotnet/artifacts/packages/*.nupkg
@@ -469,7 +469,7 @@ jobs:
           pattern: release-compatibility-*
           path: compatibility-evidence
       - name: Setup .NET
-        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: 10.0.x
       - name: Validate canonical NuGet source before exposing publishing secret
