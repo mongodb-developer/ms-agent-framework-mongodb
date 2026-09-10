@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling>=1.27,<1.32"]
+requires = ["hatchling>=1.27,<1.33"]
 build-backend = "hatchling.build"
 
 [project]
@@ -34,15 +34,15 @@ Source = "https://github.com/mongo/ms-agent-framework-mongodb"
 [project.optional-dependencies]
 dev = [
     "build>=1.2,<2",
-    "mypy>=1.17,<2",
-    "packaging>=24,<26",
+    "mypy>=1.17,<3",
+    "packaging>=24,<27",
     "pyright>=1.1.403,<2",
     "pyyaml>=6,<7",
-    "pytest>=8.4,<9",
+    "pytest>=8.4,<10",
     "pytest-asyncio>=1.1,<2",
-    "pytest-cov>=6.2,<7",
+    "pytest-cov>=6.2,<8",
     "ruff>=0.12,<1",
-    "twine>=6.1,<7",
+    "twine>=6.1,<8",
 ]
 
 [tool.hatch.build.targets.wheel]
