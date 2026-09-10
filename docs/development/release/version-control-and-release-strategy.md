@@ -129,9 +129,11 @@ and an environment reviewer approves the deployment.
 
 ## Agent Framework compatibility policy
 
-Pre-release gates test the most recent stable Agent Framework version and the stable version
-immediately preceding it. This detects a too-narrow dependency declaration while keeping the
-mandatory matrix bounded. A manually dispatched compatibility workflow additionally tests:
+Pre-release gates test a bounded stable Agent Framework pair per language. Python tests the
+most recent stable `agent-framework-core` version and the stable version immediately preceding
+it. .NET tests the oldest and newest stable `Microsoft.Agents.AI.*` versions that still satisfy
+the declared package support range. A manually dispatched compatibility workflow additionally
+tests:
 
 - latest stable;
 - latest preview, when one exists;

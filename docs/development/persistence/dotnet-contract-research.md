@@ -19,7 +19,7 @@ narrower facade?
 ## Resolved version
 
 `dotnet/src/MongoDB.AgentFramework/MongoDB.AgentFramework.csproj` pins
-`Microsoft.Agents.AI.Abstractions` to the range `[1.13.0,2.0.0)`. NuGet range
+`Microsoft.Agents.AI.Abstractions` to the verified range `[1.13.0,1.17.0)`. NuGet range
 resolution (verified in `obj/project.assets.json` after `dotnet restore`)
 selects the **lowest** version satisfying an open range absent a floating
 (`1.13.*`) specifier or a higher transitive constraint elsewhere in the
