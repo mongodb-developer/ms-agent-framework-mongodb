@@ -124,7 +124,7 @@
       downgrade error once Microsoft.Agents.AI.Workflows was added. Verified stable at both compatibility-matrix
       bounds (1.13.0 and 1.16.0); see docs/development/release/dotnet-agent-framework-compatibility-matrix.md.
     -->
-    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="[10.0.9,11.0.0)" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="[10.0.12, 11.0.0)" />
     <PackageReference Include="MongoDB.Driver" Version="[3.10.0,4.0.0)" />
   </ItemGroup>
 
