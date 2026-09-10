@@ -127,6 +127,7 @@ def test_compatibility_runner_retains_failure_evidence_contract() -> None:
     assert "summary.md" in script
     assert "publishing_attempted" in script
     assert "--cov=agent_framework_mongodb" in script
+    assert '"--pythonpath", row_python' in script
     assert "finally:" in script
 
 
