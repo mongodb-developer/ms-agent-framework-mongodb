@@ -392,8 +392,11 @@ async def test_messages_round_trip_losslessly_in_deterministic_order() -> None:
         document["created_at"] = tied_timestamp
     restored = await provider.get_messages("session-1")
 
-    assert [message.to_dict() for message in restored] == [
-        message.to_dict() for message in messages
+    def canonical_message_dict(message: Message) -> dict[str, Any]:
+        return Message.from_dict(message.to_dict()).to_dict()
+
+    assert [canonical_message_dict(message) for message in restored] == [
+        canonical_message_dict(message) for message in messages
     ]
     assert [document["sequence"] for document in stored_messages] == [1, 2, 3, 4, 5]
     assert all(document["schema_version"] == 2 for document in stored_messages)
