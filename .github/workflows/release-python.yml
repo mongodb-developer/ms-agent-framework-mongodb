@@ -42,12 +42,12 @@ jobs:
         env:
           DISPATCH_REF: ${{ github.ref_name }}
         run: test "$DISPATCH_REF" = main
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # actions/checkout v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # actions/checkout v7.0.1
         with:
           ref: ${{ github.event_name == 'push' && github.sha || inputs.commit }}
           fetch-depth: 0
           persist-credentials: true
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # actions/setup-python v5
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # actions/setup-python v7.0.0
         with:
           python-version: "3.10"
       - name: Validate main ancestry, version, and release tag
@@ -86,11 +86,11 @@ jobs:
     outputs:
       matrix: ${{ steps.versions.outputs.matrix }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # actions/checkout v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # actions/checkout v7.0.1
         with:
           ref: ${{ needs.tag.outputs.sha }}
           persist-credentials: false
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # actions/setup-python v5
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # actions/setup-python v7.0.0
         with:
           python-version: "3.10"
       - name: Resolve stable compatibility versions
@@ -116,11 +116,11 @@ jobs:
       FRAMEWORK_VERSION: ${{ matrix.version }}
       REPORT_DIR: compatibility-reports/${{ matrix.label }}-${{ matrix.version }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # actions/checkout v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # actions/checkout v7.0.1
         with:
           ref: ${{ needs.tag.outputs.sha }}
           persist-credentials: false
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # actions/setup-python v5
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # actions/setup-python v7.0.0
         with:
           python-version: "3.10"
           cache: pip
@@ -134,7 +134,7 @@ jobs:
             --label "${{ matrix.label }}" \
             --channel "${{ matrix.channel }}" \
             --report-dir "$REPORT_DIR"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # actions/upload-artifact v4.6.2
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # actions/upload-artifact v7.0.1
         if: always()
         with:
           name: python-release-compatibility-${{ matrix.label }}-${{ matrix.version }}
@@ -152,12 +152,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # actions/checkout v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # actions/checkout v7.0.1
         with:
           ref: ${{ needs.tag.outputs.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # actions/setup-python v5
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # actions/setup-python v7.0.0
         with:
           python-version: "3.10"
           cache: pip
@@ -239,7 +239,7 @@ jobs:
           printf '# Release gate\n\nCommit: `%s`\n\n- Setup: **%s**\n- Gate: **%s**\n- Package: **%s**\n' \
             "$RELEASE_SHA" "$SETUP_OUTCOME" "$GATE_OUTCOME" "$PACKAGE_OUTCOME" \
             > dist/reports/release-gate.md
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # actions/upload-artifact v4.6.2
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # actions/upload-artifact v7.0.1
         if: always()
         with:
           name: python-release-${{ needs.tag.outputs.tag }}
@@ -267,7 +267,7 @@ jobs:
       attestations: write
       contents: read
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # actions/download-artifact v4.3.0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # actions/download-artifact v8.0.1
         with:
           name: python-release-${{ needs.tag.outputs.tag }}
           path: dist
@@ -341,14 +341,14 @@ jobs:
           PY
       - name: Attest exact distributions
         id: attest
-        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # actions/attest v4.2.1
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # actions/attest v4.2.2
         with:
           subject-path: |
             dist/packages/*.whl
             dist/packages/*.tar.gz
           predicate-type: https://slsa.dev/provenance/v1
           predicate-path: dist/release-provenance-predicate.json
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # actions/upload-artifact v4.6.2
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # actions/upload-artifact v7.0.1
         with:
           name: python-release-provenance-${{ needs.tag.outputs.tag }}
           path: ${{ steps.attest.outputs.bundle-path }}
@@ -372,7 +372,7 @@ jobs:
       id-token: write
       contents: read
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # actions/download-artifact v4.3.0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # actions/download-artifact v8.0.1
         with:
           name: python-release-${{ needs.tag.outputs.tag }}
           path: dist
@@ -390,14 +390,14 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # actions/checkout v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # actions/checkout v7.0.1
         with:
           ref: ${{ needs.tag.outputs.sha }}
           persist-credentials: false
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # actions/setup-python v5
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # actions/setup-python v7.0.0
         with:
           python-version: "3.10"
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # actions/download-artifact v4.3.0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # actions/download-artifact v8.0.1
         with:
           name: python-release-${{ needs.tag.outputs.tag }}
           path: dist
@@ -434,15 +434,15 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # actions/download-artifact v4.3.0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # actions/download-artifact v8.0.1
         with:
           name: python-release-${{ needs.tag.outputs.tag }}
           path: release-assets
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # actions/download-artifact v4.3.0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # actions/download-artifact v8.0.1
         with:
           name: python-release-provenance-${{ needs.tag.outputs.tag }}
           path: release-assets/provenance
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # actions/download-artifact v4.3.0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # actions/download-artifact v8.0.1
         with:
           pattern: python-release-compatibility-*
           path: compatibility
