@@ -71,7 +71,7 @@ Completion raises `workflow_run`, so the privileged attestation/publish graph
 is still loaded exclusively from the default branch. That graph independently
 checks tag/SHA/main ancestry, derives the manifest tag, proves the annotated tag points
 to the validated commit, rebuilds, tests, verifies, generates SBOM/provenance,
-and dynamically tests latest/previous common stable Agent Framework versions
+and dynamically tests minimum/newest supported stable Agent Framework versions
 for that exact release SHA before protected publication.
 
 ## Actions configuration
@@ -106,10 +106,10 @@ JSON reports, custom SLSA predicate, and GitHub attestation bundle.
 
 The package declaration remains `[1.13.0,1.17.0)`; dynamic drift results never
 widen it. `dotnet-quality.yml` queries official NuGet V3 service/registration
-APIs and tests the latest and immediately previous **common listed stable**
+APIs and tests the oldest and newest **common listed stable**
 versions of `Microsoft.Agents.AI.Abstractions` and
-`Microsoft.Agents.AI.Workflows`. NuGet's own `NuGet.Versioning` implementation
-orders versions.
+`Microsoft.Agents.AI.Workflows` that still satisfy that declared support
+range. NuGet's own `NuGet.Versioning` implementation orders versions.
 
 The **.NET Agent Framework upstream compatibility** manual workflow tests the
 latest stable, latest preview when one exists, and optional `exact_version`.
@@ -131,7 +131,7 @@ pwsh dotnet/scripts/invoke-release-rehearsal.ps1 -Configuration Release
 ```
 
 It restores, checks formatting, builds with warnings as errors, runs tests with
-TRX validation, resolves and checks current/previous stable compatibility,
+TRX validation, resolves and checks supported compatibility bounds,
 fully verifies package metadata/content/reproducibility, runs the isolated
 local-feed consumer, and writes checksums and reports under
 `dotnet/artifacts/release-rehearsal`. It contains no tag, push, or NuGet

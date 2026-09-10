@@ -8,6 +8,8 @@ param(
     [ValidateSet('StablePair', 'StableAndPreview', 'Exact', 'AllDispatch')]
     [string]$Mode = 'StablePair',
     [string]$ExactVersion,
+    [string]$SupportedVersionRange,
+    [string]$ProjectPath = 'src/MongoDB.AgentFramework/MongoDB.AgentFramework.csproj',
     [string]$OutputDirectory = "artifacts/agent-framework-version-resolution",
     [string]$GitHubOutputPath = $env:GITHUB_OUTPUT
 )
@@ -48,15 +50,36 @@ function Get-ListedPackageVersions {
     } | Select-Object -Unique)
 }
 
+function Get-ProjectAgentFrameworkVersionRange {
+    param([Parameter(Mandatory)][string]$Path)
+
+    [xml]$project = Get-Content $Path -Raw
+    $range = @($project.Project.PropertyGroup.AgentFrameworkVersion | Where-Object {
+        $null -ne $_ -and -not [string]::IsNullOrWhiteSpace($_.InnerText)
+    } | ForEach-Object { $_.InnerText.Trim() }) | Select-Object -First 1
+
+    if ([string]::IsNullOrWhiteSpace($range)) {
+        throw "Project '$Path' does not declare a default <AgentFrameworkVersion> range."
+    }
+
+    return $range
+}
+
 Import-NuGetVersioning
+$dotnetRoot = Resolve-Path (Join-Path $PSScriptRoot '..')
+$effectiveSupportedVersionRange = $SupportedVersionRange
+if ($Mode -eq 'StablePair' -and [string]::IsNullOrWhiteSpace($effectiveSupportedVersionRange)) {
+    $effectiveSupportedVersionRange = Get-ProjectAgentFrameworkVersionRange -Path (Join-Path $dotnetRoot $ProjectPath)
+}
 $registrationBase = Get-NuGetRegistrationBaseUrl
 $packageVersions = @{}
 foreach ($packageId in @('Microsoft.Agents.AI.Abstractions', 'Microsoft.Agents.AI.Workflows')) {
     $packageVersions[$packageId] = @(Get-ListedPackageVersions -RegistrationBaseUrl $registrationBase -PackageId $packageId)
 }
 
-$selection = Select-AgentFrameworkVersions -PackageVersions $packageVersions -Mode $Mode -ExactVersion $ExactVersion
-$outputPath = Join-Path (Resolve-Path (Join-Path $PSScriptRoot '..')) $OutputDirectory
+$selection = Select-AgentFrameworkVersions -PackageVersions $packageVersions -Mode $Mode -ExactVersion $ExactVersion `
+    -SupportedVersionRange $effectiveSupportedVersionRange
+$outputPath = Join-Path $dotnetRoot $OutputDirectory
 New-Item -ItemType Directory -Path $outputPath -Force | Out-Null
 
 $report = [ordered]@{
@@ -64,11 +87,25 @@ $report = [ordered]@{
     source            = 'https://api.nuget.org/v3/index.json'
     packages          = @('Microsoft.Agents.AI.Abstractions', 'Microsoft.Agents.AI.Workflows')
     mode              = $Mode
+    supportedRange    = $effectiveSupportedVersionRange
     versions          = @($selection.Versions)
+    lowerBoundStable  = $selection.LowerBoundStable
     latestStable      = $selection.LatestStable
     previousStable    = $selection.PreviousStable
     latestPreview     = $selection.LatestPreview
     previewAvailable  = $selection.PreviewAvailable
+}
+$supportedRangeText = if ([string]::IsNullOrWhiteSpace($effectiveSupportedVersionRange)) {
+    'unbounded (all common listed versions)'
+}
+else {
+    $effectiveSupportedVersionRange
+}
+if ($Mode -eq 'StablePair' -and -not [string]::IsNullOrWhiteSpace($effectiveSupportedVersionRange)) {
+    $stableSelectionText = "Supported stable selection: floor `$($selection.LowerBoundStable)`, newest `$($selection.LatestStable)`."
+}
+else {
+    $stableSelectionText = "Stable selection: latest `$($selection.LatestStable)`, previous `$($selection.PreviousStable)`."
 }
 $report | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $outputPath 'resolution.json')
 
@@ -79,8 +116,8 @@ $previewText = if ($selection.PreviewAvailable) { $selection.LatestPreview } els
 - Source: official NuGet V3 service and registration APIs
 - Packages: `Microsoft.Agents.AI.Abstractions`, `Microsoft.Agents.AI.Workflows`
 - Mode: `$Mode`
-- Latest stable: `$($selection.LatestStable)`
-- Previous stable: `$($selection.PreviousStable)`
+- Supported stable range: `$supportedRangeText`
+- $stableSelectionText
 - Latest preview: `$previewText`
 - Selected: $($selection.Versions -join ', ')
 "@ | Set-Content (Join-Path $outputPath 'resolution.md')

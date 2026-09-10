@@ -127,7 +127,7 @@ jobs:
           retention-days: 14
 
   resolve-agent-framework-versions:
-    name: Resolve latest and previous stable Agent Framework versions
+    name: Resolve minimum and newest supported stable Agent Framework versions
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -140,7 +140,7 @@ jobs:
         uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
         with:
           dotnet-version: 10.0.x
-      - name: Resolve common listed stable versions from official NuGet V3 APIs
+      - name: Resolve common listed stable matrix bounds within the declared supported range
         id: resolve
         shell: pwsh
         working-directory: dotnet
@@ -160,8 +160,9 @@ jobs:
     # Compatibility-matrix gate for docs/spec/compatibility-migration.md: MongoDB.AgentFramework.csproj and
     # MongoDB.AgentFramework.Tests.csproj both reference Microsoft.Agents.AI.Abstractions/Workflows through a
     # single $(AgentFrameworkVersion) MSBuild property that defaults to the tracked [1.13.0,1.17.0) range. This
-    # job overrides that property to the dynamically resolved latest and immediately previous common listed
-    # stable versions from official NuGet V3 APIs. This is drift evidence, not a support-range widening, and uses
+    # job overrides that property to the dynamically resolved oldest and newest common listed stable versions that
+    # still satisfy the package's declared support range. This is bound verification, not a
+    # support-range widening, and uses
     # `-p:AgentFrameworkVersion=<exact version>` on restore/build/test -- it never edits a tracked .csproj, and
     # the package's own default range is unaffected (see dotnet/scripts/verify-agent-framework-compatibility.ps1,
     # which this job runs, for the full step-by-step rationale and local-repro instructions). Credential-free:

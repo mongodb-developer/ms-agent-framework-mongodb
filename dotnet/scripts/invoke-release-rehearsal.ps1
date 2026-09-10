@@ -3,8 +3,8 @@
 .SYNOPSIS
     Runs the complete local, non-publishing MongoDB.AgentFramework release rehearsal.
 .DESCRIPTION
-    Restores, formats, builds, tests, dynamically checks current/previous Agent Framework compatibility, fully
-    verifies package metadata/content/reproducibility and the local-feed consumer, then writes reports/checksums.
+    Restores, formats, builds, tests, dynamically checks the supported-stable Agent Framework compatibility bounds,
+    fully verifies package metadata/content/reproducibility and the local-feed consumer, then writes reports/checksums.
     This script never creates or pushes a tag and never invokes NuGet publication.
 #>
 [CmdletBinding()]

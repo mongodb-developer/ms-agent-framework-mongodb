@@ -135,16 +135,18 @@ counts, not console-output heuristics.
 
 ## CI: `dotnet-agent-framework-compat`
 
-`.github/workflows/dotnet-quality.yml` first resolves the latest and immediately
-previous common listed stable versions from the official NuGet V3 registration
-APIs, then runs a `dotnet-agent-framework-compat` matrix invoking the same
+`.github/workflows/dotnet-quality.yml` first resolves the oldest and newest
+common listed stable versions from the official NuGet V3 registration APIs that
+still satisfy the package's declared `[1.13.0,1.17.0)` support range, then
+runs a `dotnet-agent-framework-compat` matrix invoking the same
 `verify-agent-framework-compatibility.ps1` script with
 `-Configuration Release -Versions "<exact version>"`. It is a separate job
 (not an extra `dotnet-quality` matrix dimension) because it re-restores/
 re-builds against a genuinely different dependency version per entry, rather
 than exercising the `dotnet-quality` job's own OS/tooling variance. It
 requires no secrets and runs on every pull request, including from forks. This
-is upstream drift evidence and does not silently widen `[1.13.0,1.17.0)`.
+verifies the declared support bounds and does not silently widen
+`[1.13.0,1.17.0)`.
 
 The manual/scheduled `dotnet-agent-framework-compatibility.yml` workflow tests
 latest stable, latest preview if one exists, and an optional exact common

@@ -37,7 +37,8 @@ function Select-AgentFrameworkVersions {
         [Parameter(Mandatory)][hashtable]$PackageVersions,
         [ValidateSet('StablePair', 'StableAndPreview', 'Exact', 'AllDispatch')]
         [string]$Mode,
-        [string]$ExactVersion
+        [string]$ExactVersion,
+        [string]$SupportedVersionRange
     )
 
     $packageIds = @('Microsoft.Agents.AI.Abstractions', 'Microsoft.Agents.AI.Workflows')
@@ -66,13 +67,29 @@ function Select-AgentFrameworkVersions {
         throw "No common listed stable Agent Framework version exists."
     }
 
+    $selectSupportedBounds = $Mode -eq 'StablePair' -and -not [string]::IsNullOrWhiteSpace($SupportedVersionRange)
+    if ($selectSupportedBounds) {
+        $supportedRange = [NuGet.Versioning.VersionRange]::Parse($SupportedVersionRange)
+        $stable = @($stable | Where-Object {
+            $supportedRange.Satisfies([NuGet.Versioning.NuGetVersion]::Parse($_))
+        })
+        if ($stable.Count -eq 0) {
+            throw "No common listed stable Agent Framework version satisfies supported range '$SupportedVersionRange'."
+        }
+    }
+
     $selected = [System.Collections.Generic.List[string]]::new()
     if ($Mode -in @('StablePair', 'StableAndPreview', 'AllDispatch')) {
         if ($Mode -eq 'StablePair' -and $stable.Count -lt 2) {
-            throw "At least two common listed stable versions are required for the latest/previous gate."
+            throw "At least two common listed stable versions are required for the selected stable-pair gate."
         }
         if ($Mode -eq 'StablePair') {
-            $selected.Add($stable[-2])
+            if ($selectSupportedBounds) {
+                $selected.Add($stable[0])
+            }
+            else {
+                $selected.Add($stable[-2])
+            }
         }
         $selected.Add($stable[-1])
     }
@@ -96,8 +113,9 @@ function Select-AgentFrameworkVersions {
 
     return [pscustomobject]@{
         Versions         = @($selected | Select-Object -Unique)
+        LowerBoundStable = if ($selectSupportedBounds) { $stable[0] } else { $null }
         LatestStable     = $stable[-1]
-        PreviousStable   = if ($stable.Count -gt 1) { $stable[-2] } else { $null }
+        PreviousStable   = if ($stable.Count -gt 1 -and -not $selectSupportedBounds) { $stable[-2] } else { $null }
         LatestPreview    = if ($preview.Count -gt 0) { $preview[-1] } else { $null }
         PreviewAvailable = ($preview.Count -gt 0)
     }

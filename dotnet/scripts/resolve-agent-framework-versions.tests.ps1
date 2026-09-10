@@ -17,6 +17,23 @@ $versions = @{
 $stable = Select-AgentFrameworkVersions -PackageVersions $versions -Mode StablePair
 Assert-True (($stable.Versions -join ',') -eq '1.0.0,1.1.0') 'StablePair selects previous and latest common stable versions'
 
+$rangeBoundedVersions = @{
+    'Microsoft.Agents.AI.Abstractions' = @('1.0.0', '1.1.0', '1.2.0', '1.3.0')
+    'Microsoft.Agents.AI.Workflows' = @('1.0.0', '1.1.0', '1.2.0', '1.3.0')
+}
+$boundedStable = Select-AgentFrameworkVersions -PackageVersions $rangeBoundedVersions -Mode StablePair `
+    -SupportedVersionRange '[1.0.0,1.3.0)'
+Assert-True (($boundedStable.Versions -join ',') -eq '1.0.0,1.2.0') `
+    'StablePair filters to the supported range before selecting its oldest and newest stable bounds'
+
+$threw = $false
+try {
+    Select-AgentFrameworkVersions -PackageVersions $rangeBoundedVersions -Mode StablePair `
+        -SupportedVersionRange '[1.2.0,1.3.0)' | Out-Null
+}
+catch { $threw = $true }
+Assert-True $threw 'StablePair fails closed when the supported range contains fewer than two common stable versions'
+
 $dispatch = Select-AgentFrameworkVersions -PackageVersions $versions -Mode AllDispatch -ExactVersion '1.0.0'
 Assert-True (($dispatch.Versions -join ',') -eq '1.1.0,1.2.0-preview.1,1.0.0') 'Dispatch selects latest stable, preview, and optional exact without substitution'
 
