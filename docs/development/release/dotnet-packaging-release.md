@@ -299,15 +299,16 @@ entry (wrong multiplicity) fails it too.
 
 `dotnet/scripts/verify-package.allowlist.tests.ps1` is a self-test for
 `Test-PackageContentAllowlist` itself, run directly (no packed artifact
-needed) against six deliberately-broken fixtures: a valid entry set (must
-pass), a required file removed (must fail as Missing), an extra/unexpected
-file added (must fail as Unexpected), a required entry duplicated (must fail
-as MultiplicityMismatch, proving multiplicity is actually checked, not just
-set membership), two different pack runs' random `psmdcp` GUIDs (both must
-still pass, proving GUID normalization works), and a malformed
-`core-properties` filename that is not a real 32-hex-digit GUID (must fail,
-proving normalization does not silently wave through anything under
-`core-properties/`).
+needed) against six deliberately-broken fixtures: valid entry sets using both
+accepted `psmdcp` filename shapes (a GUID-shaped filename and the fixed
+`nuget.psmdcp` filename; both must pass), a required file removed (must fail
+as Missing), an extra/unexpected file added (must fail as Unexpected), a
+required entry duplicated (must fail as MultiplicityMismatch, proving
+multiplicity is actually checked, not just set membership), multiple valid
+pack runs using both accepted `psmdcp` filename shapes (all must still pass,
+proving normalization works), and a malformed `core-properties` filename that
+matches neither accepted shape (must fail, proving normalization does not
+silently wave through anything under `core-properties/`).
 
 ## Clean, isolated consumer smoke test
 
@@ -720,12 +721,14 @@ recorded output.
   [net8.0/net9.0/net10.0], each constructing all public-API surfaces
   including all four `MongoDBSearchMode` values (`VectorAnn`/`VectorEnn`/
   `FullText`/`HybridRrf`); checksum manifest -- all steps passed).
-- `dotnet/scripts/verify-package.allowlist.tests.ps1` (self-test: 17
-  assertions across 6 fixtures -- valid entries pass; a missing required
+- `dotnet/scripts/verify-package.allowlist.tests.ps1` (self-test: 19
+  assertions across 6 fixtures -- valid entries pass for both the
+  GUID-shaped and literal `nuget.psmdcp` core-properties filenames; a missing required
   file, an unexpected extra file, and a duplicated entry each fail with the
   correct classification [`Missing`/`Unexpected`/`MultiplicityMismatch`];
-  two independently random `psmdcp` GUIDs both normalize and pass; a
-  malformed non-GUID `psmdcp` filename fails -- all 17 passed).
+  two independently random `psmdcp` GUIDs and the literal `nuget.psmdcp`
+  filename all normalize and pass; a malformed unsupported `psmdcp` filename
+  fails -- all 19 passed).
 - `dotnet/scripts/verify-package.metadata.tests.ps1` (self-test: 33+
   assertions -- `Test-NuspecAssertion`'s contract for `$true`/`$false`
   [without throwing, the shape of the original bug]/thrown/non-boolean/

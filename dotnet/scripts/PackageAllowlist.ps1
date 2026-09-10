@@ -18,21 +18,20 @@
     wrong count (including one that IS expected but appears more than once).
 #>
 
-# The OPC core-properties part filename is a fresh random 32-hex-digit GUID on every `dotnet pack` invocation
-# (NuGet.Client's own OPC-packaging behavior; see verify-package.ps1's reproducibility step for the empirical
-# proof that this is independent of build determinism). Exactly one such part is expected in both packages, so
-# it is normalized to a fixed placeholder token before the exact-match comparison below, which otherwise would
-# spuriously fail every single run on that GUID alone. Any filename under core-properties/ that does NOT match
-# the real 32-hex-digit GUID shape is intentionally left un-normalized, so a malformed or unexpected
-# core-properties filename still shows up as its own missing/unexpected entry rather than being silently waved
-# through.
+# NuGet's OPC core-properties part filename is an implementation detail rather than a compatibility surface: the
+# current toolchain can emit either a fresh random 32-hex-digit GUID filename or the fixed literal
+# `package/services/metadata/core-properties/nuget.psmdcp`. Exactly one such part is expected in both packages, so
+# the two accepted shapes are normalized to a fixed placeholder token before the exact-match comparison below. Any
+# filename under core-properties/ that matches neither accepted shape is intentionally left un-normalized, so a
+# malformed or unexpected core-properties filename still shows up as its own missing/unexpected entry rather than
+# being silently waved through.
 function Get-NormalizedPackageEntryName {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$Name
     )
 
-    return $Name -replace '(^package/services/metadata/core-properties/)[0-9a-fA-F]{32}(\.psmdcp$)', '$1{guid}$2'
+    return $Name -replace '(^package/services/metadata/core-properties/)(?:[0-9a-fA-F]{32}|nuget)(\.psmdcp$)', '$1{core-properties}$2'
 }
 
 # The exact, normalized set of entries MongoDB.AgentFramework.<version>.nupkg must contain -- no more, no fewer,
@@ -41,7 +40,7 @@ function Get-NormalizedPackageEntryName {
 $script:NupkgExpectedEntries = @(
     '_rels/.rels'
     '[Content_Types].xml'
-    'package/services/metadata/core-properties/{guid}.psmdcp'
+    'package/services/metadata/core-properties/{core-properties}.psmdcp'
     'MongoDB.AgentFramework.nuspec'
     'README.md'
     'lib/net8.0/MongoDB.AgentFramework.dll'
@@ -58,7 +57,7 @@ $script:NupkgExpectedEntries = @(
 $script:SnupkgExpectedEntries = @(
     '_rels/.rels'
     '[Content_Types].xml'
-    'package/services/metadata/core-properties/{guid}.psmdcp'
+    'package/services/metadata/core-properties/{core-properties}.psmdcp'
     'MongoDB.AgentFramework.nuspec'
     'lib/net8.0/MongoDB.AgentFramework.pdb'
     'lib/net9.0/MongoDB.AgentFramework.pdb'
