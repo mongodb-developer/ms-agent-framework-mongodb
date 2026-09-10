@@ -1,0 +1,90 @@
+name: Feature Request
+description: Propose a feature for the MongoDB Agent Framework providers
+title: "[Feature]: "
+type: feature
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check the project requirements, non-goals, and proposed ADRs before filing. Hard-to-reverse architecture or public schema changes require an ADR.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem and scenario
+      description: Describe the user problem and concrete scenario without prescribing an implementation.
+      placeholder: |
+        Who needs this?
+        What are they trying to accomplish?
+        What prevents them from doing it today?
+    validations:
+      required: true
+
+  - type: dropdown
+    id: feature
+    attributes:
+      label: Feature area
+      options:
+        - Memory
+        - Chat History
+        - RAG
+        - Index management
+        - Session Store
+        - Workflow Checkpoint Store
+        - Shared infrastructure
+        - Packaging, samples, or documentation
+        - New or unclear boundary
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed-behavior
+    attributes:
+      label: Proposed behavior or API
+      description: Show the expected observable behavior and an optional minimal API sketch.
+      placeholder: |
+        Describe inputs, outputs, failure behavior, and lifecycle effects.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: language
+    attributes:
+      label: Language/SDK
+      description: Which language/SDK does this feature apply to?
+      options:
+        - Both
+        - .NET
+        - Python
+        - Other / Not Applicable
+      default: 0
+    validations:
+      required: true
+
+  - type: textarea
+    id: security-lifecycle
+    attributes:
+      label: Security, data, and lifecycle impact
+      description: Explain tenant filtering, reads/writes, resource ownership, retention/deletion, logging/privacy, cancellation, and index effects.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and compatibility
+      description: List alternatives, compatibility or migration impact, and any related requirement or ADR.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Scope checks
+      options:
+        - label: I reviewed the requirements and non-goals.
+          required: true
+        - label: I am not proposing model-controlled raw BSON, filters, operators, field paths, index names, or aggregation pipelines.
+          required: true
+        - label: I described whether equivalent Python and .NET behavior is expected.
+          required: true

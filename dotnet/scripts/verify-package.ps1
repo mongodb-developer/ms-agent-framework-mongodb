@@ -1,0 +1,385 @@
+#Requires -Version 7.0
+<#
+.SYNOPSIS
+    Verifies the packed MongoDB.AgentFramework NuGet artifact end to end, without publishing anything.
+
+.DESCRIPTION
+    Orchestrates every packaging validation this repository can run without owner publishing credentials or a
+    live MongoDB deployment (docs/spec/quality-release.md, docs/spec/packages.md):
+
+      1. Packs MongoDB.AgentFramework.csproj (Release, deterministic/CI mode).
+      2. Checks the produced .nupkg/.snupkg contents against an explicit allowlist -- proving no sample, test, or
+         internal implementation file leaks into the shipped artifact.
+      3. Asserts the embedded .nuspec metadata (id, version, authors, license, readme, project/repository URLs,
+         description, release notes, copyright, tags) is present and well-formed.
+      4. Packs a second time from a clean build and compares the two artifacts. `dotnet pack` regenerates two OPC
+         wrapper identifiers on every invocation that never reflect package *content* -- the
+         `package/services/metadata/core-properties/*.psmdcp` part's random GUID file name, and `_rels/.rels`'s
+         `Relationship Id="R..."` attributes (and its `Target` reference to that GUID file name) -- so only those
+         specific generated-identifier substrings are normalized to a fixed placeholder before comparing. Every
+         entry's resulting (normalized) bytes must then be identical across the two packs, including the full
+         content of `_rels/.rels` and every `*.psmdcp` entry, not merely their presence: a genuine content
+         difference inside either file (e.g. a wrong embedded creator/identifier, or a relationship pointing at
+         the wrong target) still fails this check exactly like a real payload (dll/xml/nuspec/README) difference
+         would. See dotnet/scripts/PackageReproducibility.ps1 and
+         dotnet/scripts/verify-package.reproducibility.tests.ps1 for the pure comparison function and its
+         fixtures.
+      5. Restores and runs the isolated consumer smoke test (tests/PackageSmokeTest) against the packed artifact
+         through a local NuGet feed and an isolated NUGET_PACKAGES cache directory (cleared before every restore)
+         -- never a ProjectReference, and never the developer machine's shared global package cache --
+         constructing every public provider/facade type across Memory, exact Chat History, RAG (all four
+         MongoDBSearchMode values), Index Management, Session Store, and Workflow Checkpoint Store. Runs once per
+         TFM MongoDB.AgentFramework itself ships (`dotnet run -f net8.0|net9.0|net10.0`), proving the package
+         restores and runs -- not just compiles -- on every shipped target framework. The smoke project's
+         nuget.config additionally uses packageSourceMapping so MongoDB.AgentFramework can be resolved ONLY from
+         the local packed feed (every other package only from nuget.org); this script then proves that
+         restriction actually held by comparing the restored project.assets.json's recorded content hash for
+         MongoDB.AgentFramework against a fresh hash of the actual packed .nupkg on disk (see
+         ConsumerCacheVerification.ps1) -- a wrong source resolving the same id/version string would still let
+         the restore "succeed" without this check.
+
+    This script never contacts a real MongoDB deployment, never publishes or pushes a package, and never invents
+    a signing identity or publisher credential; see dotnet/README.md and the final report this script prints for
+    the governance blockers (ADR 0013) that remain before a real release.
+
+.PARAMETER Configuration
+    The build configuration to pack. Defaults to Release.
+
+.PARAMETER SkipReproducibility
+    Skips the double-pack reproducibility comparison (step 4). Useful for a fast iteration loop.
+
+.PARAMETER SkipConsumerSmoke
+    Skips the isolated consumer smoke test (step 5). Useful for a fast iteration loop.
+
+.EXAMPLE
+    pwsh dotnet/scripts/verify-package.ps1
+
+.EXAMPLE
+    pwsh dotnet/scripts/verify-package.ps1 -SkipReproducibility -SkipConsumerSmoke
+#>
+[CmdletBinding()]
+param(
+    [string]$Configuration = "Release",
+    [switch]$SkipReproducibility,
+    [switch]$SkipConsumerSmoke
+)
+
+$ErrorActionPreference = "Stop"
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+. (Join-Path $PSScriptRoot "PackageAllowlist.ps1")
+. (Join-Path $PSScriptRoot "PackageMetadataAssertions.ps1")
+. (Join-Path $PSScriptRoot "PackageReproducibility.ps1")
+. (Join-Path $PSScriptRoot "ConsumerCacheVerification.ps1")
+
+$DotnetRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
+$SrcProject = Join-Path $DotnetRoot "src/MongoDB.AgentFramework/MongoDB.AgentFramework.csproj"
+$SmokeProject = Join-Path $DotnetRoot "tests/PackageSmokeTest/PackageSmokeTest.csproj"
+$PackagesDir = Join-Path $DotnetRoot "artifacts/packages"
+$ReproDir = Join-Path $DotnetRoot "artifacts/packages-repro-check"
+$ConsumerCacheDir = Join-Path $DotnetRoot "artifacts/nuget-consumer-cache"
+
+$script:FailureCount = 0
+
+function Write-Section([string]$Title) {
+    Write-Host ""
+    Write-Host "==== $Title ====" -ForegroundColor Cyan
+}
+
+function Write-Ok([string]$Message) {
+    Write-Host "[ OK ] $Message" -ForegroundColor Green
+}
+
+function Write-Failure([string]$Message) {
+    Write-Host "[FAIL] $Message" -ForegroundColor Red
+    $script:FailureCount++
+}
+
+# Clears an item at $Path if present. Ignores absence (a fresh checkout has no artifacts yet).
+function Clear-PathIfExists([string]$Path) {
+    if (Test-Path $Path) {
+        Remove-Item $Path -Recurse -Force
+    }
+}
+
+function Invoke-Pack([string]$OutputDir) {
+    Clear-PathIfExists $OutputDir
+    Clear-PathIfExists (Join-Path $DotnetRoot "src/MongoDB.AgentFramework/bin")
+    Clear-PathIfExists (Join-Path $DotnetRoot "src/MongoDB.AgentFramework/obj")
+
+    & dotnet pack $SrcProject `
+        --configuration $Configuration `
+        -p:ContinuousIntegrationBuild=true `
+        -p:CI=true `
+        -p:PackageOutputPath=$OutputDir
+    if ($LASTEXITCODE -ne 0) {
+        throw "dotnet pack failed with exit code $LASTEXITCODE"
+    }
+
+    $nupkg = Get-ChildItem $OutputDir -Filter "*.nupkg" | Select-Object -First 1
+    $snupkg = Get-ChildItem $OutputDir -Filter "*.snupkg" | Select-Object -First 1
+    if (-not $nupkg) {
+        throw "No .nupkg produced in $OutputDir"
+    }
+
+    if (-not $snupkg) {
+        throw "No .snupkg (symbol package) produced in $OutputDir"
+    }
+
+    return [pscustomobject]@{ Nupkg = $nupkg.FullName; Snupkg = $snupkg.FullName }
+}
+
+function Get-ZipEntryTexts([string]$ZipPath) {
+    $zip = [System.IO.Compression.ZipFile]::OpenRead($ZipPath)
+    try {
+        $result = [ordered]@{}
+        foreach ($entry in $zip.Entries) {
+            $stream = $entry.Open()
+            try {
+                $ms = New-Object System.IO.MemoryStream
+                $stream.CopyTo($ms)
+                $result[$entry.FullName] = $ms.ToArray()
+            }
+            finally {
+                $stream.Dispose()
+            }
+        }
+
+        return $result
+    }
+    finally {
+        $zip.Dispose()
+    }
+}
+
+# ---------------------------------------------------------------------------------------------------------------
+# Step 1: pack
+# ---------------------------------------------------------------------------------------------------------------
+Write-Section "Step 1: dotnet pack ($Configuration)"
+$primary = Invoke-Pack -OutputDir $PackagesDir
+Write-Ok "Packed $($primary.Nupkg)"
+Write-Ok "Packed $($primary.Snupkg)"
+
+# ---------------------------------------------------------------------------------------------------------------
+# Step 2: package-content allowlist -- exact expected entry set + exact multiplicity (dotnet/scripts/PackageAllowlist.ps1)
+# ---------------------------------------------------------------------------------------------------------------
+Write-Section "Step 2: package-content allowlist (exact set + multiplicity)"
+
+function Get-ZipEntryNames([string]$ZipPath) {
+    $zip = [System.IO.Compression.ZipFile]::OpenRead($ZipPath)
+    try {
+        return @($zip.Entries | ForEach-Object { $_.FullName })
+    }
+    finally {
+        $zip.Dispose()
+    }
+}
+
+function Assert-PackageAllowlist([string]$ZipPath, [string[]]$ExpectedEntries, [string]$Label) {
+    $actualEntries = Get-ZipEntryNames $ZipPath
+    $result = Test-PackageContentAllowlist -ActualEntries $actualEntries -ExpectedEntries $ExpectedEntries -Label $Label
+
+    if (-not $result.Passed) {
+        if ($result.Missing.Count -gt 0) {
+            Write-Failure "$Label is missing required entries: $($result.Missing -join ', ')"
+        }
+        if ($result.Unexpected.Count -gt 0) {
+            Write-Failure "$Label contains disallowed/unexpected entries: $($result.Unexpected -join ', ')"
+        }
+        if ($result.MultiplicityMismatch.Count -gt 0) {
+            Write-Failure "$Label has wrong entry counts: $($result.MultiplicityMismatch -join ', ')"
+        }
+        return
+    }
+
+    Write-Ok "$Label ($($result.ActualCount) entries) matches the expected set and multiplicity exactly"
+    foreach ($entry in ($actualEntries | Sort-Object)) {
+        Write-Host "         $entry"
+    }
+}
+
+Assert-PackageAllowlist -ZipPath $primary.Nupkg -ExpectedEntries $script:NupkgExpectedEntries -Label "nupkg"
+Assert-PackageAllowlist -ZipPath $primary.Snupkg -ExpectedEntries $script:SnupkgExpectedEntries -Label "snupkg"
+
+# ---------------------------------------------------------------------------------------------------------------
+# Step 3: nuspec metadata assertions
+# ---------------------------------------------------------------------------------------------------------------
+Write-Section "Step 3: nuspec metadata"
+
+$zip = [System.IO.Compression.ZipFile]::OpenRead($primary.Nupkg)
+try {
+    $nuspecEntry = $zip.Entries | Where-Object { $_.FullName -eq "MongoDB.AgentFramework.nuspec" }
+    $reader = New-Object System.IO.StreamReader($nuspecEntry.Open())
+    $nuspecText = $reader.ReadToEnd()
+    $reader.Close()
+}
+finally {
+    $zip.Dispose()
+}
+
+[xml]$nuspec = $nuspecText
+$metadata = $nuspec.package.metadata
+
+# Get-NuspecMetadataAssertions/Test-NuspecAssertion (dotnet/scripts/PackageMetadataAssertions.ps1) are the single
+# source of truth for both this real run and verify-package.metadata.tests.ps1's self-test, which proves each of
+# these assertions actually fails (not silently passes) against a deliberately wrong/missing fixture value.
+$assertions = Get-NuspecMetadataAssertions -Metadata $metadata
+
+foreach ($name in $assertions.Keys) {
+    $assertionResult = Test-NuspecAssertion -Description $name -Body $assertions[$name]
+    if ($assertionResult.Passed) {
+        Write-Ok $assertionResult.Description
+    }
+    else {
+        Write-Failure "$($assertionResult.Description) -- $($assertionResult.Message)"
+    }
+}
+
+Write-Host ""
+Write-Host "nuspec id/version/authors: $($metadata.id) $($metadata.version) ($($metadata.authors))"
+Write-Host "nuspec repository: $($metadata.repository.url) @ $($metadata.repository.commit) [$($metadata.repository.branch)]"
+
+# ---------------------------------------------------------------------------------------------------------------
+# Step 4: reproducibility (pack twice from clean, compare content ignoring known-nondeterministic OPC wrapper bits)
+# ---------------------------------------------------------------------------------------------------------------
+if ($SkipReproducibility) {
+    Write-Section "Step 4: reproducibility (skipped by -SkipReproducibility)"
+}
+else {
+    Write-Section "Step 4: reproducibility (pack twice, compare)"
+    $second = Invoke-Pack -OutputDir $ReproDir
+
+    # Test-PackageReproducibility (dotnet/scripts/PackageReproducibility.ps1) is the single source of truth for
+    # both this real run and verify-package.reproducibility.tests.ps1's self-test, which proves a genuine content
+    # difference inside _rels/.rels or a *.psmdcp entry (not merely the generated GUID/relationship-id noise
+    # those two files legitimately carry between pack invocations) still fails this check -- those two entries
+    # are normalized and compared byte-for-byte, never excluded from the comparison outright.
+    function Compare-PackageReproducibility([string]$PathA, [string]$PathB, [string]$Label) {
+        $entriesA = Get-ZipEntryTexts $PathA
+        $entriesB = Get-ZipEntryTexts $PathB
+        $result = Test-PackageReproducibility -EntriesA $entriesA -EntriesB $entriesB
+
+        if ($result.EntrySetMismatch) {
+            Write-Failure "$Label entry sets differ (after normalizing only the generated OPC core-properties GUID part name): [$($result.NamesA -join ', ')] vs [$($result.NamesB -join ', ')]"
+            return
+        }
+
+        if ($result.ContentMismatches.Count -gt 0) {
+            Write-Failure "$Label entries differ (after normalizing only the generated OPC core-properties GUID part name and _rels relationship ids) between the two packs: $($result.ContentMismatches -join ', ')"
+            return
+        }
+
+        Write-Ok "$Label`: every entry -- including the full content of _rels/.rels and every *.psmdcp entry, not just their presence -- is byte-identical across two packs once only the generated OPC core-properties GUID part name and _rels relationship ids are normalized"
+        Write-Host "         (only those generated identifiers -- never real package content -- differ, which is expected NuGet.Client `dotnet pack` OPC packaging behavior, not build nondeterminism)"
+    }
+
+    Compare-PackageReproducibility -PathA $primary.Nupkg -PathB $second.Nupkg -Label "nupkg"
+    Compare-PackageReproducibility -PathA $primary.Snupkg -PathB $second.Snupkg -Label "snupkg"
+
+    # The reproducibility check's own second pack is scratch output only; do not leave it in artifacts/.
+    Clear-PathIfExists $ReproDir
+}
+
+# ---------------------------------------------------------------------------------------------------------------
+# Step 5: clean, isolated consumer smoke test
+# ---------------------------------------------------------------------------------------------------------------
+if ($SkipConsumerSmoke) {
+    Write-Section "Step 5: consumer smoke test (skipped by -SkipConsumerSmoke)"
+}
+else {
+    Write-Section "Step 5: clean, isolated consumer smoke test (every shipped TFM)"
+    Clear-PathIfExists $ConsumerCacheDir
+    New-Item -ItemType Directory -Path $ConsumerCacheDir -Force | Out-Null
+    Clear-PathIfExists (Join-Path $DotnetRoot "tests/PackageSmokeTest/bin")
+    Clear-PathIfExists (Join-Path $DotnetRoot "tests/PackageSmokeTest/obj")
+
+    # Read the TFM list straight from PackageSmokeTest.csproj's own <TargetFrameworks> element instead of
+    # hardcoding it here a second time, so this script can never silently drift out of sync with the project
+    # actually being run (e.g. if a TFM is added to/removed from the smoke project without updating this script).
+    [xml]$smokeProjectXml = Get-Content $SmokeProject -Raw
+    $targetFrameworksValue = $smokeProjectXml.Project.PropertyGroup.TargetFrameworks
+    if ([string]::IsNullOrWhiteSpace($targetFrameworksValue)) {
+        throw "PackageSmokeTest.csproj must declare <TargetFrameworks> (semicolon-separated, multi-target) so " +
+              "every shipped TFM can be smoke-tested; found none."
+    }
+
+    $targetFrameworks = $targetFrameworksValue -split ';' | Where-Object { $_ }
+    Write-Host "Smoke-testing TFMs: $($targetFrameworks -join ', ')"
+
+    # NUGET_PACKAGES is overridden to an isolated, disposable directory under artifacts/ so this restore can never
+    # be satisfied by anything already present in the developer/CI machine's shared global package cache: it must
+    # come only from nuget.org (transitive dependencies) and the local packed feed (MongoDB.AgentFramework itself,
+    # per tests/PackageSmokeTest/nuget.config). A single restore covers every TFM (NuGet restores the whole
+    # multi-targeted project graph together); each TFM is then run independently via `dotnet run -f <tfm>`.
+    $previousNugetPackages = $env:NUGET_PACKAGES
+    $env:NUGET_PACKAGES = $ConsumerCacheDir
+    try {
+        & dotnet restore $SmokeProject --force --no-cache
+        if ($LASTEXITCODE -ne 0) {
+            throw "dotnet restore failed with exit code $LASTEXITCODE"
+        }
+
+        # Prove the isolated restore actually resolved MongoDB.AgentFramework from THIS run's freshly-packed
+        # .nupkg -- not merely that the restore's exit code was 0. tests/PackageSmokeTest/nuget.config's
+        # packageSourceMapping restricts MongoDB.AgentFramework to "local-packed-feed" (every other package to
+        # nuget.org), and $ConsumerCacheDir was cleared above so no stale cache entry survives from a previous
+        # run; this content-hash comparison (ConsumerCacheVerification.ps1) is what actually falsifies a broken
+        # source restriction or a stale/mismatched cache, since a wrong source resolving the same id/version
+        # string would still let the restore "succeed" without it.
+        $projectAssetsPath = Join-Path (Split-Path $SmokeProject -Parent) "obj/project.assets.json"
+        if (-not (Test-Path $projectAssetsPath)) {
+            throw "Expected restored project.assets.json not found at '$projectAssetsPath'."
+        }
+
+        $projectAssets = Get-Content $projectAssetsPath -Raw | ConvertFrom-Json
+        $consumerCacheMatchesPackedPackage = Test-ConsumerCacheResolvedPackedPackage `
+            -ProjectAssets $projectAssets -PackageId $metadata.id -PackageVersion $metadata.version -NupkgPath $primary.Nupkg
+
+        if ($consumerCacheMatchesPackedPackage) {
+            Write-Ok "Isolated restore resolved $($metadata.id)/$($metadata.version) from the local packed feed with a content hash matching the actual packed .nupkg"
+        }
+        else {
+            Write-Failure "Isolated restore's resolved $($metadata.id) library entry does not match the locally packed .nupkg's content hash -- packageSourceMapping/cache isolation may not be enforced as expected"
+        }
+
+        $tfmFailures = @()
+        foreach ($tfm in $targetFrameworks) {
+            Write-Host ""
+            Write-Host "-- dotnet run -f $tfm --"
+            & dotnet run --project $SmokeProject --configuration $Configuration --framework $tfm --no-restore
+            if ($LASTEXITCODE -ne 0) {
+                $tfmFailures += "$tfm (exit code $LASTEXITCODE)"
+            }
+        }
+    }
+    finally {
+        $env:NUGET_PACKAGES = $previousNugetPackages
+    }
+
+    if ($tfmFailures.Count -gt 0) {
+        Write-Failure "Consumer smoke test failed for: $($tfmFailures -join ', ')"
+    }
+    else {
+        Write-Ok "Consumer smoke test restored MongoDB.AgentFramework from the packed .nupkg and constructed every public feature area on every TFM ($($targetFrameworks -join ', '))"
+    }
+}
+
+# ---------------------------------------------------------------------------------------------------------------
+# Step 6: checksum manifest for the kept artifacts
+# ---------------------------------------------------------------------------------------------------------------
+Write-Section "Step 6: artifact checksums"
+foreach ($path in @($primary.Nupkg, $primary.Snupkg)) {
+    $hash = Get-FileHash -Path $path -Algorithm SHA256
+    Write-Host "SHA256($([System.IO.Path]::GetFileName($path))) = $($hash.Hash)"
+}
+
+# ---------------------------------------------------------------------------------------------------------------
+# Summary
+# ---------------------------------------------------------------------------------------------------------------
+Write-Section "Summary"
+if ($script:FailureCount -gt 0) {
+    Write-Host "$($script:FailureCount) check(s) FAILED." -ForegroundColor Red
+    exit 1
+}
+
+Write-Host "All package verification checks PASSED." -ForegroundColor Green
+exit 0

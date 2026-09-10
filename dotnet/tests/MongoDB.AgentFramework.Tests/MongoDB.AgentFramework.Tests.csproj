@@ -1,0 +1,49 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <!--
+      Same $(AgentFrameworkVersion) indirection as ../../src/MongoDB.AgentFramework/MongoDB.AgentFramework.csproj
+      (docs/spec/compatibility-migration.md compatibility matrix), so the compatibility-matrix job/script can
+      override this project's own explicit Microsoft.Agents.AI.Workflows reference (see below) to the same exact
+      pinned version as the main package under test, rather than leaving it independently resolved to the full
+      range.
+    -->
+    <AgentFrameworkVersion Condition="'$(AgentFrameworkVersion)' == ''">[1.13.0,1.17.0)</AgentFrameworkVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" Version="6.0.4" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+    <!--
+      Explicit, not just transitive through the ProjectReference below: building this test project directly
+      from a clean restore (e.g. `dotnet test .\dotnet\MongoDB.AgentFramework.slnx` from the repo root) does not
+      reliably flow MongoDB.AgentFramework's own PackageReference compile-time assets to this project's compiler
+      through the ProjectReference alone in every restore graph. Pinned to the same verified range as
+      MongoDB.AgentFramework.csproj (see docs/development/persistence/dotnet-checkpoint-contract-research.md).
+    -->
+    <PackageReference Include="Microsoft.Agents.AI.Workflows" Version="$(AgentFrameworkVersion)" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\MongoDB.AgentFramework\MongoDB.AgentFramework.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\..\..\python\tests\contracts\fixtures\history_contract.json"
+          Link="Fixtures\history_contract.json"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

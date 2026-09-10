@@ -1,0 +1,466 @@
+name: Release Python package
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "python/pyproject.toml"
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: "Commit on main to tag (full SHA or main)"
+        required: true
+        default: main
+        type: string
+      publish:
+        description: "Request PyPI publication after all gates and environment approval"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-python-${{ github.event_name == 'push' && github.sha || inputs.commit }}
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      sha: ${{ steps.release.outputs.sha }}
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - name: Require main for recovery dispatch
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        env:
+          DISPATCH_REF: ${{ github.ref_name }}
+        run: test "$DISPATCH_REF" = main
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # actions/checkout v4.4.0
+        with:
+          ref: ${{ github.event_name == 'push' && github.sha || inputs.commit }}
+          fetch-depth: 0
+          persist-credentials: true
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # actions/setup-python v5
+        with:
+          python-version: "3.10"
+      - name: Validate main ancestry, version, and release tag
+        id: release
+        working-directory: python
+        run: |
+          git fetch --no-tags origin main
+          SHA="$(git rev-parse HEAD)"
+          if [ "${{ github.event_name }}" = push ]; then
+            test "$SHA" = "$GITHUB_SHA"
+          fi
+          git merge-base --is-ancestor "$SHA" origin/main
+          python -m pip install --disable-pip-version-check "packaging>=24,<26"
+          TAG="$(python scripts/validate_version_readiness.py \
+            --pyproject pyproject.toml --baseline api-baseline.json --output tag)"
+          VERSION="${TAG#python-v}"
+          python scripts/validate_release_tag.py "$TAG" \
+            --pyproject pyproject.toml --baseline api-baseline.json
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" > /dev/null; then
+            git fetch --no-tags origin "refs/tags/$TAG:refs/tags/$TAG"
+            test "$(git rev-list -n 1 "$TAG")" = "$SHA"
+          else
+            git config user.name github-actions[bot]
+            git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+            git tag --annotate "$TAG" --message "Release agent-framework-mongodb $VERSION" "$SHA"
+            git push origin "refs/tags/$TAG"
+          fi
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+  resolve-compatibility:
+    needs: tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.versions.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # actions/checkout v4.4.0
+        with:
+          ref: ${{ needs.tag.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # actions/setup-python v5
+        with:
+          python-version: "3.10"
+      - name: Resolve stable compatibility versions
+        id: versions
+        working-directory: python
+        run: |
+          python -m pip install --disable-pip-version-check "packaging>=24,<26"
+          python scripts/resolve_framework_versions.py \
+            --json-output compatibility-reports/resolution.json \
+            --markdown-output compatibility-reports/resolution.md
+
+  compatibility:
+    needs: [tag, resolve-compatibility]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.resolve-compatibility.outputs.matrix) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    defaults:
+      run:
+        working-directory: python
+    env:
+      FRAMEWORK_VERSION: ${{ matrix.version }}
+      REPORT_DIR: compatibility-reports/${{ matrix.label }}-${{ matrix.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # actions/checkout v4.4.0
+        with:
+          ref: ${{ needs.tag.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # actions/setup-python v5
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: python/pyproject.toml
+      - name: Run isolated compatibility gate
+        id: gate
+        continue-on-error: true
+        run: |
+          python scripts/run_framework_compatibility.py \
+            --version "$FRAMEWORK_VERSION" \
+            --label "${{ matrix.label }}" \
+            --channel "${{ matrix.channel }}" \
+            --report-dir "$REPORT_DIR"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # actions/upload-artifact v4.6.2
+        if: always()
+        with:
+          name: python-release-compatibility-${{ matrix.label }}-${{ matrix.version }}
+          path: python/compatibility-reports/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Enforce compatibility outcome after retaining evidence
+        if: always()
+        env:
+          GATE_OUTCOME: ${{ steps.gate.outcome }}
+        run: test "$GATE_OUTCOME" = success
+
+  build:
+    needs: [tag, compatibility]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # actions/checkout v4.4.0
+        with:
+          ref: ${{ needs.tag.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # actions/setup-python v5
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: python/pyproject.toml
+      - name: Validate exact tag and install release tools
+        id: setup
+        continue-on-error: true
+        working-directory: python
+        env:
+          RELEASE_TAG: ${{ needs.tag.outputs.tag }}
+        run: |
+          test "$(git rev-parse HEAD)" = "${{ needs.tag.outputs.sha }}"
+          python scripts/validate_release_tag.py "$RELEASE_TAG" \
+            --pyproject pyproject.toml --baseline api-baseline.json
+          python -m pip install --disable-pip-version-check -e ".[dev]"
+          python -m pip install --disable-pip-version-check "pip-audit==2.10.1"
+      - name: Run credential-free release gate
+        id: release-gate
+        if: always()
+        continue-on-error: true
+        working-directory: python
+        run: |
+          mkdir -p dist/reports
+          python -m pytest --cov=agent_framework_mongodb --cov-report=term \
+            --junitxml=dist/reports/pytest.xml -q
+          python -m ruff check src tests samples scripts ../scripts/scan_credentials.py
+          python -m ruff format --check src tests samples scripts ../scripts/scan_credentials.py
+          python -m mypy
+          python -m pyright
+          python scripts/check_api_baseline.py api-baseline.json
+          python ../scripts/scan_credentials.py
+          printf '# Release gate\n\nCommit: `%s`\n\nResult: **passed**\n' \
+            "${{ needs.tag.outputs.sha }}" > dist/reports/release-gate.md
+      - name: Build and validate exact artifacts
+        id: package
+        if: always()
+        continue-on-error: true
+        working-directory: python
+        env:
+          RELEASE_VERSION: ${{ needs.tag.outputs.version }}
+        run: |
+          python -m build --outdir dist/packages
+          python -m twine check dist/packages/*.whl dist/packages/*.tar.gz
+          python scripts/verify_artifacts.py dist/packages/*.whl dist/packages/*.tar.gz
+          python -m venv .release-smoke-wheel
+          .release-smoke-wheel/bin/python -m pip install --no-cache-dir dist/packages/*.whl
+          .release-smoke-wheel/bin/python scripts/smoke_public_api.py --expected-version "$RELEASE_VERSION"
+          .release-smoke-wheel/bin/python -m pydoc agent_framework_mongodb > /dev/null
+          python -m venv .release-smoke-sdist
+          .release-smoke-sdist/bin/python -m pip install --no-cache-dir dist/packages/*.tar.gz
+          .release-smoke-sdist/bin/python scripts/smoke_public_api.py --expected-version "$RELEASE_VERSION"
+          .release-smoke-wheel/bin/python -m pip install --disable-pip-version-check \
+            --upgrade pip setuptools
+          pip-audit --path .release-smoke-wheel/lib/python3.10/site-packages \
+            --format cyclonedx-json --output dist/agent-framework-mongodb.sbom.cdx.json
+          (cd dist/packages && sha256sum *) > dist/PACKAGE_SHA256SUMS
+          sha256sum dist/packages/* dist/*.sbom.cdx.json > dist/SHA256SUMS
+          python scripts/verify_artifacts.py --supplemental \
+            dist/*.sbom.cdx.json dist/PACKAGE_SHA256SUMS dist/SHA256SUMS
+      - name: Finalize release evidence
+        if: always()
+        working-directory: python
+        env:
+          SETUP_OUTCOME: ${{ steps.setup.outcome }}
+          GATE_OUTCOME: ${{ steps.release-gate.outcome }}
+          PACKAGE_OUTCOME: ${{ steps.package.outcome }}
+          RELEASE_SHA: ${{ needs.tag.outputs.sha }}
+        run: |
+          mkdir -p dist/reports
+          python -m pip freeze > dist/reports/pip-freeze.txt
+          if [ ! -s dist/reports/pytest.xml ]; then
+            printf '%s\n' \
+              '<?xml version="1.0" encoding="UTF-8"?>' \
+              '<testsuite name="python-release-gate" tests="1" failures="1">' \
+              '<testcase name="release-gate"><failure message="pytest did not complete"/></testcase>' \
+              '</testsuite>' > dist/reports/pytest.xml
+          fi
+          python -c "import json, os, pathlib; pathlib.Path('dist/reports/release-gate.json').write_text(json.dumps({'commit': os.environ['RELEASE_SHA'], 'setup': os.environ['SETUP_OUTCOME'], 'gate': os.environ['GATE_OUTCOME'], 'package': os.environ['PACKAGE_OUTCOME']}, indent=2) + '\n', encoding='utf-8')"
+          printf '# Release gate\n\nCommit: `%s`\n\n- Setup: **%s**\n- Gate: **%s**\n- Package: **%s**\n' \
+            "$RELEASE_SHA" "$SETUP_OUTCOME" "$GATE_OUTCOME" "$PACKAGE_OUTCOME" \
+            > dist/reports/release-gate.md
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # actions/upload-artifact v4.6.2
+        if: always()
+        with:
+          name: python-release-${{ needs.tag.outputs.tag }}
+          path: python/dist/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Enforce release outcomes after retaining evidence
+        if: always()
+        working-directory: python
+        env:
+          SETUP_OUTCOME: ${{ steps.setup.outcome }}
+          GATE_OUTCOME: ${{ steps.release-gate.outcome }}
+          PACKAGE_OUTCOME: ${{ steps.package.outcome }}
+        run: |
+          test "$SETUP_OUTCOME" = success
+          test "$GATE_OUTCOME" = success
+          test "$PACKAGE_OUTCOME" = success
+
+  provenance:
+    needs: [tag, build]
+    if: ${{ vars.PYTHON_PROVENANCE_APPROVED == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      attestations: write
+      contents: read
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # actions/download-artifact v4.3.0
+        with:
+          name: python-release-${{ needs.tag.outputs.tag }}
+          path: dist
+      - name: Generate provenance bound to the validated release commit
+        env:
+          RELEASE_SHA: ${{ needs.tag.outputs.sha }}
+          RELEASE_TAG: ${{ needs.tag.outputs.tag }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import pathlib
+          import re
+
+          sha = os.environ["RELEASE_SHA"]
+          repository = os.environ["REPOSITORY"]
+          if not re.fullmatch(r"[0-9a-f]{40}", sha):
+              raise SystemExit("RELEASE_SHA must be a full lowercase commit SHA")
+          if repository.count("/") != 1:
+              raise SystemExit("REPOSITORY must use owner/repository form")
+
+          repository_url = f"https://github.com/{repository}"
+          workflow_path = ".github/workflows/release-python.yml"
+          workflow_ref = "refs/heads/main"
+          predicate = {
+              "buildDefinition": {
+                  "buildType": f"{repository_url}/blob/main/{workflow_path}",
+                  "externalParameters": {
+                      "workflow": {
+                          "ref": workflow_ref,
+                          "repository": repository_url,
+                          "path": workflow_path,
+                      },
+                      "validatedRelease": {"tagName": os.environ["RELEASE_TAG"]},
+                  },
+                  "internalParameters": {
+                      "github": {
+                          "eventName": os.environ["EVENT_NAME"],
+                          "runId": os.environ["RUN_ID"],
+                          "runAttempt": os.environ["RUN_ATTEMPT"],
+                      }
+                  },
+                  "resolvedDependencies": [
+                      {
+                          "name": "validated-release-commit",
+                          "uri": f"git+{repository_url}@{sha}",
+                          "digest": {"gitCommit": sha},
+                      }
+                  ],
+              },
+              "runDetails": {
+                  "builder": {
+                      "id": f"{repository_url}/{workflow_path}@{workflow_ref}"
+                  },
+                  "metadata": {
+                      "invocationId": (
+                          f"{repository_url}/actions/runs/{os.environ['RUN_ID']}"
+                          f"/attempts/{os.environ['RUN_ATTEMPT']}"
+                      )
+                  },
+              },
+          }
+          pathlib.Path("dist/release-provenance-predicate.json").write_text(
+              json.dumps(predicate, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          PY
+      - name: Attest exact distributions
+        id: attest
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # actions/attest v4.2.1
+        with:
+          subject-path: |
+            dist/packages/*.whl
+            dist/packages/*.tar.gz
+          predicate-type: https://slsa.dev/provenance/v1
+          predicate-path: dist/release-provenance-predicate.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # actions/upload-artifact v4.6.2
+        with:
+          name: python-release-provenance-${{ needs.tag.outputs.tag }}
+          path: ${{ steps.attest.outputs.bundle-path }}
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    needs: [tag, build, provenance]
+    if: >-
+      ${{
+        always() &&
+        (github.event_name == 'push' || inputs.publish) &&
+        needs.build.result == 'success' &&
+        needs.provenance.result == 'success' &&
+        vars.PYPI_PUBLISHING_APPROVED == 'true' &&
+        vars.PYPI_ENVIRONMENT != ''
+      }}
+    runs-on: ubuntu-latest
+    environment: ${{ vars.PYPI_ENVIRONMENT }}
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # actions/download-artifact v4.3.0
+        with:
+          name: python-release-${{ needs.tag.outputs.tag }}
+          path: dist
+      - name: Publish through PyPI trusted publishing
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # pypa/gh-action-pypi-publish release/v1
+        with:
+          packages-dir: dist/packages
+
+  verify-published:
+    needs: [tag, build, publish]
+    if: ${{ needs.publish.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: ${{ vars.PYPI_ENVIRONMENT }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # actions/checkout v4.4.0
+        with:
+          ref: ${{ needs.tag.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # actions/setup-python v5
+        with:
+          python-version: "3.10"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # actions/download-artifact v4.3.0
+        with:
+          name: python-release-${{ needs.tag.outputs.tag }}
+          path: dist
+      - name: Download and verify exact published artifacts
+        env:
+          RELEASE_VERSION: ${{ needs.tag.outputs.version }}
+        run: |
+          mkdir published
+          for attempt in $(seq 1 20); do
+            rm -f published/*
+            if python -m pip download --disable-pip-version-check --no-cache-dir --no-deps \
+              --only-binary=:all: --dest published "agent-framework-mongodb==$RELEASE_VERSION" &&
+              python -m pip download --disable-pip-version-check --no-cache-dir --no-deps \
+              --no-binary=:all: --dest published "agent-framework-mongodb==$RELEASE_VERSION"; then
+              break
+            fi
+            test "$attempt" != 20 || exit 1
+            sleep 15
+          done
+          (cd published && sha256sum --check ../dist/PACKAGE_SHA256SUMS)
+          python -m venv .published-wheel
+          .published-wheel/bin/python -m pip install --no-cache-dir published/*.whl
+          .published-wheel/bin/python python/scripts/smoke_public_api.py \
+            --expected-version "$RELEASE_VERSION"
+          python -m venv .published-sdist
+          .published-sdist/bin/python -m pip install --no-cache-dir published/*.tar.gz
+          .published-sdist/bin/python python/scripts/smoke_public_api.py \
+            --expected-version "$RELEASE_VERSION"
+
+  github-release:
+    needs: [tag, verify-published]
+    if: ${{ needs.verify-published.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # actions/download-artifact v4.3.0
+        with:
+          name: python-release-${{ needs.tag.outputs.tag }}
+          path: release-assets
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # actions/download-artifact v4.3.0
+        with:
+          name: python-release-provenance-${{ needs.tag.outputs.tag }}
+          path: release-assets/provenance
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # actions/download-artifact v4.3.0
+        with:
+          pattern: python-release-compatibility-*
+          path: compatibility
+      - name: Create exact GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.tag.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.tag.outputs.version }}
+        run: |
+          for report in compatibility/*; do
+            test -d "$report" || continue
+            python -m zipfile -c \
+              "release-assets/$(basename "$report").zip" "$report"
+          done
+          mapfile -t assets < <(find release-assets -type f -print)
+          if gh release view "$RELEASE_TAG" > /dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
+          else
+            gh release create "$RELEASE_TAG" "${assets[@]}" --verify-tag \
+              --title "agent-framework-mongodb $RELEASE_VERSION" --generate-notes
+          fi

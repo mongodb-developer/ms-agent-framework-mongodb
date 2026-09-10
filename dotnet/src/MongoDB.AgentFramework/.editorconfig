@@ -1,0 +1,16 @@
+# Public API analyzer configuration for this project (see MongoDB.AgentFramework.csproj's
+# Microsoft.CodeAnalysis.PublicApiAnalyzers reference and docs/development/packaging/dotnet-packaging-release.md).
+#
+# RS0026 ("do not add multiple overloads with optional parameters") and RS0027 ("an API with optional parameters
+# should have the most parameters among its overload family") are both disabled project-wide. This library
+# deliberately extends several types' constructor arity by adding a *sibling* overload with a required trailing
+# ILogger<T> parameter, rather than adding that parameter (even as optional) to an existing constructor -- because
+# default argument values resolve at the *caller's* compile time, not this callee's binary surface, so widening an
+# existing constructor (even with a default value) breaks already-compiled callers targeting its original arity.
+# See dotnet/tests/MongoDB.AgentFramework.Tests/ApiCompatibility/PublicConstructorBaselineTests.cs (the regression
+# test for that exact requirement) and docs/development/observability-security/dotnet-telemetry.md. RS0026/RS0027
+# are general-purpose API design hygiene rules; they flag exactly the shape this project uses on purpose to
+# preserve binary compatibility, so they are not applicable here rather than merely inconvenient.
+[*.cs]
+dotnet_diagnostic.RS0026.severity = none
+dotnet_diagnostic.RS0027.severity = none

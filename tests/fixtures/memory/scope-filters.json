@@ -1,0 +1,31 @@
+{
+  "cases": [
+    {
+      "name": "cross-session application and user scope",
+      "provider_scope": {
+        "application_id": "app-a",
+        "user_id": "user-a"
+      },
+      "session_id": null,
+      "expected_filter": {
+        "application_id": "app-a",
+        "user_id": "user-a"
+      }
+    },
+    {
+      "name": "optional session inside full durable scope",
+      "provider_scope": {
+        "application_id": "app-a",
+        "agent_id": "agent-a",
+        "user_id": "user-a"
+      },
+      "session_id": "session-a",
+      "expected_filter": {
+        "application_id": "app-a",
+        "agent_id": "agent-a",
+        "user_id": "user-a",
+        "session_id": "session-a"
+      }
+    }
+  ]
+}

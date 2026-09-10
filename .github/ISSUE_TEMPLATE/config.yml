@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Project requirements and documentation
+    url: https://github.com/mongo/ms-agent-framework-mongodb#readme
+    about: Review project scope, requirements, and documentation before opening an issue.
+  - name: Report a security vulnerability privately
+    url: https://github.com/mongo/ms-agent-framework-mongodb/security/advisories/new
+    about: Do not disclose credentials, private data, or security vulnerabilities in a public issue.

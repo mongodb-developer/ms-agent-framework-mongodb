@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <AgentFrameworkVersion Condition="'$(AgentFrameworkVersion)' == ''">[1.13.0,1.17.0)</AgentFrameworkVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" Version="6.0.4" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+    <!-- Explicit pins ensure compatibility runs validate the same two real Agent Framework dependencies used by
+         the package graph rather than allowing transitive range selection to mask a mismatch. -->
+    <PackageReference Include="Microsoft.Agents.AI.Abstractions" Version="$(AgentFrameworkVersion)" />
+    <PackageReference Include="Microsoft.Agents.AI.Workflows" Version="$(AgentFrameworkVersion)" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\samples\IngestionSamples\IngestionSamples.csproj" />
+    <ProjectReference Include="..\..\src\MongoDB.AgentFramework\MongoDB.AgentFramework.csproj" />
+  </ItemGroup>
+</Project>

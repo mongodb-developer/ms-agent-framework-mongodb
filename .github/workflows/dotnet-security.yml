@@ -1,0 +1,122 @@
+name: .NET dependency, secret, and code scanning
+
+# Implements the "security" job from docs/spec/quality-release.md's CI workflow topology, scoped to this change:
+# a .NET NuGet (including transitive) dependency vulnerability audit, a repository secret scan, and CodeQL code
+# scanning for the .NET provider.
+#
+# Supply-chain note: every action below is pinned to an immutable full commit SHA (not a mutable tag) with a
+# trailing `# vX.Y.Z` comment recording the release that SHA corresponds to, so a compromised or republished tag
+# cannot silently change what this workflow executes. The secret scan runs a repository-local, dependency-free
+# `git grep` script (.github/scripts/secret-scan.sh) instead of downloading and executing any third-party
+# scanner binary, avoiding both the supply-chain risk of an unverified download and the licensing questions
+# around gitleaks' GitHub Action wrapper for private-organization use. CodeQL is GitHub's first-party action.
+# Every job requests only the workflow permissions it actually needs.
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - build/dotnet-packaging-release
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dotnet-vulnerability-audit:
+    name: .NET dependency vulnerability audit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+            10.0.x
+
+      - name: Restore
+        working-directory: dotnet
+        run: dotnet restore MongoDB.AgentFramework.slnx
+
+      # `dotnet list package --vulnerable` always exits 0, even when it finds vulnerable packages, so the audit
+      # step must inspect its own output text and fail the job explicitly. `--include-transitive` is required so
+      # a vulnerability introduced only by a dependency-of-a-dependency is still caught, matching
+      # docs/spec/observability-security.md's "Run dependency and secret scanning in CI" requirement.
+      - name: Audit direct and transitive NuGet dependencies for known vulnerabilities
+        working-directory: dotnet
+        shell: pwsh
+        run: |
+          $output = dotnet list MongoDB.AgentFramework.slnx package --vulnerable --include-transitive 2>&1 | Tee-Object -Variable capturedOutput
+          $capturedOutput | Out-String -Stream | Write-Output
+          if ($capturedOutput -match 'has the following vulnerable packages') {
+            Write-Error "One or more NuGet packages (direct or transitive) have known vulnerabilities. See the audit output above."
+            exit 1
+          }
+
+  secret-scan:
+    name: Repository secret scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      # Proves the scanner itself still detects a real secret shape and still respects its documented
+      # SENTINEL-SECRET- test-fixture exclusion, using disposable scratch git repos so no secret-shaped
+      # content is ever committed to this repository. See .github/scripts/secret-scan.test.sh.
+      - name: Self-test the secret-scan script
+        shell: bash
+        run: bash .github/scripts/secret-scan.test.sh
+
+      # No third-party binary is downloaded or executed here; see .github/scripts/secret-scan.sh for the
+      # pattern set and its documented limitations (working-tree-only, pattern-based, no entropy analysis).
+      # Invoked as `bash <script>` rather than relying on the script's own executable bit: `actions/checkout`
+      # preserves whatever mode bit was recorded in the tree, but that bit is not guaranteed to survive every
+      # possible checkout path (for example a Windows-authored commit, or a fork/mirror that normalizes
+      # permissions), so a direct `.github/scripts/secret-scan.sh` invocation could fail with "Permission
+      # denied" for a reason unrelated to the scan itself. Explicitly invoking the interpreter removes that
+      # dependency entirely.
+      - name: Scan repository for common secret patterns
+        shell: bash
+        run: bash .github/scripts/secret-scan.sh
+
+  codeql:
+    name: CodeQL code scanning (C#)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+            10.0.x
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@e60ea984bd3baa95954f2856bcf24f9eaba46637 # v3.37.5
+        with:
+          languages: csharp
+
+      - name: Build (autobuild)
+        uses: github/codeql-action/autobuild@e60ea984bd3baa95954f2856bcf24f9eaba46637 # v3.37.5
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@e60ea984bd3baa95954f2856bcf24f9eaba46637 # v3.37.5
+        with:
+          category: "/language:csharp"

@@ -1,0 +1,338 @@
+{
+  "option_cases": [
+    {
+      "name": "vector ANN defaults candidates",
+      "input": {
+        "mode": "vector_ann",
+        "vector_dimensions": 1536,
+        "vector_index_name": "knowledge_vector",
+        "top_k": 5
+      },
+      "valid": true,
+      "normalized": {
+        "mode": "vector_ann",
+        "top_k": 5,
+        "num_candidates": 50
+      }
+    },
+    {
+      "name": "vector ENN omits candidates",
+      "input": {
+        "mode": "vector_enn",
+        "vector_dimensions": 1536,
+        "vector_index_name": "knowledge_vector",
+        "top_k": 5
+      },
+      "valid": true,
+      "normalized": {
+        "mode": "vector_enn",
+        "top_k": 5,
+        "num_candidates": null
+      }
+    },
+    {
+      "name": "full text requires Search index",
+      "input": {
+        "mode": "full_text",
+        "search_index_name": "knowledge_text",
+        "top_k": 5
+      },
+      "valid": true,
+      "normalized": {
+        "mode": "full_text",
+        "top_k": 5,
+        "num_candidates": null
+      }
+    },
+    {
+      "name": "hybrid keeps independent indexes",
+      "input": {
+        "mode": "hybrid_rrf",
+        "vector_dimensions": 1536,
+        "vector_index_name": "knowledge_vector",
+        "search_index_name": "knowledge_text",
+        "top_k": 5,
+        "num_candidates": 100,
+        "vector_weight": 1.0,
+        "text_weight": 0.5
+      },
+      "valid": true,
+      "normalized": {
+        "mode": "hybrid_rrf",
+        "top_k": 5,
+        "num_candidates": 100
+      }
+    },
+    {
+      "name": "ENN rejects candidates",
+      "input": {
+        "mode": "vector_enn",
+        "vector_dimensions": 1536,
+        "vector_index_name": "knowledge_vector",
+        "num_candidates": 50
+      },
+      "valid": false,
+      "error_contains": "num_candidates"
+    },
+    {
+      "name": "candidates cannot trail final limit",
+      "input": {
+        "mode": "vector_ann",
+        "vector_dimensions": 1536,
+        "vector_index_name": "knowledge_vector",
+        "top_k": 10,
+        "num_candidates": 5
+      },
+      "valid": false,
+      "error_contains": "at least top_k"
+    },
+    {
+      "name": "field path sequences deduplicate in order",
+      "input": {
+        "mode": "full_text",
+        "search_index_name": "knowledge_text",
+        "text_fields": ["content", "summary", "content"],
+        "metadata_fields": ["metadata.kind", "metadata.kind"]
+      },
+      "valid": true,
+      "normalized": {
+        "mode": "full_text",
+        "top_k": 5,
+        "num_candidates": null,
+        "text_fields": ["content", "summary"],
+        "metadata_fields": ["metadata.kind"]
+      }
+    },
+    {
+      "name": "text fields reject scalar strings",
+      "input": {
+        "mode": "full_text",
+        "search_index_name": "knowledge_text",
+        "text_fields": "content"
+      },
+      "valid": false,
+      "error_contains": "explicit list or tuple"
+    },
+    {
+      "name": "metadata fields reject scalar strings",
+      "input": {
+        "mode": "full_text",
+        "search_index_name": "knowledge_text",
+        "metadata_fields": "metadata.kind"
+      },
+      "valid": false,
+      "error_contains": "explicit list or tuple"
+    }
+  ],
+  "filter_cases": [
+    {
+      "name": "equality",
+      "ast": {
+        "operator": "eq",
+        "field": "tenant_id",
+        "value": "tenant-a"
+      },
+      "vector": {
+        "tenant_id": {
+          "$eq": "tenant-a"
+        }
+      },
+      "search": [
+        {
+          "equals": {
+            "path": "tenant_id",
+            "value": "tenant-a"
+          }
+        }
+      ]
+    },
+    {
+      "name": "boolean membership and range",
+      "ast": {
+        "operator": "and",
+        "filters": [
+          {
+            "operator": "in",
+            "field": "kind",
+            "values": ["guide", "reference"]
+          },
+          {
+            "operator": "or",
+            "filters": [
+              {
+                "operator": "gte",
+                "field": "published_year",
+                "value": 2025
+              },
+              {
+                "operator": "not_in",
+                "field": "status",
+                "values": ["deleted", "hidden"]
+              }
+            ]
+          }
+        ]
+      },
+      "vector": {
+        "$and": [
+          {
+            "kind": {
+              "$in": ["guide", "reference"]
+            }
+          },
+          {
+            "$or": [
+              {
+                "published_year": {
+                  "$gte": 2025
+                }
+              },
+              {
+                "status": {
+                  "$nin": ["deleted", "hidden"]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "search": [
+        {
+          "in": {
+            "path": "kind",
+            "value": ["guide", "reference"]
+          }
+        },
+        {
+          "compound": {
+            "should": [
+              {
+                "range": {
+                  "path": "published_year",
+                  "gte": 2025
+                }
+              },
+              {
+                "compound": {
+                  "mustNot": [
+                    {
+                      "in": {
+                        "path": "status",
+                        "value": ["deleted", "hidden"]
+                      }
+                    }
+                  ]
+                }
+              }
+            ],
+            "minimumShouldMatch": 1
+          }
+        }
+      ]
+    }
+  ],
+  "filter_validation_cases": [
+    {
+      "name": "BSON int64 lower boundary",
+      "ast": {
+        "operator": "eq",
+        "field": "value",
+        "value": -9223372036854775808
+      },
+      "valid": true
+    },
+    {
+      "name": "BSON int64 upper boundary in membership",
+      "ast": {
+        "operator": "in",
+        "field": "value",
+        "values": [9223372036854775807]
+      },
+      "valid": true
+    },
+    {
+      "name": "integer below BSON int64",
+      "ast": {
+        "operator": "eq",
+        "field": "value",
+        "value": -9223372036854775809
+      },
+      "valid": false,
+      "error_contains": "BSON int64 range"
+    },
+    {
+      "name": "integer above BSON int64 in membership",
+      "ast": {
+        "operator": "in",
+        "field": "value",
+        "values": [9223372036854775808]
+      },
+      "valid": false,
+      "error_contains": "BSON int64 range"
+    },
+    {
+      "name": "range rejects boolean numeric semantics",
+      "ast": {
+        "operator": "gte",
+        "field": "value",
+        "value": true
+      },
+      "valid": false,
+      "error_contains": "numeric or datetime"
+    }
+  ],
+  "result": {
+    "input": {
+      "id": "doc-1",
+      "text": "MongoDB Search guide",
+      "source_name": "Search guide",
+      "source_url": "https://example.test/search",
+      "score": 0.82,
+      "metadata": {
+        "kind": "documentation"
+      },
+      "raw_document": {
+        "_id": "doc-1",
+        "content": "MongoDB Search guide",
+        "internal": "preserved"
+      }
+    },
+    "normalized": {
+      "id": "doc-1",
+      "text": "MongoDB Search guide",
+      "source_name": "Search guide",
+      "source_url": "https://example.test/search",
+      "score": 0.82,
+      "metadata": {
+        "kind": "documentation"
+      }
+    },
+    "citation": {
+      "type": "citation",
+      "title": "Search guide",
+      "url": "https://example.test/search",
+      "snippet": "MongoDB Search guide",
+      "additional_properties": {
+        "document_id": "doc-1",
+        "score": 0.82,
+        "metadata": {
+          "kind": "documentation"
+        }
+      }
+    }
+  },
+  "security_contract": {
+    "filter_placement": {
+      "vector_ann": "$vectorSearch.filter",
+      "vector_enn": "$vectorSearch.filter",
+      "full_text": "$search.compound.filter",
+      "hybrid_rrf": [
+        "$rankFusion.input.pipelines.vector.$vectorSearch.filter",
+        "$rankFusion.input.pipelines.text.$search.compound.filter"
+      ]
+    },
+    "runtime_operations": ["aggregate"],
+    "cancellation": "propagate",
+    "partial_filter_translation": "reject"
+  }
+}

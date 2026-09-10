@@ -1,0 +1,95 @@
+name: .NET release coordinator
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - dotnet/src/MongoDB.AgentFramework/MongoDB.AgentFramework.csproj
+  workflow_dispatch:
+    inputs:
+      confirm_release:
+        description: Type RELEASE to create the manifest tag and start the protected release chain
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dotnet-release-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  create-tag-and-dispatch:
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' && inputs.confirm_release == 'RELEASE'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - name: Checkout main with tags
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - name: Setup .NET for canonical NuGet version parsing
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
+        with:
+          dotnet-version: 10.0.x
+      - name: Validate main reachability and derive manifest tag
+        id: release
+        shell: pwsh
+        run: |
+          git fetch origin main --tags
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to fetch origin/main and tags.' }
+          $sha = '${{ github.sha }}'
+          $headSha = (git rev-parse HEAD).Trim()
+          if ($headSha -cne $sha) { throw "Checkout resolved '$headSha', expected workflow SHA '$sha'." }
+          git merge-base --is-ancestor $sha origin/main
+          if ($LASTEXITCODE -ne 0) { throw "Release commit $sha is not reachable from origin/main." }
+          . ./dotnet/scripts/ReleaseReadiness.ps1
+          [xml]$project = Get-Content dotnet/src/MongoDB.AgentFramework/MongoDB.AgentFramework.csproj -Raw
+          $version = [string]$project.SelectSingleNode('/Project/PropertyGroup/Version').InnerText
+          $canonical = Get-CanonicalNuGetVersion $version
+          $tag = Get-CanonicalDotNetReleaseTag $canonical
+          $existingTagSha = ''
+          git show-ref --verify --quiet "refs/tags/$tag"
+          if ($LASTEXITCODE -eq 0) {
+            $existingTagSha = (git rev-list -n 1 "refs/tags/$tag").Trim()
+          }
+          $disposition = Get-ReleaseTagDisposition -ExpectedSha $sha -ExistingTagSha $existingTagSha
+          if ($disposition -ceq 'conflict') {
+            throw "Immutable tag '$tag' targets '$existingTagSha', not exact release SHA '$sha'."
+          }
+          "tag=$tag" | Add-Content $env:GITHUB_OUTPUT
+          "sha=$sha" | Add-Content $env:GITHUB_OUTPUT
+          "disposition=$disposition" | Add-Content $env:GITHUB_OUTPUT
+      - name: Create and push annotated release tag
+        if: steps.release.outputs.disposition == 'create'
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$RELEASE_TAG" "${{ steps.release.outputs.sha }}" -m "Release MongoDB.AgentFramework ${RELEASE_TAG#dotnet-v}"
+          git push origin "refs/tags/$RELEASE_TAG"
+      - name: Accept existing immutable tag at exact release SHA
+        if: steps.release.outputs.disposition == 'already-exact'
+        run: echo "Tag ${{ steps.release.outputs.tag }} already targets exact SHA ${{ steps.release.outputs.sha }}; continuing idempotent dispatch."
+      - name: Dispatch credential-free release build for the immutable release SHA
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ steps.release.outputs.sha }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: >
+          gh workflow run dotnet-sbom-provenance.yml --ref "$RELEASE_TAG"
+          -f release_sha="$RELEASE_SHA" -f release_tag="$RELEASE_TAG"
+      - name: Explain non-recursive chain
+        run: >
+          echo "Created ${{ steps.release.outputs.tag }} and explicitly dispatched the SBOM workflow.
+          Tags created with GITHUB_TOKEN do not recursively trigger push workflows; workflow_dispatch is the
+          documented GITHUB_TOKEN exception and its completion starts the trusted workflow_run attestation chain."

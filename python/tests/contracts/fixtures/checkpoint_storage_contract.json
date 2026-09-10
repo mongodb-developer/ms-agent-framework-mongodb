@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "framework_serialization": "agent-framework-core/1:WorkflowCheckpoint.to_dict/v1",
+  "idempotency_hash_version": 2,
+  "canonical_mappings": {
+    "supported_type": "exact_builtin_dict_only",
+    "dict_order": "insensitive",
+    "dict_copyreg_registration": "ignored_and_verified",
+    "ordered_dict": "reject_with_serialization_error",
+    "allowlisted_mapping_subclass": "reject_with_serialization_error",
+    "instance_state_beyond_entries": "reject_with_serialization_error",
+    "unsupported_subclass": "reject_with_serialization_error"
+  },
+  "serialization_validation": {
+    "mapping_guard": "before_all_type_handlers",
+    "pickle_dispatch": "controlled_without_copyreg",
+    "copyreg_extension_registry": "recursive_reject_before_serialization",
+    "custom_pickle_hooks": "reject_before_execution",
+    "round_trip_load": "restricted_checkpoint_load_path",
+    "round_trip_canonical_match": "required_before_io"
+  },
+  "payload_versions": ["1.0"],
+  "collection_default": "workflow_checkpoints",
+  "scope_dimensions": ["tenant_id", "workflow_name", "session_id", "checkpoint_id"],
+  "ordering": ["sequence", "checkpoint_id"],
+  "pagination": {
+    "default_page_size": 100,
+    "maximum_page_size": 1000,
+    "cursor_version": 1,
+    "inherited_lists": "all_records_via_bounded_pages"
+  },
+  "indexes": [
+    {"name": "checkpoint_scope_identity", "unique": true},
+    {"name": "checkpoint_scope_sequence", "unique": true},
+    {"name": "checkpoint_scope_lineage", "unique": false},
+    {"name": "checkpoint_expiration", "unique": false},
+    {"name": "checkpoint_counter_expiration", "unique": false}
+  ],
+  "idempotency_cases": [
+    {"operation": "save", "payload": "same", "outcome": "idempotent"},
+    {"operation": "save", "payload": "different", "outcome": "conflict"}
+  ],
+  "retention": {
+    "ttl_is_eventual": true,
+    "lineage_gaps_are_valid": true,
+    "counter_expiration_is_refreshed": true,
+    "counter_expiration_update": "atomic_max",
+    "missing_counter_recovery": "atomic_max_of_counter_and_retained_sequence",
+    "permanent_checkpoint_disables_counter_expiration": true,
+    "ttl_deletion_order_dependency": false,
+    "authorized_clear_run_deletes_counter": true
+  }
+}
