@@ -1,0 +1,91 @@
+name: Create draft GitHub Release
+description: >-
+  Write an authorized-publication record (who released what, with SHA-256 of
+  every artifact), then create or update a draft GitHub Release for a pushed
+  tag and attach the distributions, their detached .sig signatures, and the
+  record. Requires release-setup to have run first. Mirrors the
+  authorized-pub action plus the draft-release step of
+  mongodb-labs/drivers-github-tools/python/post-publish@v3.
+
+inputs:
+  tag:
+    description: Git tag to release. It must already exist on origin unless dry_run is "true".
+    required: true
+  title:
+    description: Release title.
+    required: true
+  product_name:
+    description: Product name recorded in the authorized-publication record.
+    required: true
+  dist_path:
+    description: Directory holding the distribution files that were published.
+    required: true
+  token:
+    description: GitHub token with contents:write on this repository.
+    required: true
+  dry_run:
+    description: When "true", build the asset set and summary but do not create a release.
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Write authorized-publication record
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        PRODUCT_NAME: ${{ inputs.product_name }}
+        TAG: ${{ inputs.tag }}
+        DIST_PATH: ${{ inputs.dist_path }}
+      run: |
+        set -eu
+        : "${RELEASE_ASSETS:?run release-setup before create-draft-release}"
+        releaser="$(gh api "users/${GITHUB_ACTOR}" --jq '.name // .login')"
+        commit="$(git rev-parse HEAD 2>/dev/null || echo "$GITHUB_SHA")"
+        report="$RELEASE_ASSETS/authorized-publication.txt"
+        {
+          echo "Product: $PRODUCT_NAME"
+          echo "Version: $TAG"
+          echo "Commit: $commit"
+          echo "Releaser: $releaser"
+          echo "Build Source: GitHub Actions"
+          echo "Build Number: $GITHUB_RUN_ID"
+          for f in "$DIST_PATH"/*; do
+            [ -f "$f" ] || continue
+            echo "Filename: $(basename "$f")"
+            echo "Shasum: $(sha256sum "$f" | awk '{print $1}')"
+          done
+        } > "$report"
+        cat "$report"
+
+    - name: Create or update draft release
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        TAG: ${{ inputs.tag }}
+        TITLE: ${{ inputs.title }}
+        DIST_PATH: ${{ inputs.dist_path }}
+        DRY_RUN: ${{ inputs.dry_run }}
+      run: |
+        set -eu
+        if [ "$DRY_RUN" = "true" ]; then
+          {
+            echo "### Dry run: release $TAG not created"
+            echo '```'
+            ls -l "$RELEASE_ASSETS" "$DIST_PATH"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
+        fi
+
+        if ! gh release view "$TAG" > /dev/null 2>&1; then
+          gh release create "$TAG" --draft --verify-tag --title "$TITLE" \
+            --notes "Draft release for $TAG. Each .sig file is a detached, armored GPG signature over the artifact of the same name; see authorized-publication.txt for SHA-256 sums."
+        fi
+        gh release upload "$TAG" "$RELEASE_ASSETS"/* "$DIST_PATH"/* --clobber
+
+        {
+          echo "### $TITLE"
+          gh release view "$TAG" --json url,tagName,isDraft,assets \
+            --jq '"URL: \(.url)\nTag: \(.tagName)\nDraft: \(.isDraft)\nAssets:\n" + (.assets | map("- " + .name) | join("\n"))'
+        } >> "$GITHUB_STEP_SUMMARY"

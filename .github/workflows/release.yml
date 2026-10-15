@@ -1,0 +1,261 @@
+# Signed release pipeline
+#
+# Manual-only. Reads the version already committed in <PACKAGE_DIR>/pyproject.toml,
+# creates a GPG-signed tag with Garasign, builds sdist + wheel, publishes to PyPI
+# through OIDC trusted publishing (no stored token), GPG-signs the published
+# files, and opens a draft GitHub Release carrying the signatures.
+#
+# To reuse in another repository, change the three values under `env:` and
+# complete the setup in docs/release/signed-release-pipeline.md.
+#
+# Composite actions used (all under .github/actions/, mirrored from
+# mongodb-labs/drivers-github-tools@v3):
+#   release-setup        AWS OIDC -> ECR login -> Secrets Manager -> Garasign env
+#   garasign-git         run `git tag -s` inside the Garasign container
+#   sign-artifacts       detached .sig for every dist file
+#   create-draft-release authorized-publication record + draft release
+
+name: Signed release
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag, or SHA to release. Its pyproject.toml must already carry the release version.
+        default: main
+        type: string
+      dry_run:
+        description: Dry run - build, sign, and verify, but do not push a tag, upload to PyPI, or create a release.
+        default: true
+        type: boolean
+      publish_to_test_pypi:
+        description: Also upload to TestPyPI (requires a TestPyPI trusted publisher for this workflow).
+        default: false
+        type: boolean
+
+# Per-repository knobs.
+env:
+  PRODUCT_NAME: agent-framework-mongodb
+  PACKAGE_DIR: python
+  TAG_PREFIX: python-v
+  PYTHON_VERSION: "3.11"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: signed-release-${{ inputs.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash -eux {0}
+
+jobs:
+  prepare:
+    name: Resolve version and create signed tag
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      id-token: write # AWS OIDC for Garasign credentials
+      contents: write # push the release tag
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      sha: ${{ steps.version.outputs.sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+          persist-credentials: true # needed for the tag push below
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Read and validate the version in pyproject.toml
+        id: version
+        working-directory: ${{ env.PACKAGE_DIR }}
+        run: |
+          python -m pip install --disable-pip-version-check "packaging>=24,<26"
+          version="$(python - <<'PY'
+          import tomllib
+          from packaging.version import Version
+          with open("pyproject.toml", "rb") as f:
+              raw = tomllib.load(f)["project"]["version"]
+          parsed = Version(raw)
+          if str(parsed) != raw:
+              raise SystemExit(f"{raw!r} is not a canonical PEP 440 version")
+          print(raw)
+          PY
+          )"
+          {
+            echo "version=$version"
+            echo "tag=${TAG_PREFIX}${version}"
+            echo "sha=$(git rev-parse HEAD)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Refuse to move an existing tag
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          SHA: ${{ steps.version.outputs.sha }}
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" > /dev/null; then
+            remote="$(git ls-remote --tags origin "refs/tags/$TAG^{}" | cut -f1)"
+            [ -n "$remote" ] || remote="$(git ls-remote --tags origin "refs/tags/$TAG" | cut -f1)"
+            if [ "$remote" != "$SHA" ]; then
+              echo "::error::$TAG already exists at $remote, not $SHA. Bump the version instead of moving the tag."
+              exit 1
+            fi
+            echo "TAG_EXISTS=true" >> "$GITHUB_ENV"
+          fi
+
+      - uses: ./.github/actions/release-setup
+        with:
+          aws_role_arn: ${{ secrets.AWS_ROLE_ARN }}
+          aws_region: ${{ secrets.AWS_REGION }}
+          aws_secret_id: ${{ secrets.AWS_SECRET_ID }}
+
+      - name: Create signed annotated tag
+        if: env.TAG_EXISTS != 'true'
+        uses: ./.github/actions/garasign-git
+        with:
+          command: >-
+            git tag -a "${{ steps.version.outputs.tag }}"
+            -m "Release ${{ env.PRODUCT_NAME }} ${{ steps.version.outputs.version }}"
+            -s --local-user=${{ env.GPG_KEY_ID }}
+
+      - name: Verify the tag signature against the published public key
+        if: env.TAG_EXISTS != 'true' && env.GPG_PUBLIC_URL != ''
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          curl -fsSL "$GPG_PUBLIC_URL" | gpg --import
+          git verify-tag "$TAG"
+
+      - name: Push the tag
+        if: ${{ !inputs.dry_run && env.TAG_EXISTS != 'true' }}
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          git push origin "refs/tags/$TAG"
+          echo "Pushed signed tag $TAG" >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    name: Build distributions
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Build sdist and wheel
+        working-directory: ${{ env.PACKAGE_DIR }}
+        run: |
+          python -m pip install --disable-pip-version-check "build>=1.2,<2" "twine>=6.1,<7"
+          rm -rf dist
+          python -m build --outdir dist
+          python -m twine check dist/*
+
+      - name: Confirm every artifact carries the release version
+        working-directory: ${{ env.PACKAGE_DIR }}
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          for f in dist/*; do
+            case "$f" in
+              *"$VERSION"*) ;;
+              *) echo "::error::$f does not carry version $VERSION"; exit 1 ;;
+            esac
+          done
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dist-${{ github.run_id }}
+          path: ${{ env.PACKAGE_DIR }}/dist/*
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: Publish to PyPI through trusted publishing
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      id-token: write # mint the OIDC token PyPI exchanges for a short-lived upload token
+      contents: read
+      attestations: write # record build provenance
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: dist-${{ github.run_id }}
+          path: dist
+
+      - name: Publish to TestPyPI
+        if: inputs.publish_to_test_pypi
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          packages-dir: dist
+          skip-existing: true
+
+      - name: Publish to PyPI
+        if: ${{ !inputs.dry_run }}
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+        with:
+          packages-dir: dist
+
+      - name: Attest build provenance
+        if: ${{ !inputs.dry_run }}
+        uses: actions/attest-build-provenance@v4 # TODO pin to a full SHA before merging (repo policy)
+        with:
+          subject-path: dist/*
+
+      - name: Dry run summary
+        if: inputs.dry_run
+        run: echo "Dry run: skipped PyPI upload and provenance attestation" >> "$GITHUB_STEP_SUMMARY"
+
+  sign-and-release:
+    name: Sign distributions and draft GitHub Release
+    needs: [prepare, build, publish]
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      id-token: write # AWS OIDC for Garasign credentials
+      contents: write # create the draft release
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+
+      - uses: ./.github/actions/release-setup
+        with:
+          aws_role_arn: ${{ secrets.AWS_ROLE_ARN }}
+          aws_region: ${{ secrets.AWS_REGION }}
+          aws_secret_id: ${{ secrets.AWS_SECRET_ID }}
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: dist-${{ github.run_id }}
+          path: dist
+
+      - uses: ./.github/actions/sign-artifacts
+        with:
+          filenames: dist/*
+
+      - uses: ./.github/actions/create-draft-release
+        with:
+          tag: ${{ needs.prepare.outputs.tag }}
+          title: ${{ env.PRODUCT_NAME }} ${{ needs.prepare.outputs.version }}
+          product_name: ${{ env.PRODUCT_NAME }}
+          dist_path: dist
+          token: ${{ github.token }}
+          dry_run: ${{ inputs.dry_run }}

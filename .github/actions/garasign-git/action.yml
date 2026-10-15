@@ -1,0 +1,37 @@
+name: Run git inside the Garasign signing container
+description: >-
+  Run one git command inside the Garasign container with the team GPG key
+  loaded, so tags (and commits) can be created with -s / -S. Requires
+  release-setup to have run first. Mirrors
+  mongodb-labs/drivers-github-tools/git-sign@v3.
+
+inputs:
+  command:
+    description: The git command to run, as a single string.
+    required: true
+  ecr_registry:
+    description: ECR registry that hosts the Garasign images.
+    default: "901841024863.dkr.ecr.us-east-1.amazonaws.com"
+  ecr_repository:
+    description: Garasign git image repository.
+    default: release-infrastructure/garasign-git
+
+runs:
+  using: composite
+  steps:
+    - name: Run signed git command
+      shell: bash
+      env:
+        ECR_REGISTRY: ${{ inputs.ecr_registry }}
+        ECR_REPOSITORY: ${{ inputs.ecr_repository }}
+        COMMAND: ${{ inputs.command }}
+      run: |
+        set -eu
+        : "${GARASIGN_ENVFILE:?run release-setup before garasign-git}"
+        WORKDIR=/home/git-checkout
+        docker run --rm \
+          --env-file="$GARASIGN_ENVFILE" \
+          -v "$(pwd):$WORKDIR" \
+          -w "$WORKDIR" \
+          "${ECR_REGISTRY}/${ECR_REPOSITORY}" \
+          /bin/bash -c "git config --global --add safe.directory $WORKDIR && gpgloader && ${COMMAND}"
