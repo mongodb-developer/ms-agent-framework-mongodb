@@ -124,6 +124,10 @@ Run against a real MongoDB deployment with required Search capabilities:
 Tests requiring external credentials must skip cleanly when credentials are absent. Unit tests must never require
 MongoDB or network access.
 
+The Python [Atlas Agent Engine managed memory](features/atlas-agent-engine-memory.md) contract
+uses the official SDK over mocked HTTP. Its separate hosted integration gate requires a
+disposable Atlas Agent Engine project, not a MongoDB connection string.
+
 ### Cross-language contract fixtures
 
 The repository MUST maintain language-neutral fixture descriptions for:

@@ -138,6 +138,10 @@ specification. The following Neo4j Agent Memory features are out of scope:
 MongoDB-specific long-term fact memory is out of scope. Adding it requires a new module, data model, and ADR; it MUST
 NOT be smuggled into semantic chat-history Memory or read-only RAG.
 
+The separate [Python Atlas Agent Engine managed memory adapter](../features/atlas-agent-engine-memory.md) calls a
+service that can compute and store its own memories. It does not implement fact extraction, consolidation, or a
+storage schema in this repository, and it does not change the direct MongoDB Memory contract.
+
 ### Reference revision
 
 Initial design comparison used Neo4j GraphRAG repository revision

@@ -21,6 +21,13 @@ memory = MongoDBMemoryContextProvider(
 await memory.ensure_vector_search_index(wait_until_ready=True)
 ```
 
+### Python Atlas Agent Engine managed memory
+
+[`AtlasAgentEngineMemoryContextProvider`](features/atlas-agent-engine-memory.md) is a separate
+`ContextProvider` that takes a caller-owned Atlas Agent Engine SDK `Memory` client and an explicit
+user ID. Register it through `Agent(..., context_providers=[...])`, optionally alongside the
+direct MongoDB provider. This preview adapter has no .NET equivalent.
+
 ### Python RAG
 
 ```python

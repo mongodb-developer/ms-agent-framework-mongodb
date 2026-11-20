@@ -33,6 +33,11 @@ public external release so the interface remains unambiguous after RAG is added.
 already been published and used, retain `MongoDBContextProvider` as a deprecated alias for one documented transition
 period.
 
+The Python-only [Atlas Agent Engine managed memory adapter](features/atlas-agent-engine-memory.md)
+exports `AtlasAgentEngineMemoryContextProvider` from `agent_framework_mongodb`. Its
+`atlas-agent-engine` extra installs the standalone Memory SDK on Python 3.11 or later;
+the base package and other providers do not require the SDK.
+
 ### .NET
 
 - NuGet package ID: `MongoDB.AgentFramework`.

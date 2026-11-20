@@ -30,6 +30,7 @@ but do not override those specifications.
 | [0016](0016-keep-index-facades-in-runtime-packages.md) | Keep explicit index facades in runtime packages | Proposed |
 | [0017](0017-use-standard-telemetry-without-unapproved-markers.md) | Use standard telemetry without unapproved markers | Proposed |
 | [0018](0018-version-gate-persistence-contracts.md) | Version-gate persistence contracts | Proposed |
+| [0019](0019-separate-atlas-agent-engine-managed-memory.md) | Separate Atlas Agent Engine managed memory from direct MongoDB memory | Proposed |
 
 External release prerequisites are tracked in the [resolved implementation decisions](../spec/project/scope.md#resolved-implementation-decisions) and Foundation gate.
 

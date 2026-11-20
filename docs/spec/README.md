@@ -17,6 +17,7 @@ This directory is the canonical implementation specification for MongoDB integra
 - [System architecture](architecture/system.md)
 - [Packages and namespaces](packages.md)
 - [Memory](features/memory.md)
+- [Atlas Agent Engine managed memory (Python preview)](features/atlas-agent-engine-memory.md)
 - [Chat History](features/chat-history.md)
 - [RAG](features/rag.md)
 - [Index management](features/index-management.md)

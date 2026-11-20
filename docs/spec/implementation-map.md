@@ -37,4 +37,10 @@ Foundation verification inputs and release prerequisites. They MUST be recorded 
 contributors MUST NOT invent them. Their absence does not block feature coding after the relevant public framework
 contract has been verified, but it blocks the Foundation gate and package publication.
 
+## Additive Python preview slice
+
+| Slice | Prerequisite | Specification and decision | Public contract | Required validation |
+| --- | --- | --- | --- | --- |
+| Atlas Agent Engine managed memory | Memory Python | [Managed memory](features/atlas-agent-engine-memory.md), [ADR 0019](../decisions/0019-separate-atlas-agent-engine-managed-memory.md) | `AtlasAgentEngineMemoryContextProvider(ContextProvider)` | Context hooks, SDK contract, optional install, and credentialed hosted round trip |
+
 [Back to the specification index](README.md)
