@@ -52,3 +52,11 @@ write opt-in, replay exclusion, stable keys, errors, and cancellation without ne
 Run the SDK contract test with the extra installed:
 `python -m pytest -q tests/contracts/test_atlas_agent_engine_memory_contract.py`. It invokes a
 real Agent Framework agent and the official SDK over mock HTTP, without Atlas credentials.
+
+Run `python -m pytest -m integration_atlas_agent_engine` only against a disposable project.
+Configure its Memory runtime for STM with durable extraction disabled so the same user's
+cross-session recall cannot return extracted versions of the fixture. Set
+`ATLAS_AGENT_ENGINE_TEST_PROJECT_ID`, `AGENTIC_MEMORY_SERVICE_ACCOUNT_TOKEN`, and
+`ATLAS_AGENT_ENGINE_TEST_DISPOSABLE=1` in the local process. The test stores uniquely prefixed
+synthetic turns; dispose of the dedicated project after testing. It never issues deletion calls.
+No hosted result is implied when skipped.
