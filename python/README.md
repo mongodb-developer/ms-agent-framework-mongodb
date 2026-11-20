@@ -43,6 +43,7 @@ release-tested.
 | Feature | Preserves | Does not replace | Sample |
 | --- | --- | --- | --- |
 | Memory | scoped semantic conversation recall | exact replay or authoritative knowledge | [`memory_quickstart.py`](samples/memory_quickstart.py) |
+| Atlas Agent Engine Memory (preview) | managed private recall and opt-in turn recording | direct MongoDB Memory, exact history, or Agent Engine deployment | [Managed memory setup](#atlas-agent-engine-managed-memory) |
 | Chat History | exact ordered supported messages | semantic recall or complete session state | [`history_quickstart.py`](samples/history_quickstart.py) |
 | RAG | attributed read-only knowledge results | conversation learning or ingestion | [Vector](samples/rag_vector_quickstart.py), [full text](samples/rag_full_text_quickstart.py), [hybrid](samples/rag_hybrid_quickstart.py) |
 | Session Store | complete versioned `AgentSession` snapshots | transcript queries or workflow lineage | [`session_persistence.py`](samples/session_persistence.py) |
@@ -63,7 +64,7 @@ deployment and least-privilege credentials.
 
 ## Environment and privileges
 
-All samples require `MONGODB_URI` (except ingestion, which uses
+MongoDB-backed samples require `MONGODB_URI` (except ingestion, which uses
 `MONGODB_INGESTION_URI`), `MONGODB_DATABASE`, and the feature-specific variables
 listed in [`samples/README.md`](samples/README.md). Missing configuration is
 reported before network access. Never commit connection strings.
@@ -76,6 +77,48 @@ Use separate identities:
 
 Runtime RAG is read-only. Public filters are typed and operator-limited; no
 model controls BSON, MongoDB field names, operators, index names, or pipelines.
+
+## Atlas Agent Engine managed memory
+
+This Python-only preview adapter uses the existing Microsoft Agent Framework
+`context_providers` argument. It does not require LangGraph or Google ADK,
+does not deploy your agent to Atlas Agent Engine, and does not replace direct
+MongoDB Memory. Use Python 3.11+ and install `agent-framework-mongodb[atlas-agent-engine]`
+(or `python -m pip install -e ".[atlas-agent-engine]"` from this directory).
+The base package still supports Python 3.10.
+
+```python
+import os
+
+from agent_framework import Agent
+from agent_engine_sdk_memory import Memory
+from agent_framework_mongodb.atlas_agent_engine_memory import AtlasAgentEngineMemoryContextProvider
+
+with Memory(
+    service_account_token=os.environ["AGENTIC_MEMORY_SERVICE_ACCOUNT_TOKEN"],
+    project_id=os.environ["AGENTIC_MEMORY_PROJECT_ID"],
+) as memory:
+    provider = AtlasAgentEngineMemoryContextProvider(memory, user_id=authenticated_user_id)
+    agent = Agent(client=chat_client, context_providers=[provider])
+    response = await agent.run("What did we discuss earlier?")
+```
+
+Use an authenticated application user ID, not text supplied by a model.
+Recall sends the current text query to the hosted service and retrieves private
+semantic and episodic memory. Set `include_short_term=True` to include recent
+turns from the current Agent Framework session. Set `record_turns=True` to
+send new plain-text user and assistant messages to Atlas; recording is off by
+default. Writes require an explicit session and stable message IDs or a stable
+framework response ID. Use caller-supplied message IDs when the application
+retries a logical run and the model could return a different response ID.
+Atlas may extract durable memories from those turns according to your project
+configuration. If both managed and direct MongoDB writers are enabled,
+conversation data is stored in both systems.
+
+Provision memory and manage retention/deletion separately in Atlas. Use a
+service-account access token and a provisioned test project, not `MONGODB_URI`.
+See [the developer guide](../docs/development/memory/python-atlas-agent-engine-memory.md)
+and the [SDK documentation](https://www.mongodb.com/docs/agentengine/sdk/python/packages/agent-engine-sdk-memory/).
 
 ## Index provisioning
 

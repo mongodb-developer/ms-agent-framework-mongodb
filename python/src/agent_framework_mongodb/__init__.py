@@ -2,6 +2,7 @@
 
 from importlib.metadata import version as _distribution_version
 
+from .atlas_agent_engine_memory import AtlasAgentEngineMemoryContextProvider
 from .checkpointing import (
     MongoDBCheckpointClearResult,
     MongoDBCheckpointNotFoundError,
@@ -67,6 +68,7 @@ __version__ = _distribution_version("agent-framework-mongodb")
 
 __all__ = [
     "AndFilter",
+    "AtlasAgentEngineMemoryContextProvider",
     "EqualFilter",
     "GreaterThanFilter",
     "GreaterThanOrEqualFilter",

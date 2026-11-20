@@ -25,6 +25,7 @@ with the same name.
 | Capability | Choose it for | Python sample |
 | --- | --- | --- |
 | Memory | scoped semantic recall from prior conversation | [Memory quickstart](python/samples/memory_quickstart.py) |
+| Atlas Agent Engine Memory (preview) | opt-in hosted managed memory alongside direct MongoDB Memory | [Python setup](python/README.md#atlas-agent-engine-managed-memory) |
 | Chat History | exact ordered replay of supported messages | [History quickstart](python/samples/history_quickstart.py) |
 | RAG | read-only retrieval from pre-ingested knowledge | [Vector](python/samples/rag_vector_quickstart.py), [full text](python/samples/rag_full_text_quickstart.py), [hybrid](python/samples/rag_hybrid_quickstart.py) |
 | Session Store | complete Agent Framework session snapshots | [Session persistence](python/samples/session_persistence.py) |

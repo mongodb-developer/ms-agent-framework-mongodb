@@ -18,6 +18,7 @@ This documentation explains the implemented system at the code level. The
 ## Memory
 
 - [Python Memory implementation](memory/python-memory.md)
+- [Python Atlas Agent Engine managed memory](memory/python-atlas-agent-engine-memory.md)
 - [.NET Memory implementation](memory/dotnet-memory.md)
 
 ## Chat History

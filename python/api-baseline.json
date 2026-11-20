@@ -11,6 +11,19 @@
         }
       }
     },
+    "AtlasAgentEngineMemoryContextProvider": {
+      "constructor": "(memory: 'object', *, user_id: 'str', source_id: 'str' = 'atlas-agent-engine-memory', record_turns: 'bool' = False, include_short_term: 'bool' = False, max_tokens: 'int' = 2048, persistence_fail_fast: 'bool' = False) -> 'None'",
+      "members": {
+        "after_run": {
+          "kind": "method",
+          "signature": "(self, *, agent: 'SupportsAgentRun', session: 'AgentSession', context: 'SessionContext', state: 'dict[str, Any]') -> 'None'"
+        },
+        "before_run": {
+          "kind": "method",
+          "signature": "(self, *, agent: 'SupportsAgentRun', session: 'AgentSession', context: 'SessionContext', state: 'dict[str, Any]') -> 'None'"
+        }
+      }
+    },
     "EqualFilter": {
       "constructor": "(field: 'str', value: 'FilterScalar') -> None",
       "members": {
@@ -733,6 +746,7 @@
   },
   "exports": [
     "AndFilter",
+    "AtlasAgentEngineMemoryContextProvider",
     "EqualFilter",
     "GreaterThanFilter",
     "GreaterThanOrEqualFilter",
